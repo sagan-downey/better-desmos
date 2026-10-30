@@ -123,7 +123,6 @@ function draw(): void {
   const width = bounds.width;
   const height = bounds.height;
   drawGrid(width, height);
-  const originX = width / 2 - centerX * scale;
   const originY = height / 2 + centerY * scale;
 
   for (const expression of expressions) {
@@ -225,7 +224,7 @@ function addExpression(text = ""): void {
   });
   renderExpressions();
   draw();
-  expressionList.querySelector<HTMLInputElement>("input:last-of-type")?.focus();
+  expressionList.lastElementChild?.querySelector<HTMLInputElement>("input")?.focus();
 }
 
 document.querySelector("#add-expression")!.addEventListener("click", () => addExpression());
