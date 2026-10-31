@@ -8,6 +8,8 @@ import {
   fitSineRegression,
   fitTangentRegression,
   compileColorExpression,
+  hexToHsv,
+  hsvToHex,
   FAST_MODE_PRECISION_DIGITS,
   getPrecisionDigits,
   setPrecisionDigits,
@@ -23,29 +25,31 @@ import "./style.css";
 
 type CompiledGraph = GraphExpression;
 type ColorEvaluator = (x: number, y: number) => number;
-type CompiledRGB = [
+type CompiledChannels = [
   ColorEvaluator | undefined,
   ColorEvaluator | undefined,
   ColorEvaluator | undefined,
 ];
 
-interface RGBFormulas {
-  red: string;
-  green: string;
-  blue: string;
+interface HSVFormulas {
+  hue: string;
+  saturation: string;
+  value: string;
 }
 
 interface Expression {
   id: number;
   text: string;
   color: string;
+  lineWidth?: number;
+  opacity?: number;
   folderId?: number;
   note?: string;
   hidden?: boolean;
-  rgb?: RGBFormulas;
-  compiledRgb?: CompiledRGB;
-  compiledRgbKey?: string;
-  rgbError?: string;
+  hsv?: HSVFormulas;
+  compiledHsv?: CompiledChannels;
+  compiledHsvKey?: string;
+  colorError?: string;
   parsedText?: string;
   compiledMode?: "precise" | "desmos";
   compiled?: CompiledGraph;
@@ -151,9 +155,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isRGBFormulas(value: unknown): value is RGBFormulas {
+function isHSVFormulas(value: unknown): value is HSVFormulas {
   return isRecord(value) &&
-    ["red", "green", "blue"].every((channel) =>
+    ["hue", "saturation", "value"].every((channel) =>
       typeof value[channel] === "string" && value[channel].length <= 512);
 }
 
@@ -173,28 +177,36 @@ function parseProjectState(text: string): ProjectState {
     throw new Error("Project file has an invalid or unsupported structure.");
   }
   const parsedExpressions = value.expressions.map((item): Expression => {
-    const rgb = isRecord(item) ? item.rgb : undefined;
+    const hsv = isRecord(item) ? item.hsv : undefined;
     if (!isRecord(item) || !Number.isSafeInteger(item.id) || Number(item.id) < 1 ||
         typeof item.text !== "string" ||
         item.text.length > 512 || typeof item.color !== "string" ||
         !/^#[\da-f]{6}$/i.test(item.color) ||
+        (item.lineWidth !== undefined &&
+          (typeof item.lineWidth !== "number" || !Number.isFinite(item.lineWidth) ||
+            item.lineWidth < 1 || item.lineWidth > 10)) ||
+        (item.opacity !== undefined &&
+          (typeof item.opacity !== "number" || !Number.isFinite(item.opacity) ||
+            item.opacity < 0 || item.opacity > 1)) ||
         (item.folderId !== undefined && !Number.isInteger(item.folderId)) ||
         (item.note !== undefined && (typeof item.note !== "string" || item.note.length > 10_000)) ||
         (item.hidden !== undefined && typeof item.hidden !== "boolean") ||
-        (rgb !== undefined && !isRGBFormulas(rgb))) {
+        (hsv !== undefined && !isHSVFormulas(hsv))) {
       throw new Error("Project contains an invalid expression.");
     }
     return {
       id: item.id as number,
       text: item.text,
       color: item.color,
+      lineWidth: item.lineWidth === undefined ? 2 : item.lineWidth as number,
+      opacity: item.opacity === undefined ? 1 : item.opacity as number,
       folderId: item.folderId as number | undefined,
       note: item.note as string | undefined,
       hidden: item.hidden as boolean | undefined,
-      rgb: rgb === undefined ? undefined : {
-        red: rgb.red,
-        green: rgb.green,
-        blue: rgb.blue,
+      hsv: hsv === undefined ? undefined : {
+        hue: hsv.hue,
+        saturation: hsv.saturation,
+        value: hsv.value,
       },
     };
   });
@@ -353,7 +365,7 @@ let hoverCurves: CurveGeometry[] = [];
 const app = document.querySelector<HTMLDivElement>("#app")!;
 app.innerHTML = `
   <header class="topbar">
-    <a class="brand" href="#" aria-label="Better Desmos 1.3 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">1.3</span></a>
+    <a class="brand" href="#" aria-label="Better Desmos 1.4 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">1.4</span></a>
     <div class="top-note"><span class="status-dot"></span><span id="mode-note">Exact where possible · configurable precision</span></div>
   </header>
   <main class="workspace">
@@ -519,54 +531,51 @@ function drawGrid(width: number, height: number): void {
   }
 }
 
-function compileRGB(expression: Expression): ((x: number, y: number) => string) | undefined {
-  const formulas = expression.rgb;
-  if (!formulas) {
-    expression.rgbError = undefined;
-    return undefined;
-  }
-  const key = `${graphMode}:${formulas.red}\u0000${formulas.green}\u0000${formulas.blue}`;
-  if (expression.compiledRgbKey !== key) {
-    expression.compiledRgbKey = key;
-    expression.compiledRgb = undefined;
-    expression.rgbError = undefined;
-    try {
-      expression.compiledRgb = [
-        formulas.red.trim()
-          ? compileColorExpression(formulas.red, sliderValues, graphMode === "desmos")
-          : undefined,
-        formulas.green.trim()
-          ? compileColorExpression(formulas.green, sliderValues, graphMode === "desmos")
-          : undefined,
-        formulas.blue.trim()
-          ? compileColorExpression(formulas.blue, sliderValues, graphMode === "desmos")
-          : undefined,
-      ];
-    } catch (reason) {
-      expression.rgbError = reason instanceof Error ? reason.message : "Invalid RGB formula";
+function compileSpatialColor(expression: Expression): ((x: number, y: number) => string) | undefined {
+  const hsv = expression.hsv;
+  if (hsv) {
+    const key = `${graphMode}:${hsv.hue}\u0000${hsv.saturation}\u0000${hsv.value}`;
+    if (expression.compiledHsvKey !== key) {
+      expression.compiledHsvKey = key;
+      expression.compiledHsv = undefined;
+      expression.colorError = undefined;
+      try {
+        expression.compiledHsv = [
+          hsv.hue.trim()
+            ? compileColorExpression(hsv.hue, sliderValues, graphMode === "desmos")
+            : undefined,
+          hsv.saturation.trim()
+            ? compileColorExpression(hsv.saturation, sliderValues, graphMode === "desmos")
+            : undefined,
+          hsv.value.trim()
+            ? compileColorExpression(hsv.value, sliderValues, graphMode === "desmos")
+            : undefined,
+        ];
+      } catch (reason) {
+        expression.colorError = reason instanceof Error ? reason.message : "Invalid HSV formula";
+      }
     }
+    if (!expression.compiledHsv) return undefined;
+    const base = hexToHsv(expression.color);
+    return (x, y) => {
+      try {
+        const values = expression.compiledHsv!.map((evaluate, index) => {
+          const value = evaluate ? evaluate(x, y) : base[index]!;
+          if (!Number.isFinite(value)) {
+            throw new Error("HSV formula results must be finite numbers");
+          }
+          return value;
+        });
+        return hsvToHex(values[0]!, values[1]!, values[2]!);
+      } catch (reason) {
+        expression.colorError = reason instanceof Error ? reason.message : "Could not evaluate HSV formula";
+        return expression.color;
+      }
+    };
   }
-  if (!expression.compiledRgb) return undefined;
-  const base = [
-    Number.parseInt(expression.color.slice(1, 3), 16),
-    Number.parseInt(expression.color.slice(3, 5), 16),
-    Number.parseInt(expression.color.slice(5, 7), 16),
-  ];
-  return (x, y) => {
-    try {
-      const values = expression.compiledRgb!.map((evaluate, index) => {
-        const value = evaluate ? evaluate(x, y) : base[index]!;
-        if (!Number.isFinite(value)) {
-          throw new Error("RGB channel results must be finite numbers from 0 to 255");
-        }
-        return Math.round(Math.min(255, Math.max(0, value)));
-      });
-      return `#${values.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
-    } catch (reason) {
-      expression.rgbError = reason instanceof Error ? reason.message : "Could not evaluate RGB formula";
-      return expression.color;
-    }
-  };
+
+  expression.colorError = undefined;
+  return undefined;
 }
 
 function strokeColoredSegments(
@@ -574,6 +583,8 @@ function strokeColoredSegments(
   colorAt: (x: number, y: number) => string,
   width: number,
   height: number,
+  lineWidth: number,
+  opacity: number,
 ): void {
   const paths = new Map<string, number[]>();
   for (let index = 0; index < geometry.segments.length; index += 4) {
@@ -594,7 +605,8 @@ function strokeColoredSegments(
     paths.set(color, segments);
   }
   context.save();
-  context.lineWidth = 2;
+  context.globalAlpha = opacity;
+  context.lineWidth = lineWidth;
   context.lineCap = "round";
   for (const [color, segments] of paths) {
     context.beginPath();
@@ -615,6 +627,8 @@ function drawImplicit(
   id: string,
   color: string,
   colorAt?: (x: number, y: number) => string,
+  lineWidth = 2,
+  opacity = 1,
 ): CurveGeometry {
   const geometry: CurveGeometry = { id, color, segments: [], colorAt };
   const addSegment = (x1: number, y1: number, x2: number, y2: number) => {
@@ -763,11 +777,14 @@ function drawImplicit(
     }
   }
   if (colorAt) {
-    strokeColoredSegments(geometry, colorAt, width, height);
+    strokeColoredSegments(geometry, colorAt, width, height, lineWidth, opacity);
   } else {
+    context.save();
+    context.globalAlpha = opacity;
     context.strokeStyle = color;
-    context.lineWidth = 2;
+    context.lineWidth = lineWidth;
     context.stroke();
+    context.restore();
   }
   return geometry;
 }
@@ -811,13 +828,17 @@ function drawExplicitCurve(
   width: number,
   height: number,
   colorAt?: (x: number, y: number) => string,
+  lineWidth = 2,
+  opacity = 1,
 ): ExplicitCurveData {
   const samples: GraphSample[] = [];
   const geometry: ExplicitCurveData = { id, color, samples, segments: [], colorAt };
   const originY = height / 2 + centerY * scale;
+  context.save();
+  context.globalAlpha = opacity;
   if (!colorAt) {
     context.strokeStyle = color;
-    context.lineWidth = 2;
+    context.lineWidth = lineWidth;
     context.beginPath();
   }
   let previousY: number | undefined;
@@ -855,10 +876,11 @@ function drawExplicitCurve(
     }
   }
   if (colorAt) {
-    strokeColoredSegments(geometry, colorAt, width, height);
+    strokeColoredSegments(geometry, colorAt, width, height, lineWidth, opacity);
   } else {
     context.stroke();
   }
+  context.restore();
   return geometry;
 }
 
@@ -1337,13 +1359,17 @@ function drawParametricCurve(
   width: number,
   height: number,
   colorAt?: (x: number, y: number) => string,
+  lineWidth = 2,
+  opacity = 1,
 ): ExplicitCurveData {
   const samples: GraphSample[] = [];
   const geometry: ExplicitCurveData = { id, color, samples, segments: [], colorAt };
   const count = Math.max(200, Math.ceil(width / graphSettings.explicitSampleSpacing) * 2);
+  context.save();
+  context.globalAlpha = opacity;
   if (!colorAt) {
     context.strokeStyle = color;
-    context.lineWidth = 2;
+    context.lineWidth = lineWidth;
     context.beginPath();
   }
   let previous: GraphSample | undefined;
@@ -1376,10 +1402,11 @@ function drawParametricCurve(
     }
   }
   if (colorAt) {
-    strokeColoredSegments(geometry, colorAt, width, height);
+    strokeColoredSegments(geometry, colorAt, width, height, lineWidth, opacity);
   } else {
     context.stroke();
   }
+  context.restore();
   return geometry;
 }
 
@@ -1391,10 +1418,12 @@ function drawInequality(
   width: number,
   height: number,
   colorAt?: (x: number, y: number) => string,
+  lineWidth = 2,
+  opacity = 1,
 ): CurveGeometry {
   const cellSize = 5;
   context.save();
-  context.globalAlpha = 0.18;
+  context.globalAlpha = 0.18 * opacity;
   for (let screenY = 0; screenY < height; screenY += cellSize) {
     const y = (height / 2 - (screenY + cellSize / 2)) / scale + centerY;
     for (let screenX = 0; screenX < width; screenX += cellSize) {
@@ -1418,7 +1447,7 @@ function drawInequality(
     }
   }
   context.restore();
-  return drawImplicit(evaluate, width, height, id, color, colorAt);
+  return drawImplicit(evaluate, width, height, id, color, colorAt, lineWidth, opacity);
 }
 
 function draw(): void {
@@ -1439,11 +1468,13 @@ function draw(): void {
   const candidates: PointCandidate[] = [];
   const explicitCurves: ExplicitCurveData[] = [];
   const implicitCurves: CurveGeometry[] = [];
-  const listPoints: Array<{ x: number; y: number; color: string; graphId: string }> = [];
-  for (const expression of expressions) {
-    if (expression.compiledRgb) expression.rgbError = undefined;
-  }
-
+  const listPoints: Array<{
+    x: number;
+    y: number;
+    color: string;
+    graphId: string;
+    opacity: number;
+  }> = [];
   for (const expression of expressions) {
     if (expression.hidden) continue;
     const graph = getCompiled(expression);
@@ -1453,9 +1484,13 @@ function draw(): void {
     const graphId = graph.kind === "implicit"
       ? `implicit-${expression.id}`
       : `expression-${expression.id}`;
-    const colorAt = compileRGB(expression);
+    const colorAt = compileSpatialColor(expression);
+    const lineWidth = expression.lineWidth ?? 2;
+    const opacity = expression.opacity ?? 1;
     if (graph.kind === "implicit") {
-      const curve = drawImplicit(graph.evaluate, width, height, graphId, expression.color, colorAt);
+      const curve = drawImplicit(
+        graph.evaluate, width, height, graphId, expression.color, colorAt, lineWidth, opacity,
+      );
       implicitCurves.push(curve);
       detectImplicitAxisIntercepts(curve, graph.evaluate, candidates, width, height);
       continue;
@@ -1463,13 +1498,16 @@ function draw(): void {
     if (graph.kind === "inequality") {
       const curve = drawInequality(
         graph.evaluate, graph.relation, graphId, expression.color, width, height, colorAt,
+        lineWidth, opacity,
       );
       implicitCurves.push(curve);
       continue;
     }
     if (graph.kind === "parametric") {
       const curve = drawParametricCurve(
-        graphId, expression.color, graph.evaluate, graph.start, graph.end, width, height, colorAt,
+        graphId, expression.color, graph.evaluate, graph.start, graph.end, width, height,
+        colorAt,
+        lineWidth, opacity,
       );
       explicitCurves.push(curve);
       continue;
@@ -1493,7 +1531,7 @@ function draw(): void {
           const screenX = width / 2 + (x - centerX) * scale;
           const screenY = height / 2 - (y - centerY) * scale;
           const pointColor = colorAt?.(x, y) ?? expression.color;
-          listPoints.push({ x, y, color: pointColor, graphId });
+          listPoints.push({ x, y, color: pointColor, graphId, opacity });
           if (screenX >= 0 && screenX <= width && screenY >= 0 && screenY <= height) {
             addPointCandidate(
               candidates, x, y, "list point", [graphId], pointColor, width, height,
@@ -1516,7 +1554,9 @@ function draw(): void {
       const result = graph.evaluate(x);
       return typeof result === "number" ? result : result.value.toNumber();
     };
-    const curve = drawExplicitCurve(graphId, expression.color, evaluate, width, height, colorAt);
+    const curve = drawExplicitCurve(
+      graphId, expression.color, evaluate, width, height, colorAt, lineWidth, opacity,
+    );
     explicitCurves.push(curve);
     detectExplicitPoints(curve, evaluate, candidates, width, height);
   }
@@ -1560,6 +1600,8 @@ function draw(): void {
     const screenX = width / 2 + (point.x - centerX) * scale;
     const screenY = height / 2 - (point.y - centerY) * scale;
     if (screenX < -6 || screenX > width + 6 || screenY < -6 || screenY > height + 6) continue;
+    context.save();
+    context.globalAlpha = point.opacity;
     context.beginPath();
     context.arc(screenX, screenY, 4, 0, Math.PI * 2);
     context.fillStyle = point.color;
@@ -1567,6 +1609,7 @@ function draw(): void {
     context.strokeStyle = "#ffffff";
     context.lineWidth = 1.5;
     context.stroke();
+    context.restore();
   }
   for (const table of tables) {
     const values = tableValues(table);
@@ -1588,14 +1631,14 @@ function draw(): void {
   hoverCandidates = candidates;
   hoverCurves = [...explicitCurves, ...implicitCurves];
   for (const expression of expressions) {
-    const rgbError = expressionList.querySelector<HTMLParagraphElement>(
-      `[data-expression-id="${expression.id}"] .rgb-error`,
+    const colorError = expressionList.querySelector<HTMLParagraphElement>(
+      `[data-expression-id="${expression.id}"] .color-formula-error`,
     );
-    if (rgbError) rgbError.textContent = expression.rgbError ?? "";
+    if (colorError) colorError.textContent = expression.colorError ?? "";
     for (const channelInput of expressionList.querySelectorAll<HTMLInputElement>(
-      `[data-expression-id="${expression.id}"] .rgb-fields input`,
+      `[data-expression-id="${expression.id}"] .hsv-fields input`,
     )) {
-      channelInput.setAttribute("aria-invalid", String(Boolean(expression.rgbError)));
+      channelInput.setAttribute("aria-invalid", String(Boolean(expression.colorError)));
     }
   }
   drawHoverOverlay();
@@ -1628,8 +1671,9 @@ function sliderNames(): string[] {
     "list", "sum", "product", "min", "max", "mean", "median", "variance", "stdev", "factorial",
   ]);
   return [...new Set(expressions.flatMap((expression) =>
-    [expression.text, expression.rgb?.red ?? "", expression.rgb?.green ?? "",
-      expression.rgb?.blue ?? ""].flatMap((source) => source.match(/[a-zA-Z]+/g) ?? [])
+    [expression.text, expression.hsv?.hue ?? "",
+      expression.hsv?.saturation ?? "", expression.hsv?.value ?? ""]
+      .flatMap((source) => source.match(/[a-zA-Z]+/g) ?? [])
   ).filter((name) =>
     name.length === 1 && !reserved.has(name.toLowerCase())))].sort();
 }
@@ -1823,10 +1867,22 @@ function renderExpressions(): void {
     const row = document.createElement("div");
     row.className = `expression-row${expression.hidden ? " expression-hidden" : ""}`;
     row.dataset.expressionId = String(expression.id);
-    const marker = document.createElement("span");
-    marker.className = "expression-marker";
+    const appearanceDetails = document.createElement("details");
+    appearanceDetails.className = "expression-appearance";
+    appearanceDetails.id = `expression-appearance-${expression.id}`;
+    const marker = document.createElement("button");
+    marker.type = "button";
+    const hasSpatialColor = expression.hsv &&
+      Object.values(expression.hsv).some((formula) => formula.trim());
+    marker.className = `expression-marker${hasSpatialColor ? " expression-marker-spatial" : ""}`;
     marker.style.backgroundColor = expression.color;
-    marker.setAttribute("aria-hidden", "true");
+    marker.setAttribute("aria-label", `Expression ${index + 1} appearance settings`);
+    marker.setAttribute("aria-controls", appearanceDetails.id);
+    marker.setAttribute("aria-expanded", "false");
+    marker.addEventListener("click", () => {
+      appearanceDetails.open = !appearanceDetails.open;
+      marker.setAttribute("aria-expanded", String(appearanceDetails.open));
+    });
     const colorPicker = document.createElement("input");
     colorPicker.type = "color";
     colorPicker.className = "expression-color";
@@ -1838,6 +1894,56 @@ function renderExpressions(): void {
       draw();
       scheduleProjectSave();
     });
+    const colorControl = document.createElement("label");
+    colorControl.className = "appearance-color-control";
+    colorControl.append(document.createTextNode("Base color"), colorPicker);
+    const lineWidth = document.createElement("input");
+    lineWidth.type = "range";
+    lineWidth.min = "1";
+    lineWidth.max = "10";
+    lineWidth.step = "0.5";
+    lineWidth.value = String(expression.lineWidth ?? 2);
+    lineWidth.setAttribute("aria-label", `Expression ${index + 1} line width`);
+    const lineWidthValue = document.createElement("output");
+    lineWidthValue.textContent = `${lineWidth.value}px`;
+    lineWidth.addEventListener("input", () => {
+      expression.lineWidth = Number(lineWidth.value);
+      lineWidthValue.textContent = `${lineWidth.value}px`;
+      draw();
+      scheduleProjectSave();
+    });
+    const opacity = document.createElement("input");
+    opacity.type = "range";
+    opacity.min = "0";
+    opacity.max = "100";
+    opacity.step = "1";
+    opacity.value = String(Math.round((expression.opacity ?? 1) * 100));
+    opacity.setAttribute("aria-label", `Expression ${index + 1} opacity`);
+    const opacityValue = document.createElement("output");
+    opacityValue.textContent = `${opacity.value}%`;
+    opacity.addEventListener("input", () => {
+      expression.opacity = Number(opacity.value) / 100;
+      opacityValue.textContent = `${opacity.value}%`;
+      draw();
+      scheduleProjectSave();
+    });
+    const appearanceControls = document.createElement("div");
+    appearanceControls.className = "appearance-controls";
+    const lineWidthControl = document.createElement("label");
+    lineWidthControl.className = "appearance-range-control";
+    lineWidthControl.append(
+      document.createTextNode("Line size"),
+      lineWidth,
+      lineWidthValue,
+    );
+    const opacityControl = document.createElement("label");
+    opacityControl.className = "appearance-range-control";
+    opacityControl.append(
+      document.createTextNode("Opacity"),
+      opacity,
+      opacityValue,
+    );
+    appearanceControls.append(colorControl, lineWidthControl, opacityControl);
     const input = document.createElement("input");
     input.type = "text";
     input.value = expression.text;
@@ -1888,48 +1994,57 @@ function renderExpressions(): void {
       renderExpressions();
       draw();
     });
-    const rgbDetails = document.createElement("details");
-    rgbDetails.className = "expression-rgb";
-    const rgbSummary = document.createElement("summary");
-    rgbSummary.textContent = "Spatial RGB";
-    const rgbFields = document.createElement("div");
-    rgbFields.className = "rgb-fields";
-    const rgbError = document.createElement("p");
-    rgbError.className = "rgb-error";
-    rgbError.textContent = expression.rgbError ?? "";
-    const rgbFormulas = expression.rgb ?? { red: "", green: "", blue: "" };
+    const hsvFields = document.createElement("div");
+    hsvFields.className = "hsv-fields";
+    const colorError = document.createElement("p");
+    colorError.className = "color-formula-error";
+    colorError.textContent = expression.colorError ?? "";
+    const hsvFormulas = expression.hsv ?? { hue: "", saturation: "", value: "" };
     for (const [channel, label] of [
-      ["red", "Red (0-255)"],
-      ["green", "Green (0-255)"],
-      ["blue", "Blue (0-255)"],
+      ["hue", "Hue (0-360°)"],
+      ["saturation", "Saturation (0-1)"],
+      ["value", "Value (0-1)"],
     ] as const) {
       const channelInput = document.createElement("input");
       channelInput.type = "text";
       channelInput.maxLength = 512;
-      channelInput.value = rgbFormulas[channel];
+      channelInput.value = hsvFormulas[channel];
       channelInput.placeholder = label;
-      channelInput.setAttribute("aria-label", `Expression ${index + 1} ${label} formula`);
+      channelInput.dataset.hsvChannel = channel;
+      channelInput.setAttribute("aria-label", `Expression ${index + 1} HSV ${label} formula`);
       channelInput.addEventListener("input", () => {
-        const updated: RGBFormulas = {
-          ...(expression.rgb ?? { red: "", green: "", blue: "" }),
+        const updated: HSVFormulas = {
+          ...(expression.hsv ?? { hue: "", saturation: "", value: "" }),
           [channel]: channelInput.value,
         };
-        expression.rgb = Object.values(updated).some((value) => value.trim())
+        expression.hsv = Object.values(updated).some((value) => value.trim())
           ? updated
           : undefined;
-        expression.compiledRgbKey = undefined;
+        marker.classList.toggle(
+          "expression-marker-spatial",
+          Boolean(expression.hsv),
+        );
+        expression.compiledHsvKey = undefined;
         renderSliders();
-        compileRGB(expression);
-        channelInput.setAttribute("aria-invalid", String(Boolean(expression.rgbError)));
-        rgbError.textContent = expression.rgbError ?? "";
+        compileSpatialColor(expression);
+        channelInput.setAttribute("aria-invalid", String(Boolean(expression.colorError)));
+        colorError.textContent = expression.colorError ?? "";
         draw();
         scheduleProjectSave();
       });
-      rgbFields.append(channelInput);
+      hsvFields.append(channelInput);
     }
-    const rgbHelp = document.createElement("small");
-    rgbHelp.textContent = "Formulas use x, y, and sliders; blank channels use the base color. Results are rounded and clamped to 0-255.";
-    rgbDetails.append(rgbSummary, rgbFields, rgbHelp, rgbError);
+    const hsvHelp = document.createElement("small");
+    hsvHelp.textContent = "Formulas use x, y, and sliders. Hue is degrees (0-360); saturation and value are decimals (0-1). The circle marks spatial mode; formulas color the graph.";
+    const hsvControls = document.createElement("div");
+    hsvControls.className = "appearance-hsv-control";
+    const hsvHeading = document.createElement("div");
+    hsvHeading.className = "appearance-hsv-heading";
+    const hsvTitle = document.createElement("strong");
+    hsvTitle.textContent = "Spatial HSV";
+    hsvHeading.append(hsvTitle);
+    hsvControls.append(hsvHeading, hsvFields, hsvHelp, colorError);
+    appearanceDetails.append(appearanceControls, hsvControls);
     const folderSelect = document.createElement("select");
     folderSelect.className = "expression-folder";
     folderSelect.setAttribute("aria-label", `Expression ${index + 1} folder`);
@@ -1961,7 +2076,7 @@ function renderExpressions(): void {
       scheduleProjectSave();
     });
     noteDetails.append(noteSummary, note);
-    row.append(marker, colorPicker, input, visibility, remove, error, rgbDetails, folderSelect, noteDetails);
+    row.append(marker, input, visibility, remove, error, appearanceDetails, folderSelect, noteDetails);
     container.append(row);
   };
   for (const [index, expression] of expressions.entries()) {
@@ -2434,8 +2549,9 @@ function addExpression(text = ""): void {
 function currentProjectState(): ProjectState {
   return {
     version: 1,
-    expressions: expressions.map(({ id, text, color, folderId, note, hidden, rgb }) =>
-      ({ id, text, color, folderId, note, hidden, rgb })),
+    expressions: expressions.map((
+      { id, text, color, lineWidth, opacity, folderId, note, hidden, hsv },
+    ) => ({ id, text, color, lineWidth, opacity, folderId, note, hidden, hsv })),
     tables: tables.map(({ id, rows, sourceExpressionId, regressionDegree, regressionKind, color }) =>
       ({ id, rows, sourceExpressionId, regressionDegree, regressionKind, color })),
     folders: folders.map(({ id, name }) => ({ id, name })),

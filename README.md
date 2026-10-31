@@ -4,7 +4,7 @@ A browser-based graphing calculator built with TypeScript and Vite. Its small st
 
 ## Versioning
 
-The current app version is **1.3**. For each push, increment the second number (for example, `1.2` to `1.3`) and keep the package version in `package.json` in sync as `1.3.0`. When the user explicitly says a change is major enough, increment the first number and reset the second to zero (for example, `1.3` to `2.0`).
+The current app version is **1.4**. For each push, increment the second number (for example, `1.3` to `1.4`) and keep the package version in `package.json` in sync as `1.4.0`. When the user explicitly says a change is major enough, increment the first number and reset the second to zero (for example, `1.4` to `2.0`).
 
 ## Run locally
 
@@ -31,7 +31,7 @@ Each row can plot `y` as a function of `x`, an implicit equation whose contour i
 - `sqrt`, `abs`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `ln`, `log` (base 10), and `exp`
 - Trigonometric functions use radians
 
-Each expression has a base-color picker. Expand **Spatial RGB** to set optional red, green, and blue formulas based on `x`, `y`, and sliders. Blank channels retain their base-color component. Formula results are rounded to the nearest integer and clamped to 0–255; invalid formulas and domain errors are reported beside the expression, and affected samples fall back to its base color. Spatial coloring is sampled along explicit/parametric/implicit curves and at cells in shaded inequalities, so color boundaries are numerical and follow the current graph sampling/detail settings. Slider playback re-evaluates the formulas on each frame. Precise mode uses the configured decimal precision for channel calculations; Desmos mode uses its ten-digit fast math.
+Click an expression's color circle to open its appearance settings. Set the base color, line size (1–10 px), and opacity (0–100%) there. The panel also supports hue, saturation, and value formulas based on `x`, `y`, and sliders. Entering spatial formulas makes the expression circle show a rainbow indicator, while the formulas determine the graph color. Hue uses degrees and is clamped to 0–360 for color conversion: values above 360 remain above 360 in the formula result but render as the endpoint color instead of restarting the rainbow. Saturation and value use normalized decimals (0–1). Opacity applies to curves, implicit contours, inequality boundaries and fill, and list points.
 
 Implicit equations use one equals sign and may contain both `x` and `y`. Invalid syntax is reported beside its expression. Domain errors at individual sample points leave gaps in the graph, as expected for functions with restricted domains or discontinuities.
 

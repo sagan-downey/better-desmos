@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   compileColorExpression,
+  hexToHsv,
+  hsvToHex,
   compileExpression,
   compileFastGraphExpression,
   compileGraphExpression,
@@ -17,6 +19,20 @@ import {
 } from "./math";
 
 describe("compileExpression", () => {
+  it("converts HSV colors to hex and extracts base-color HSV values", () => {
+    expect(hsvToHex(0, 1, 1)).toBe("#ff0000");
+    expect(hsvToHex(120, 1, 1)).toBe("#00ff00");
+    expect(hsvToHex(240, 1, 1)).toBe("#0000ff");
+    expect(hsvToHex(360, 1, 1)).toBe("#ff0000");
+    expect(hsvToHex(480, 1, 1)).toBe("#ff0000");
+    expect(hsvToHex(-120, 1, 1)).toBe("#ff0000");
+    expect(hsvToHex(120, 1.5, 1)).toBe("#00ff00");
+    expect(hsvToHex(0, 0.5, 0.5)).toBe("#804040");
+    expect(hexToHsv("#ff0000")).toEqual([0, 1, 1]);
+    expect(hexToHsv("#808080")).toEqual([0, 0, 128 / 255]);
+    expect(() => hsvToHex(Number.NaN, 0, 0)).toThrow(/finite/);
+  });
+
   it("compiles color formulas with x, y, and slider values without executing JavaScript", () => {
     const color = compileColorExpression("x * 10 + a + y", { a: 12 });
     expect(color(2, 3)).toBe(35);

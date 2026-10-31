@@ -983,6 +983,49 @@ export function compileColorExpression(
     )).toNumber();
 }
 
+export function hexToHsv(hex: string): [number, number, number] {
+  if (!/^#[\da-f]{6}$/i.test(hex)) {
+    throw new Error("Color must be a six-digit hex value");
+  }
+  const red = Number.parseInt(hex.slice(1, 3), 16) / 255;
+  const green = Number.parseInt(hex.slice(3, 5), 16) / 255;
+  const blue = Number.parseInt(hex.slice(5, 7), 16) / 255;
+  const maximum = Math.max(red, green, blue);
+  const minimum = Math.min(red, green, blue);
+  const difference = maximum - minimum;
+  let hue = 0;
+  if (difference !== 0) {
+    if (maximum === red) hue = 60 * (((green - blue) / difference) % 6);
+    else if (maximum === green) hue = 60 * ((blue - red) / difference + 2);
+    else hue = 60 * ((red - green) / difference + 4);
+  }
+  if (hue < 0) hue += 360;
+  const saturation = maximum === 0 ? 0 : difference / maximum;
+  return [hue, saturation, maximum];
+}
+
+export function hsvToHex(hue: number, saturation: number, value: number): string {
+  if (![hue, saturation, value].every(Number.isFinite)) {
+    throw new Error("HSV values must be finite numbers");
+  }
+  const normalizedHue = Math.min(360, Math.max(0, hue)) / 60;
+  const normalizedSaturation = Math.min(1, Math.max(0, saturation));
+  const normalizedValue = Math.min(1, Math.max(0, value));
+  const chroma = normalizedValue * normalizedSaturation;
+  const secondary = chroma * (1 - Math.abs(normalizedHue % 2 - 1));
+  const offset = normalizedValue - chroma;
+  const sector = Math.floor(normalizedHue);
+  const [red, green, blue] = sector === 0 ? [chroma, secondary, 0]
+    : sector === 1 ? [secondary, chroma, 0]
+      : sector === 2 ? [0, chroma, secondary]
+        : sector === 3 ? [0, secondary, chroma]
+          : sector === 4 ? [secondary, 0, chroma]
+            : [chroma, 0, secondary];
+  return `#${[red, green, blue]
+    .map((channel) => Math.round((channel + offset) * 255).toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
 export function compileImplicitEquation(
   source: string,
   variables: Record<string, number> = {},
