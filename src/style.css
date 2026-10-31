@@ -41,6 +41,7 @@ button { color: inherit; }
 
 .brand > span:last-child { color: #97a5b7; font-weight: 500; margin-left: -6px; }
 .brand-mark { color: #55d6be; font-size: 28px; line-height: 1; }
+.brand .version-label { margin-left: 3px; padding: 3px 5px; border: 1px solid #344355; border-radius: 5px; color: #a5e5d9; font-size: 9px; font-weight: 600; letter-spacing: 0; }
 .top-note, .toolbar-caption, .graph-footer { color: #8998aa; font-size: 12px; }
 .top-note { display: flex; align-items: center; gap: 8px; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #55d6be; }
@@ -55,19 +56,25 @@ h1 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -0.5px; }
 .add-button:hover, .view-controls button:hover, .remove-button:hover { border-color: #718197; color: #fff; }
 .sidebar-scroll { flex: 1; min-height: 0; overflow-y: auto; }
 .expressions { padding: 0 12px; }
-.expression-row { position: relative; display: grid; grid-template-columns: 9px minmax(0, 1fr) 22px 25px; align-items: center; column-gap: 8px; padding: 11px 8px 13px; border-top: 1px solid #202a37; }
+.expression-row { position: relative; display: grid; grid-template-columns: 9px 24px minmax(0, 1fr) 22px 25px; align-items: center; column-gap: 8px; padding: 11px 8px 13px; border-top: 1px solid #202a37; }
 .expression-hidden { opacity: .48; }
 .expression-marker { width: 8px; height: 8px; border-radius: 50%; }
+.expression-row input.expression-color { width: 24px; height: 24px; padding: 2px; border: 1px solid #344355; border-radius: 5px; cursor: pointer; }
 .expression-row input { width: 100%; min-width: 0; border: 1px solid transparent; border-radius: 5px; outline: none; padding: 8px 9px; color: #e6edf5; background: #18222f; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 .expression-row input:focus { border-color: #42556b; }
 .expression-row input[aria-invalid="true"] { border-color: #a95258; }
 .remove-button { border: 1px solid transparent; border-radius: 5px; background: transparent; color: #8090a3; font-size: 20px; cursor: pointer; }
-.expression-error { grid-column: 2 / 5; min-height: 14px; margin: 4px 0 0; color: #ff9a9e; font-size: 11px; }
+.expression-error { grid-column: 3 / 6; min-height: 14px; margin: 4px 0 0; color: #ff9a9e; font-size: 11px; }
 .visibility-button { padding: 0; border: 0; background: transparent; color: #a5e5d9; cursor: pointer; }
-.expression-folder { grid-column: 2 / 5; min-width: 0; padding: 4px; border: 1px solid #2a3848; border-radius: 4px; color: #aab8c8; background: #101722; font-size: 10px; }
-.expression-note { grid-column: 2 / 5; color: #aab8c8; font-size: 10px; }
+.expression-folder { grid-column: 3 / 6; min-width: 0; padding: 4px; border: 1px solid #2a3848; border-radius: 4px; color: #aab8c8; background: #101722; font-size: 10px; }
+.expression-note, .expression-rgb { grid-column: 3 / 6; color: #aab8c8; font-size: 10px; }
 .expression-note summary { cursor: pointer; }
 .expression-note textarea { display: block; width: 100%; min-height: 48px; margin-top: 4px; resize: vertical; border: 1px solid #2a3848; border-radius: 4px; color: #e6edf5; background: #101722; font: inherit; }
+.expression-rgb summary { cursor: pointer; }
+.rgb-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: 5px; }
+.expression-row .rgb-fields input { padding: 5px; font-size: 10px; }
+.expression-rgb small { display: block; margin-top: 5px; color: #8291a3; line-height: 1.4; }
+.rgb-error { margin: 4px 0 0; color: #ff9a9e; font-size: 10px; }
 .folder-group { margin: 6px 0; border: 1px solid #263445; border-radius: 7px; }
 .folder-heading { display: flex; align-items: center; justify-content: space-between; padding: 3px 8px; border-bottom: 1px solid #263445; }
 .folder-heading input { width: 100%; border: 0; outline: 0; color: #c5d0dc; background: transparent; font-size: 12px; }

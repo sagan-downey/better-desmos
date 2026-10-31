@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  compileColorExpression,
   compileExpression,
   compileFastGraphExpression,
   compileGraphExpression,
@@ -16,6 +17,15 @@ import {
 } from "./math";
 
 describe("compileExpression", () => {
+  it("compiles color formulas with x, y, and slider values without executing JavaScript", () => {
+    const color = compileColorExpression("x * 10 + a + y", { a: 12 });
+    expect(color(2, 3)).toBe(35);
+    expect(compileColorExpression("x + y", {}, true)(1.25, 2.5)).toBe(3.75);
+    expect(() => compileColorExpression("window.alert(1)", {})).toThrow();
+    expect(() => compileColorExpression("x = 2", {})).toThrow();
+    expect(() => compileColorExpression("x / y", {})(1, 0)).toThrow(/Division by zero/);
+  });
+
   it("keeps rational arithmetic exact until a decimal value is requested", () => {
     const third = compileExpression("1 / 3")(0);
     expect(third.exact).toBe(true);

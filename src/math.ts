@@ -945,16 +945,42 @@ export function fitTangentRegression(
 export function compileExpression(
   source: string,
   variables: Record<string, number> = {},
-): (x: number) => Evaluation {
-  const tree = parse(source, false, true, Object.keys(variables));
+  allowY = false,
+): (x: number, y?: number) => Evaluation {
+  const tree = parse(source, allowY, true, Object.keys(variables));
   const xCoordinates = new Map<number, Decimal>();
-  return (x: number) => {
+  const yCoordinates = new Map<number, Decimal>();
+  return (x: number, y?: number) => {
     if (!Number.isFinite(x)) {
       throw new Error("x must be a finite number");
     }
-    const result = evaluate(tree, cachedCoordinate(xCoordinates, x), undefined, variables);
+    if (allowY && !Number.isFinite(y)) {
+      throw new Error("y must be a finite number");
+    }
+    const result = evaluate(
+      tree,
+      cachedCoordinate(xCoordinates, x),
+      allowY ? cachedCoordinate(yCoordinates, y!) : undefined,
+      variables,
+    );
     return { value: asDecimal(result), exact: result.kind === "rational" };
   };
+}
+
+export function compileColorExpression(
+  source: string,
+  variables: Record<string, number>,
+  fast = false,
+): (x: number, y: number) => number {
+  const tree = parse(source, true, false, Object.keys(variables));
+  return fast
+    ? (x, y) => assertFiniteFastResult(evaluateFast(tree, x, y, variables))
+    : (x, y) => asDecimal(evaluate(
+      tree,
+      new Decimal(x.toString()),
+      new Decimal(y.toString()),
+      variables,
+    )).toNumber();
 }
 
 export function compileImplicitEquation(

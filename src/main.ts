@@ -7,6 +7,7 @@ import {
   fitPowerRegression,
   fitSineRegression,
   fitTangentRegression,
+  compileColorExpression,
   FAST_MODE_PRECISION_DIGITS,
   getPrecisionDigits,
   setPrecisionDigits,
@@ -21,6 +22,18 @@ import {
 import "./style.css";
 
 type CompiledGraph = GraphExpression;
+type ColorEvaluator = (x: number, y: number) => number;
+type CompiledRGB = [
+  ColorEvaluator | undefined,
+  ColorEvaluator | undefined,
+  ColorEvaluator | undefined,
+];
+
+interface RGBFormulas {
+  red: string;
+  green: string;
+  blue: string;
+}
 
 interface Expression {
   id: number;
@@ -29,6 +42,10 @@ interface Expression {
   folderId?: number;
   note?: string;
   hidden?: boolean;
+  rgb?: RGBFormulas;
+  compiledRgb?: CompiledRGB;
+  compiledRgbKey?: string;
+  rgbError?: string;
   parsedText?: string;
   compiledMode?: "precise" | "desmos";
   compiled?: CompiledGraph;
@@ -107,6 +124,7 @@ interface CurveGeometry {
   id: string;
   color: string;
   segments: number[];
+  colorAt?: (x: number, y: number) => string;
 }
 
 interface ExplicitCurveData extends CurveGeometry {
@@ -133,6 +151,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isRGBFormulas(value: unknown): value is RGBFormulas {
+  return isRecord(value) &&
+    ["red", "green", "blue"].every((channel) =>
+      typeof value[channel] === "string" && value[channel].length <= 512);
+}
+
 function parseProjectState(text: string): ProjectState {
   if (text.length > 5_000_000) {
     throw new Error("Project files must be 5 MB or smaller.");
@@ -149,13 +173,15 @@ function parseProjectState(text: string): ProjectState {
     throw new Error("Project file has an invalid or unsupported structure.");
   }
   const parsedExpressions = value.expressions.map((item): Expression => {
+    const rgb = isRecord(item) ? item.rgb : undefined;
     if (!isRecord(item) || !Number.isSafeInteger(item.id) || Number(item.id) < 1 ||
         typeof item.text !== "string" ||
         item.text.length > 512 || typeof item.color !== "string" ||
         !/^#[\da-f]{6}$/i.test(item.color) ||
         (item.folderId !== undefined && !Number.isInteger(item.folderId)) ||
         (item.note !== undefined && (typeof item.note !== "string" || item.note.length > 10_000)) ||
-        (item.hidden !== undefined && typeof item.hidden !== "boolean")) {
+        (item.hidden !== undefined && typeof item.hidden !== "boolean") ||
+        (rgb !== undefined && !isRGBFormulas(rgb))) {
       throw new Error("Project contains an invalid expression.");
     }
     return {
@@ -165,6 +191,11 @@ function parseProjectState(text: string): ProjectState {
       folderId: item.folderId as number | undefined,
       note: item.note as string | undefined,
       hidden: item.hidden as boolean | undefined,
+      rgb: rgb === undefined ? undefined : {
+        red: rgb.red,
+        green: rgb.green,
+        blue: rgb.blue,
+      },
     };
   });
   const parsedFolders = value.folders.map((item): Folder => {
@@ -322,7 +353,7 @@ let hoverCurves: CurveGeometry[] = [];
 const app = document.querySelector<HTMLDivElement>("#app")!;
 app.innerHTML = `
   <header class="topbar">
-    <a class="brand" href="#" aria-label="Better Desmos home"><span class="brand-mark">∿</span> better<span>desmos</span></a>
+    <a class="brand" href="#" aria-label="Better Desmos 1.3 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">1.3</span></a>
     <div class="top-note"><span class="status-dot"></span><span id="mode-note">Exact where possible · configurable precision</span></div>
   </header>
   <main class="workspace">
@@ -488,17 +519,109 @@ function drawGrid(width: number, height: number): void {
   }
 }
 
+function compileRGB(expression: Expression): ((x: number, y: number) => string) | undefined {
+  const formulas = expression.rgb;
+  if (!formulas) {
+    expression.rgbError = undefined;
+    return undefined;
+  }
+  const key = `${graphMode}:${formulas.red}\u0000${formulas.green}\u0000${formulas.blue}`;
+  if (expression.compiledRgbKey !== key) {
+    expression.compiledRgbKey = key;
+    expression.compiledRgb = undefined;
+    expression.rgbError = undefined;
+    try {
+      expression.compiledRgb = [
+        formulas.red.trim()
+          ? compileColorExpression(formulas.red, sliderValues, graphMode === "desmos")
+          : undefined,
+        formulas.green.trim()
+          ? compileColorExpression(formulas.green, sliderValues, graphMode === "desmos")
+          : undefined,
+        formulas.blue.trim()
+          ? compileColorExpression(formulas.blue, sliderValues, graphMode === "desmos")
+          : undefined,
+      ];
+    } catch (reason) {
+      expression.rgbError = reason instanceof Error ? reason.message : "Invalid RGB formula";
+    }
+  }
+  if (!expression.compiledRgb) return undefined;
+  const base = [
+    Number.parseInt(expression.color.slice(1, 3), 16),
+    Number.parseInt(expression.color.slice(3, 5), 16),
+    Number.parseInt(expression.color.slice(5, 7), 16),
+  ];
+  return (x, y) => {
+    try {
+      const values = expression.compiledRgb!.map((evaluate, index) => {
+        const value = evaluate ? evaluate(x, y) : base[index]!;
+        if (!Number.isFinite(value)) {
+          throw new Error("RGB channel results must be finite numbers from 0 to 255");
+        }
+        return Math.round(Math.min(255, Math.max(0, value)));
+      });
+      return `#${values.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+    } catch (reason) {
+      expression.rgbError = reason instanceof Error ? reason.message : "Could not evaluate RGB formula";
+      return expression.color;
+    }
+  };
+}
+
+function strokeColoredSegments(
+  geometry: CurveGeometry,
+  colorAt: (x: number, y: number) => string,
+  width: number,
+  height: number,
+): void {
+  const paths = new Map<string, number[]>();
+  for (let index = 0; index < geometry.segments.length; index += 4) {
+    const x1 = geometry.segments[index]!;
+    const y1 = geometry.segments[index + 1]!;
+    const x2 = geometry.segments[index + 2]!;
+    const y2 = geometry.segments[index + 3]!;
+    const x = ((x1 + x2) / 2 - width / 2) / scale + centerX;
+    const y = (height / 2 - (y1 + y2) / 2) / scale + centerY;
+    let color: string;
+    try {
+      color = colorAt(x, y);
+    } catch {
+      color = geometry.color;
+    }
+    const segments = paths.get(color) ?? [];
+    segments.push(x1, y1, x2, y2);
+    paths.set(color, segments);
+  }
+  context.save();
+  context.lineWidth = 2;
+  context.lineCap = "round";
+  for (const [color, segments] of paths) {
+    context.beginPath();
+    context.strokeStyle = color;
+    for (let index = 0; index < segments.length; index += 4) {
+      context.moveTo(segments[index]!, segments[index + 1]!);
+      context.lineTo(segments[index + 2]!, segments[index + 3]!);
+    }
+    context.stroke();
+  }
+  context.restore();
+}
+
 function drawImplicit(
   evaluate: ImplicitEvaluation,
   width: number,
   height: number,
   id: string,
   color: string,
+  colorAt?: (x: number, y: number) => string,
 ): CurveGeometry {
-  const geometry: CurveGeometry = { id, color, segments: [] };
+  const geometry: CurveGeometry = { id, color, segments: [], colorAt };
   const addSegment = (x1: number, y1: number, x2: number, y2: number) => {
-    context.moveTo(x1, y1);
-    context.lineTo(x2, y2);
+    if (!colorAt) {
+      context.moveTo(x1, y1);
+      context.lineTo(x2, y2);
+    }
     geometry.segments.push(x1, y1, x2, y2);
   };
   const step = Math.max(1, Math.min(graphSettings.implicitSampleSpacing, scale * 0.15));
@@ -639,9 +762,13 @@ function drawImplicit(
       }
     }
   }
-  context.strokeStyle = color;
-  context.lineWidth = 2;
-  context.stroke();
+  if (colorAt) {
+    strokeColoredSegments(geometry, colorAt, width, height);
+  } else {
+    context.strokeStyle = color;
+    context.lineWidth = 2;
+    context.stroke();
+  }
   return geometry;
 }
 
@@ -683,13 +810,16 @@ function drawExplicitCurve(
   evaluate: (x: number) => number,
   width: number,
   height: number,
+  colorAt?: (x: number, y: number) => string,
 ): ExplicitCurveData {
   const samples: GraphSample[] = [];
-  const geometry: ExplicitCurveData = { id, color, samples, segments: [] };
+  const geometry: ExplicitCurveData = { id, color, samples, segments: [], colorAt };
   const originY = height / 2 + centerY * scale;
-  context.strokeStyle = color;
-  context.lineWidth = 2;
-  context.beginPath();
+  if (!colorAt) {
+    context.strokeStyle = color;
+    context.lineWidth = 2;
+    context.beginPath();
+  }
   let previousY: number | undefined;
   let drawing = false;
   for (let screenX = 0; screenX <= width; screenX += graphSettings.explicitSampleSpacing) {
@@ -707,10 +837,10 @@ function drawExplicitCurve(
         continue;
       }
       if (!drawing) {
-        context.moveTo(screenX, screenY);
+        if (!colorAt) context.moveTo(screenX, screenY);
         drawing = true;
       } else {
-        context.lineTo(screenX, screenY);
+        if (!colorAt) context.lineTo(screenX, screenY);
       }
       if (connected && samples.length > 0) {
         const previous = samples[samples.length - 1]!;
@@ -724,7 +854,11 @@ function drawExplicitCurve(
       samples.push({ x, y: Number.NaN, screenX, screenY: Number.NaN, connected: false });
     }
   }
-  context.stroke();
+  if (colorAt) {
+    strokeColoredSegments(geometry, colorAt, width, height);
+  } else {
+    context.stroke();
+  }
   return geometry;
 }
 
@@ -735,7 +869,7 @@ function detectExplicitPoints(
   width: number,
   height: number,
 ): void {
-  const { samples, id, color } = curve;
+  const { samples, id, color, colorAt } = curve;
   const axisIntercepts: PointCandidate[] = [];
   for (let index = 1; index < samples.length; index += 1) {
     const previous = samples[index - 1]!;
@@ -751,7 +885,9 @@ function detectExplicitPoints(
             : previous.y / (previous.y - current.y);
         addPointCandidate(
           axisIntercepts, previous.x + (current.x - previous.x) * fraction, 0,
-          "x-intercept", [id], color, width, height,
+          "x-intercept", [id],
+          colorAt?.(previous.x + (current.x - previous.x) * fraction, 0) ?? color,
+          width, height,
         );
       }
     }
@@ -760,7 +896,9 @@ function detectExplicitPoints(
   if (Math.abs(centerX) <= width / (2 * scale)) {
     try {
       const y = evaluate(0);
-      addPointCandidate(axisIntercepts, 0, y, "y-intercept", [id], color, width, height);
+      addPointCandidate(
+        axisIntercepts, 0, y, "y-intercept", [id], colorAt?.(0, y) ?? color, width, height,
+      );
     } catch {
       // The function may be undefined on the y-axis.
     }
@@ -790,7 +928,9 @@ function detectExplicitPoints(
     const stepX = next.x - current.x;
     const x = current.x + offset * stepX;
     const y = current.y - 0.25 * (previous.y - next.y) * offset;
-    addPointCandidate(candidates, x, y, "vertex", [id], color, width, height);
+    addPointCandidate(
+      candidates, x, y, "vertex", [id], colorAt?.(x, y) ?? color, width, height,
+    );
   }
 }
 
@@ -844,7 +984,8 @@ function detectExplicitIntersections(
     const x = a0.x + (a1.x - a0.x) * fraction;
     const y = a0.y + (a1.y - a0.y) * fraction;
     addPointCandidate(
-      candidates, x, y, "intersection", [first.id, second.id], first.color, width, height,
+      candidates, x, y, "intersection", [first.id, second.id],
+      first.colorAt?.(x, y) ?? first.color, width, height,
     );
   }
 
@@ -896,7 +1037,8 @@ function detectExplicitIntersections(
     const ySecond = secondLow.y + (secondHigh.y - secondLow.y) * fraction;
     addPointCandidate(
       candidates, x, (yFirst + ySecond) / 2, "intersection",
-      [first.id, second.id], first.color, width, height,
+      [first.id, second.id],
+      first.colorAt?.(x, (yFirst + ySecond) / 2) ?? first.color, width, height,
     );
   }
 }
@@ -971,7 +1113,7 @@ function detectImplicitAxisIntercepts(
         axis === "x" ? 0 : root,
         axis === "x" ? "x-intercept" : "y-intercept",
         [curve.id],
-        curve.color,
+        curve.colorAt?.(axis === "x" ? root : 0, axis === "x" ? 0 : root) ?? curve.color,
         width,
         height,
       );
@@ -1154,7 +1296,10 @@ function drawHoverOverlay(): void {
     )}, ${formatTick(
       (bounds.height / 2 - nearest.y) / scale + centerY,
     )})`;
-    color = nearest.curve.color;
+    color = nearest.curve.colorAt?.(
+      (nearest.x - bounds.width / 2) / scale + centerX,
+      (bounds.height / 2 - nearest.y) / scale + centerY,
+    ) ?? nearest.curve.color;
   }
   if (pointX === undefined || pointY === undefined || !label) {
     return;
@@ -1191,13 +1336,16 @@ function drawParametricCurve(
   end: number,
   width: number,
   height: number,
+  colorAt?: (x: number, y: number) => string,
 ): ExplicitCurveData {
   const samples: GraphSample[] = [];
-  const geometry: ExplicitCurveData = { id, color, samples, segments: [] };
+  const geometry: ExplicitCurveData = { id, color, samples, segments: [], colorAt };
   const count = Math.max(200, Math.ceil(width / graphSettings.explicitSampleSpacing) * 2);
-  context.strokeStyle = color;
-  context.lineWidth = 2;
-  context.beginPath();
+  if (!colorAt) {
+    context.strokeStyle = color;
+    context.lineWidth = 2;
+    context.beginPath();
+  }
   let previous: GraphSample | undefined;
   for (let index = 0; index <= count; index += 1) {
     const parameter = start + (end - start) * index / count;
@@ -1215,10 +1363,10 @@ function drawParametricCurve(
         continue;
       }
       if (connected && previous) {
-        context.lineTo(screenX, screenY);
+        if (!colorAt) context.lineTo(screenX, screenY);
         geometry.segments.push(previous.screenX, previous.screenY, screenX, screenY);
       } else {
-        context.moveTo(screenX, screenY);
+        if (!colorAt) context.moveTo(screenX, screenY);
       }
       const sample = { x, y, screenX, screenY, connected };
       samples.push(sample);
@@ -1227,7 +1375,11 @@ function drawParametricCurve(
       previous = undefined;
     }
   }
-  context.stroke();
+  if (colorAt) {
+    strokeColoredSegments(geometry, colorAt, width, height);
+  } else {
+    context.stroke();
+  }
   return geometry;
 }
 
@@ -1238,16 +1390,21 @@ function drawInequality(
   color: string,
   width: number,
   height: number,
+  colorAt?: (x: number, y: number) => string,
 ): CurveGeometry {
   const cellSize = 5;
   context.save();
   context.globalAlpha = 0.18;
-  context.fillStyle = color;
   for (let screenY = 0; screenY < height; screenY += cellSize) {
     const y = (height / 2 - (screenY + cellSize / 2)) / scale + centerY;
     for (let screenX = 0; screenX < width; screenX += cellSize) {
       const x = (screenX + cellSize / 2 - width / 2) / scale + centerX;
       try {
+        try {
+          context.fillStyle = colorAt ? colorAt(x, y) : color;
+        } catch {
+          context.fillStyle = color;
+        }
         const residual = evaluate(x, y);
         const value = typeof residual === "number" ? residual : residual.toNumber();
         const inside = relation === "<" ? value < 0
@@ -1261,7 +1418,7 @@ function drawInequality(
     }
   }
   context.restore();
-  return drawImplicit(evaluate, width, height, id, color);
+  return drawImplicit(evaluate, width, height, id, color, colorAt);
 }
 
 function draw(): void {
@@ -1283,6 +1440,9 @@ function draw(): void {
   const explicitCurves: ExplicitCurveData[] = [];
   const implicitCurves: CurveGeometry[] = [];
   const listPoints: Array<{ x: number; y: number; color: string; graphId: string }> = [];
+  for (const expression of expressions) {
+    if (expression.compiledRgb) expression.rgbError = undefined;
+  }
 
   for (const expression of expressions) {
     if (expression.hidden) continue;
@@ -1293,22 +1453,23 @@ function draw(): void {
     const graphId = graph.kind === "implicit"
       ? `implicit-${expression.id}`
       : `expression-${expression.id}`;
+    const colorAt = compileRGB(expression);
     if (graph.kind === "implicit") {
-      const curve = drawImplicit(graph.evaluate, width, height, graphId, expression.color);
+      const curve = drawImplicit(graph.evaluate, width, height, graphId, expression.color, colorAt);
       implicitCurves.push(curve);
       detectImplicitAxisIntercepts(curve, graph.evaluate, candidates, width, height);
       continue;
     }
     if (graph.kind === "inequality") {
       const curve = drawInequality(
-        graph.evaluate, graph.relation, graphId, expression.color, width, height,
+        graph.evaluate, graph.relation, graphId, expression.color, width, height, colorAt,
       );
       implicitCurves.push(curve);
       continue;
     }
     if (graph.kind === "parametric") {
       const curve = drawParametricCurve(
-        graphId, expression.color, graph.evaluate, graph.start, graph.end, width, height,
+        graphId, expression.color, graph.evaluate, graph.start, graph.end, width, height, colorAt,
       );
       explicitCurves.push(curve);
       continue;
@@ -1331,10 +1492,11 @@ function draw(): void {
           const x = index + 1;
           const screenX = width / 2 + (x - centerX) * scale;
           const screenY = height / 2 - (y - centerY) * scale;
-          listPoints.push({ x, y, color: expression.color, graphId });
+          const pointColor = colorAt?.(x, y) ?? expression.color;
+          listPoints.push({ x, y, color: pointColor, graphId });
           if (screenX >= 0 && screenX <= width && screenY >= 0 && screenY <= height) {
             addPointCandidate(
-              candidates, x, y, "list point", [graphId], expression.color, width, height,
+              candidates, x, y, "list point", [graphId], pointColor, width, height,
             );
           }
         });
@@ -1354,7 +1516,7 @@ function draw(): void {
       const result = graph.evaluate(x);
       return typeof result === "number" ? result : result.value.toNumber();
     };
-    const curve = drawExplicitCurve(graphId, expression.color, evaluate, width, height);
+    const curve = drawExplicitCurve(graphId, expression.color, evaluate, width, height, colorAt);
     explicitCurves.push(curve);
     detectExplicitPoints(curve, evaluate, candidates, width, height);
   }
@@ -1425,6 +1587,17 @@ function draw(): void {
   }
   hoverCandidates = candidates;
   hoverCurves = [...explicitCurves, ...implicitCurves];
+  for (const expression of expressions) {
+    const rgbError = expressionList.querySelector<HTMLParagraphElement>(
+      `[data-expression-id="${expression.id}"] .rgb-error`,
+    );
+    if (rgbError) rgbError.textContent = expression.rgbError ?? "";
+    for (const channelInput of expressionList.querySelectorAll<HTMLInputElement>(
+      `[data-expression-id="${expression.id}"] .rgb-fields input`,
+    )) {
+      channelInput.setAttribute("aria-invalid", String(Boolean(expression.rgbError)));
+    }
+  }
   drawHoverOverlay();
   viewReadout.textContent = `Center (${formatTick(centerX)}, ${formatTick(centerY)}) · ${formatTick(1 / scale)} units/px`;
   scheduleProjectSave();
@@ -1455,7 +1628,9 @@ function sliderNames(): string[] {
     "list", "sum", "product", "min", "max", "mean", "median", "variance", "stdev", "factorial",
   ]);
   return [...new Set(expressions.flatMap((expression) =>
-    expression.text.match(/[a-zA-Z]+/g) ?? []).filter((name) =>
+    [expression.text, expression.rgb?.red ?? "", expression.rgb?.green ?? "",
+      expression.rgb?.blue ?? ""].flatMap((source) => source.match(/[a-zA-Z]+/g) ?? [])
+  ).filter((name) =>
     name.length === 1 && !reserved.has(name.toLowerCase())))].sort();
 }
 
@@ -1652,6 +1827,17 @@ function renderExpressions(): void {
     marker.className = "expression-marker";
     marker.style.backgroundColor = expression.color;
     marker.setAttribute("aria-hidden", "true");
+    const colorPicker = document.createElement("input");
+    colorPicker.type = "color";
+    colorPicker.className = "expression-color";
+    colorPicker.value = expression.color;
+    colorPicker.setAttribute("aria-label", `Expression ${index + 1} base color`);
+    colorPicker.addEventListener("input", () => {
+      expression.color = colorPicker.value;
+      marker.style.backgroundColor = expression.color;
+      draw();
+      scheduleProjectSave();
+    });
     const input = document.createElement("input");
     input.type = "text";
     input.value = expression.text;
@@ -1702,6 +1888,48 @@ function renderExpressions(): void {
       renderExpressions();
       draw();
     });
+    const rgbDetails = document.createElement("details");
+    rgbDetails.className = "expression-rgb";
+    const rgbSummary = document.createElement("summary");
+    rgbSummary.textContent = "Spatial RGB";
+    const rgbFields = document.createElement("div");
+    rgbFields.className = "rgb-fields";
+    const rgbError = document.createElement("p");
+    rgbError.className = "rgb-error";
+    rgbError.textContent = expression.rgbError ?? "";
+    const rgbFormulas = expression.rgb ?? { red: "", green: "", blue: "" };
+    for (const [channel, label] of [
+      ["red", "Red (0-255)"],
+      ["green", "Green (0-255)"],
+      ["blue", "Blue (0-255)"],
+    ] as const) {
+      const channelInput = document.createElement("input");
+      channelInput.type = "text";
+      channelInput.maxLength = 512;
+      channelInput.value = rgbFormulas[channel];
+      channelInput.placeholder = label;
+      channelInput.setAttribute("aria-label", `Expression ${index + 1} ${label} formula`);
+      channelInput.addEventListener("input", () => {
+        const updated: RGBFormulas = {
+          ...(expression.rgb ?? { red: "", green: "", blue: "" }),
+          [channel]: channelInput.value,
+        };
+        expression.rgb = Object.values(updated).some((value) => value.trim())
+          ? updated
+          : undefined;
+        expression.compiledRgbKey = undefined;
+        renderSliders();
+        compileRGB(expression);
+        channelInput.setAttribute("aria-invalid", String(Boolean(expression.rgbError)));
+        rgbError.textContent = expression.rgbError ?? "";
+        draw();
+        scheduleProjectSave();
+      });
+      rgbFields.append(channelInput);
+    }
+    const rgbHelp = document.createElement("small");
+    rgbHelp.textContent = "Formulas use x, y, and sliders; blank channels use the base color. Results are rounded and clamped to 0-255.";
+    rgbDetails.append(rgbSummary, rgbFields, rgbHelp, rgbError);
     const folderSelect = document.createElement("select");
     folderSelect.className = "expression-folder";
     folderSelect.setAttribute("aria-label", `Expression ${index + 1} folder`);
@@ -1733,7 +1961,7 @@ function renderExpressions(): void {
       scheduleProjectSave();
     });
     noteDetails.append(noteSummary, note);
-    row.append(marker, input, visibility, remove, error, folderSelect, noteDetails);
+    row.append(marker, colorPicker, input, visibility, remove, error, rgbDetails, folderSelect, noteDetails);
     container.append(row);
   };
   for (const [index, expression] of expressions.entries()) {
@@ -2206,8 +2434,8 @@ function addExpression(text = ""): void {
 function currentProjectState(): ProjectState {
   return {
     version: 1,
-    expressions: expressions.map(({ id, text, color, folderId, note, hidden }) =>
-      ({ id, text, color, folderId, note, hidden })),
+    expressions: expressions.map(({ id, text, color, folderId, note, hidden, rgb }) =>
+      ({ id, text, color, folderId, note, hidden, rgb })),
     tables: tables.map(({ id, rows, sourceExpressionId, regressionDegree, regressionKind, color }) =>
       ({ id, rows, sourceExpressionId, regressionDegree, regressionKind, color })),
     folders: folders.map(({ id, name }) => ({ id, name })),

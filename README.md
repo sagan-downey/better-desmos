@@ -2,6 +2,10 @@
 
 A browser-based graphing calculator built with TypeScript and Vite. Its small stack keeps the app easy to run and the math engine independently testable. Graph updates are immediate except for explicit slider playback.
 
+## Versioning
+
+The current app version is **1.3**. For each push, increment the second number (for example, `1.2` to `1.3`) and keep the package version in `package.json` in sync as `1.3.0`. When the user explicitly says a change is major enough, increment the first number and reset the second to zero (for example, `1.3` to `2.0`).
+
 ## Run locally
 
 Requires Node.js 20 or newer.
@@ -26,6 +30,8 @@ Each row can plot `y` as a function of `x`, an implicit equation whose contour i
 - `+`, `-`, `*`, `/`, and `^`; implicit multiplication is supported (for example, `2x`, `35.6x`, or `2(x + 1)`)
 - `sqrt`, `abs`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `ln`, `log` (base 10), and `exp`
 - Trigonometric functions use radians
+
+Each expression has a base-color picker. Expand **Spatial RGB** to set optional red, green, and blue formulas based on `x`, `y`, and sliders. Blank channels retain their base-color component. Formula results are rounded to the nearest integer and clamped to 0–255; invalid formulas and domain errors are reported beside the expression, and affected samples fall back to its base color. Spatial coloring is sampled along explicit/parametric/implicit curves and at cells in shaded inequalities, so color boundaries are numerical and follow the current graph sampling/detail settings. Slider playback re-evaluates the formulas on each frame. Precise mode uses the configured decimal precision for channel calculations; Desmos mode uses its ten-digit fast math.
 
 Implicit equations use one equals sign and may contain both `x` and `y`. Invalid syntax is reported beside its expression. Domain errors at individual sample points leave gaps in the graph, as expected for functions with restricted domains or discontinuities.
 
