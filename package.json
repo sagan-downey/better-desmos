@@ -1,7 +1,7 @@
 {
   "name": "better-desmos",
   "private": true,
-  "version": "1.5.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,6 +14,7 @@
   "devDependencies": {
     "typescript": "^5.8.3",
     "vite": "^6.3.5",
+    "vite-plugin-singlefile": "^2.3.4",
     "vitest": "^3.1.2"
   }
 }

@@ -83,10 +83,17 @@ interface Folder {
   collapsed?: boolean;
 }
 
+interface TextBlock {
+  id: number;
+  text: string;
+  folderId?: number;
+}
+
 interface ProjectState {
   version: 1;
   expressions: Expression[];
   tables: DataTable[];
+  texts?: TextBlock[];
   workspaceOrder: WorkspaceItem[];
   folders: Folder[];
   sliders: Record<string, number>;
@@ -106,7 +113,7 @@ interface GraphOptions {
 }
 
 interface WorkspaceItem {
-  type: "expression" | "table" | "folder";
+  type: "expression" | "table" | "text" | "folder";
   id: number;
   folderId?: number;
 }
@@ -166,12 +173,6 @@ interface HoverState {
 const CONTOUR_EDGES = [[0, 1], [1, 2], [2, 3], [3, 0]] as const;
 const MAX_AXIS_INTERCEPTS_PER_CURVE = 10;
 const colors = ["#55d6be", "#ff8c69", "#8da7ff", "#f0c75e", "#d18cff"];
-const defaultExpressions: Expression[] = [
-  { id: 1, text: "y = x^2", color: colors[0]! },
-  { id: 2, text: "y = sin(x)", color: colors[1]! },
-  { id: 3, text: "y = 1 / x", color: colors[2]! },
-  { id: 4, text: "x^2 + y^2 = 4", color: colors[3]! },
-];
 let projectStatus = "";
 const PROJECT_STORAGE_KEY = "better-desmos-project-v1";
 const AUTO_SAVE_STORAGE_KEY = "better-desmos-autosave-v1";
@@ -293,6 +294,27 @@ function parseProjectState(text: string): ProjectState {
       regressionKind: regressionKind as DataTable["regressionKind"],
     };
   });
+  const parsedTexts: TextBlock[] = [];
+  if (value.texts !== undefined) {
+    if (!Array.isArray(value.texts) || value.texts.length > 300) {
+      throw new Error("Project contains invalid text blocks.");
+    }
+    for (const item of value.texts) {
+      if (!isRecord(item) || !Number.isSafeInteger(item.id) || Number(item.id) < 1 ||
+          typeof item.text !== "string" || item.text.length > 10_000 ||
+          (item.folderId !== undefined && !Number.isSafeInteger(item.folderId))) {
+        throw new Error("Project contains an invalid text block.");
+      }
+      parsedTexts.push({
+        id: item.id as number,
+        text: item.text,
+        folderId: item.folderId as number | undefined,
+      });
+    }
+  }
+  if (parsedTexts.length > 300) {
+    throw new Error("Project contains too many text blocks.");
+  }
   const sliders: Record<string, number> = {};
   for (const [name, slider] of Object.entries(value.sliders)) {
     if (!/^[a-z]$/i.test(name) || typeof slider !== "number" || !Number.isFinite(slider)) {
@@ -322,10 +344,12 @@ function parseProjectState(text: string): ProjectState {
   }
   const expressionIds = parsedExpressions.map(({ id }) => id);
   const tableIds = parsedTables.map(({ id }) => id);
+  const textIds = parsedTexts.map(({ id }) => id);
   const folderIds = parsedFolders.map(({ id }) => id);
   const rowIds = parsedTables.flatMap(({ rows }) => rows.map(({ id }) => id));
   if (new Set(expressionIds).size !== expressionIds.length ||
       new Set(tableIds).size !== tableIds.length ||
+      new Set(textIds).size !== textIds.length ||
       new Set(folderIds).size !== folderIds.length ||
       new Set(rowIds).size !== rowIds.length ||
       parsedTables.reduce((count, table) => count + table.rows.length, 0) > 20_000) {
@@ -333,7 +357,7 @@ function parseProjectState(text: string): ProjectState {
   }
   const rawWorkspaceOrder = value.workspaceOrder;
   if (rawWorkspaceOrder !== undefined &&
-      (!Array.isArray(rawWorkspaceOrder) || rawWorkspaceOrder.length > 300)) {
+      (!Array.isArray(rawWorkspaceOrder) || rawWorkspaceOrder.length > 1000)) {
     throw new Error("Project contains an invalid workspace order.");
   }
   const parsedWorkspaceOrder = rawWorkspaceOrder === undefined
@@ -344,11 +368,15 @@ function parseProjectState(text: string): ProjectState {
       ...parsedTables.map(({ id, folderId }): WorkspaceItem => ({
         type: "table", id, folderId,
       })),
+      ...parsedTexts.map(({ id, folderId }): WorkspaceItem => ({
+        type: "text", id, folderId,
+      })),
       ...parsedFolders.map(({ id }): WorkspaceItem => ({ type: "folder", id })),
     ]
     : rawWorkspaceOrder.map((item): WorkspaceItem => {
       if (!isRecord(item) ||
-          (item.type !== "expression" && item.type !== "table" && item.type !== "folder") ||
+          (item.type !== "expression" && item.type !== "table" &&
+            item.type !== "text" && item.type !== "folder") ||
           !Number.isSafeInteger(item.id) || Number(item.id) < 1 ||
           (item.type === "folder" && item.folderId !== undefined) ||
           (item.folderId !== undefined && !Number.isSafeInteger(item.folderId))) {
@@ -360,6 +388,27 @@ function parseProjectState(text: string): ProjectState {
         folderId: item.folderId as number | undefined,
       };
     });
+  let nextParsedTextId = Math.max(0, ...parsedTexts.map(({ id }) => id)) + 1;
+  for (const expression of parsedExpressions) {
+    if (!expression.note) continue;
+    const textBlock: TextBlock = {
+      id: nextParsedTextId++,
+      text: expression.note,
+      folderId: expression.folderId,
+    };
+    parsedTexts.push(textBlock);
+    const expressionIndex = parsedWorkspaceOrder.findIndex((item) =>
+      item.type === "expression" && item.id === expression.id);
+    parsedWorkspaceOrder.splice(expressionIndex + 1, 0, {
+      type: "text",
+      id: textBlock.id,
+      folderId: textBlock.folderId,
+    });
+    expression.note = undefined;
+  }
+  if (parsedTexts.length > 500 || parsedWorkspaceOrder.length > 1000) {
+    throw new Error("Project contains too many workspace items.");
+  }
   for (const folder of parsedFolders) {
     if (!parsedWorkspaceOrder.some((item) =>
       item.type === "folder" && item.id === folder.id)) {
@@ -370,17 +419,19 @@ function parseProjectState(text: string): ProjectState {
   const expectedWorkspaceKeys = [
     ...expressionIds.map((id) => `expression:${id}`),
     ...tableIds.map((id) => `table:${id}`),
+    ...parsedTexts.map(({ id }) => `text:${id}`),
     ...folderIds.map((id) => `folder:${id}`),
   ];
   if (new Set(workspaceKeys).size !== workspaceKeys.length ||
       workspaceKeys.length !== expectedWorkspaceKeys.length ||
       expectedWorkspaceKeys.some((key) => !workspaceKeys.includes(key))) {
-    throw new Error("Project workspace order must include each expression, table, and folder exactly once.");
+    throw new Error("Project workspace order must include each expression, table, text block, and folder exactly once.");
   }
   return {
     version: 1,
     expressions: parsedExpressions,
     tables: parsedTables,
+    texts: parsedTexts,
     workspaceOrder: parsedWorkspaceOrder,
     folders: parsedFolders,
     sliders,
@@ -434,12 +485,14 @@ function loadAutomaticSavingPreference(): boolean {
   }
 }
 let automaticSavingEnabled = loadAutomaticSavingPreference();
-let expressions: Expression[] = initialProject?.expressions ?? defaultExpressions;
+let expressions: Expression[] = initialProject?.expressions ?? [];
 let tables: DataTable[] = initialProject?.tables ?? [];
+let textBlocks: TextBlock[] = initialProject?.texts ?? [];
 let folders: Folder[] = initialProject?.folders ?? [];
 let workspaceOrder: WorkspaceItem[] = initialProject?.workspaceOrder ?? [
   ...expressions.map(({ id }): WorkspaceItem => ({ type: "expression", id })),
   ...tables.map(({ id }): WorkspaceItem => ({ type: "table", id })),
+  ...textBlocks.map(({ id }): WorkspaceItem => ({ type: "text", id })),
   ...folders.map(({ id }): WorkspaceItem => ({ type: "folder", id })),
 ];
 const sliderValues: Record<string, number> = initialProject?.sliders ?? {};
@@ -452,6 +505,7 @@ let nextId = Math.max(0, ...expressions.map((expression) => expression.id)) + 1;
 let nextTableId = Math.max(0, ...tables.map((table) => table.id)) + 1;
 let nextRowId = Math.max(0, ...tables.flatMap((table) => table.rows.map((row) => row.id))) + 1;
 let nextFolderId = Math.max(0, ...folders.map((folder) => folder.id)) + 1;
+let nextTextId = Math.max(0, ...textBlocks.map((textBlock) => textBlock.id)) + 1;
 let centerX = initialProject?.centerX ?? 0;
 let centerY = initialProject?.centerY ?? 0;
 let scale = initialProject?.scale ?? 48;
@@ -541,60 +595,47 @@ let hoverCurves: CurveGeometry[] = [];
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 app.innerHTML = `
-  <header class="topbar">
-    <a class="brand" href="#" aria-label="Better Desmos 1.5 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">1.5</span></a>
-    <div class="top-note"><span class="status-dot"></span><span id="mode-note">Exact where possible · configurable precision</span></div>
-  </header>
   <main class="workspace">
     <aside class="sidebar">
+      <header class="sidebar-brand">
+        <a class="brand" href="#" aria-label="Better Desmos 2.0 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.0</span></a>
+      </header>
       <div class="panel-heading">
-        <div><h1>Workspace</h1></div>
-        <div class="workspace-actions">
-          <label class="workspace-add-control">
-            <span class="visually-hidden">Add to workspace</span>
-            <select id="workspace-add" aria-label="Add to workspace">
-              <option value="" selected>Add…</option>
-              <option value="expression">Add expression</option>
-              <option value="table">Add table</option>
-              <option value="folder">Add folder</option>
-            </select>
-          </label>
-        </div>
-      </div>
-      <div class="sidebar-scroll">
-        <div class="workspace-items" id="workspace-items" aria-label="Expressions and tables"></div>
-        <section class="sliders-panel" id="sliders" aria-label="Parameter sliders"></section>
-        <div class="sidebar-bottom">
-          <p class="eyebrow">QUICK GUIDE</p>
-          <p>Graph <code>y = f(x)</code>, add a table, or plot an implicit equation.</p>
-          <p class="examples"><code>y = x^2</code><code>sin(x)</code><code>x^2 + y^2 = 4</code></p>
-          <p class="small-note">Rational arithmetic stays exact internally. Graphs are numerical samples and can miss narrow features.</p>
-        </div>
-      </div>
-    </aside>
-    <section class="graph-panel" aria-label="Coordinate graph">
-      <div class="graph-toolbar">
-        <div><p class="eyebrow">2D GRAPH</p><p class="toolbar-caption">Numerical plot · slider playback available</p></div>
-        <div class="toolbar-actions">
         <div class="project-controls" aria-label="Project actions">
           <button type="button" id="save-project">Save</button>
           <button type="button" id="export-project">Export</button>
           <button type="button" id="import-project">Import</button>
           <button type="button" id="share-project">Share</button>
+          <label class="workspace-add-control">
+            <span class="visually-hidden">Add to workspace</span>
+            <select id="workspace-add" aria-label="Add to workspace">
+              <option value="" selected></option>
+              <option value="expression">Add expression</option>
+              <option value="table">Add table</option>
+              <option value="text">Add text</option>
+              <option value="folder">Add folder</option>
+            </select>
+          </label>
           <input type="file" id="project-file" accept="application/json,.json" hidden />
-          <span id="project-status" role="status"></span>
         </div>
-        <button type="button" class="settings-button" id="open-settings" aria-haspopup="dialog">Settings</button>
+      </div>
+      <span id="project-status" role="status"></span>
+      <div class="sidebar-scroll">
+        <div class="workspace-items" id="workspace-items" aria-label="Expressions, tables, text, and folders"></div>
+        <section class="sliders-panel" id="sliders" aria-label="Parameter sliders"></section>
+      </div>
+    </aside>
+    <section class="graph-panel" aria-label="Coordinate graph">
+      <div class="graph-toolbar">
         <div class="view-controls">
-          <button type="button" data-pan="up" aria-label="Pan up">↑</button>
-          <button type="button" data-pan="left" aria-label="Pan left">←</button>
-          <button type="button" data-pan="down" aria-label="Pan down">↓</button>
-          <button type="button" data-pan="right" aria-label="Pan right">→</button>
-          <span class="control-divider"></span>
-          <button type="button" id="zoom-out" aria-label="Zoom out">−</button>
-          <button type="button" id="zoom-in" aria-label="Zoom in">+</button>
-          <button type="button" id="reset-view">Reset</button>
-        </div>
+          <button type="button" class="icon-control" id="open-settings" aria-label="Settings" title="Settings" aria-haspopup="dialog">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm9 4.7v-2.4l-2.2-.6a7.3 7.3 0 0 0-.7-1.7l1.2-1.9-1.7-1.7-1.9 1.2a7.3 7.3 0 0 0-1.7-.7L13.4 3h-2.4l-.6 2.2a7.3 7.3 0 0 0-1.7.7L6.8 4.7 5.1 6.4l1.2 1.9a7.3 7.3 0 0 0-.7 1.7l-2.2.6V13l2.2.6a7.3 7.3 0 0 0 .7 1.7l-1.2 1.9 1.7 1.7 1.9-1.2a7.3 7.3 0 0 0 1.7.7l.6 2.2h2.4l.6-2.2a7.3 7.3 0 0 0 1.7-.7l1.9 1.2 1.7-1.7-1.2-1.9a7.3 7.3 0 0 0 .7-1.7Z"/><circle cx="12" cy="12" r="2" fill="#17212d"/></svg>
+          </button>
+          <button type="button" class="icon-control" id="zoom-out" aria-label="Zoom out" title="Zoom out">−</button>
+          <button type="button" class="icon-control" id="zoom-in" aria-label="Zoom in" title="Zoom in">+</button>
+          <button type="button" class="icon-control" id="reset-view" aria-label="Reset view" title="Reset view">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7h-6v7H4a1 1 0 0 1-1-1Z"/></svg>
+          </button>
         </div>
       </div>
       <div class="canvas-wrap"><canvas id="graph" aria-label="Graph of the entered expressions"></canvas><canvas id="graph-points" aria-hidden="true"></canvas></div>
@@ -673,6 +714,8 @@ expressionList.className = "expressions";
 const sliderList = document.querySelector<HTMLElement>("#sliders")!;
 const tableList = document.createElement("div");
 tableList.className = "tables-panel";
+const textList = document.createElement("div");
+textList.className = "text-blocks";
 const workspaceAdd = document.querySelector<HTMLSelectElement>("#workspace-add")!;
 const canvas = document.querySelector<HTMLCanvasElement>("#graph")!;
 const context = canvas.getContext("2d")!;
@@ -2400,6 +2443,8 @@ function synchronizeWorkspaceOrder(): void {
       ({ type: "expression" as const, id, folderId })),
     ...tables.map(({ id, folderId }) =>
       ({ type: "table" as const, id, folderId })),
+    ...textBlocks.map(({ id, folderId }) =>
+      ({ type: "text" as const, id, folderId })),
     ...folders.map(({ id }) => ({ type: "folder" as const, id })),
   ];
   const availableKeys = new Set(items.map(workspaceItemKey));
@@ -2433,6 +2478,9 @@ function synchronizeWorkspaceOrder(): void {
     } else if (item.type === "table") {
       const table = tables.find((entry) => entry.id === item.id);
       if (table) table.folderId = item.folderId;
+    } else if (item.type === "text") {
+      const textBlock = textBlocks.find((entry) => entry.id === item.id);
+      if (textBlock) textBlock.folderId = item.folderId;
     }
   }
 }
@@ -2452,7 +2500,7 @@ function renderWorkspaceItems(): void {
   for (const element of workspaceList.querySelectorAll<HTMLElement>(".workspace-item[data-workspace-key]")) {
     if (element.dataset.workspaceKey) nodes.set(element.dataset.workspaceKey, element);
   }
-  for (const staging of [expressionList, tableList]) {
+  for (const staging of [expressionList, tableList, textList]) {
     for (const item of staging.children) {
       const element = item as HTMLElement;
       if (element.dataset.workspaceKey) nodes.set(element.dataset.workspaceKey, element);
@@ -2506,7 +2554,10 @@ function renderWorkspaceItems(): void {
           expression.folderId === folder.id ? { ...expression, folderId: undefined } : expression);
         tables = tables.map((table) =>
           table.folderId === folder.id ? { ...table, folderId: undefined } : table);
+        textBlocks = textBlocks.map((textBlock) =>
+          textBlock.folderId === folder.id ? { ...textBlock, folderId: undefined } : textBlock);
         folders = folders.filter((entry) => entry.id !== folder.id);
+        renderTextBlocks();
         renderExpressions();
         renderTables();
       });
@@ -2572,9 +2623,12 @@ function reorderWorkspaceBlock(
   if (source.type === "expression") {
     const expression = expressions.find((entry) => entry.id === source.id);
     if (expression) expression.folderId = validFolderId;
-  } else {
+  } else if (source.type === "table") {
     const table = tables.find((entry) => entry.id === source.id);
     if (table) table.folderId = validFolderId;
+  } else {
+    const textBlock = textBlocks.find((entry) => entry.id === source.id);
+    if (textBlock) textBlock.folderId = validFolderId;
   }
 
   if (validFolderId !== undefined) {
@@ -2845,20 +2899,7 @@ function renderExpressions(): void {
     hsvHeading.append(hsvTitle);
     hsvControls.append(hsvHeading, hsvFields, hsvHelp, colorError);
     appearanceDetails.append(appearanceControls, hsvControls);
-    const noteDetails = document.createElement("details");
-    noteDetails.className = "expression-note";
-    const noteSummary = document.createElement("summary");
-    noteSummary.textContent = expression.note ? "Note" : "Add note";
-    const note = document.createElement("textarea");
-    note.value = expression.note ?? "";
-    note.setAttribute("aria-label", `Expression ${index + 1} note`);
-    note.addEventListener("input", () => {
-      expression.note = note.value;
-      noteSummary.textContent = expression.note ? "Note" : "Add note";
-      scheduleProjectSave();
-    });
-    noteDetails.append(noteSummary, note);
-    row.append(marker, input, visibility, remove, error, appearanceDetails, noteDetails);
+    row.append(marker, input, visibility, remove, error, appearanceDetails);
     container.append(row);
   };
   for (const [index, expression] of expressions.entries()) {
@@ -3300,6 +3341,52 @@ function renderTables(): void {
   scheduleProjectSave();
 }
 
+function renderTextBlocks(): void {
+  textList.replaceChildren();
+  for (const [index, textBlock] of textBlocks.entries()) {
+    const wrapper = createWorkspaceItem(`text:${textBlock.id}`, `Text ${index + 1}`);
+    const content = document.createElement("div");
+    content.className = "text-block";
+    const textarea = document.createElement("textarea");
+    textarea.value = textBlock.text;
+    textarea.maxLength = 10_000;
+    textarea.setAttribute("aria-label", `Text ${index + 1}`);
+    textarea.placeholder = "Write text…";
+    textarea.addEventListener("input", () => {
+      textBlock.text = textarea.value;
+      scheduleProjectSave();
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "remove-button";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `Remove text ${index + 1}`);
+    remove.addEventListener("click", () => {
+      textBlocks = textBlocks.filter((entry) => entry.id !== textBlock.id);
+      workspaceOrder = workspaceOrder.filter((item) =>
+        item.type !== "text" || item.id !== textBlock.id);
+      renderTextBlocks();
+      renderWorkspaceItems();
+      scheduleProjectSave();
+    });
+    content.append(textarea, remove);
+    wrapper.append(content);
+    textList.append(wrapper);
+  }
+}
+
+function addTextBlock(): void {
+  const textBlock: TextBlock = { id: nextTextId++, text: "" };
+  textBlocks.push(textBlock);
+  workspaceOrder.push({ type: "text", id: textBlock.id });
+  renderTextBlocks();
+  renderWorkspaceItems();
+  workspaceList.querySelector<HTMLTextAreaElement>(
+    `.workspace-item[data-workspace-key="text:${textBlock.id}"] textarea`,
+  )?.focus();
+  scheduleProjectSave();
+}
+
 function isRegressionKind(value: string): value is NonNullable<DataTable["regressionKind"]> {
   return value === "logarithmic" || value === "exponential" || value === "power" ||
     value === "sine" || value === "tangent";
@@ -3344,10 +3431,11 @@ function currentProjectState(): ProjectState {
   return {
     version: 1,
     expressions: expressions.map((
-      { id, text, color, lineWidth, opacity, folderId, note, hidden, hsv },
-    ) => ({ id, text, color, lineWidth, opacity, folderId, note, hidden, hsv })),
+      { id, text, color, lineWidth, opacity, folderId, hidden, hsv },
+    ) => ({ id, text, color, lineWidth, opacity, folderId, hidden, hsv })),
     tables: tables.map(({ id, rows, sourceExpressionId, regressionDegree, regressionKind, color, folderId }) =>
       ({ id, rows, sourceExpressionId, regressionDegree, regressionKind, color, folderId })),
+    texts: textBlocks.map(({ id, text, folderId }) => ({ id, text, folderId })),
     workspaceOrder: [...workspaceOrder],
     folders: folders.map(({ id, name, collapsed }) => ({ id, name, collapsed })),
     sliders: { ...sliderValues },
@@ -3390,6 +3478,7 @@ function scheduleProjectSave(): void {
 function applyProjectState(project: ProjectState): void {
   stopSliderAnimation();
   expressions = project.expressions.map((expression) => ({ ...expression }));
+  textBlocks = (project.texts ?? []).map((textBlock) => ({ ...textBlock }));
   workspaceOrder = project.workspaceOrder.map((item) => ({ ...item }));
   tables = project.tables.map((table) => ({
     id: table.id,
@@ -3423,6 +3512,8 @@ function applyProjectState(project: ProjectState): void {
     1,
   );
   nextFolderId = folders.reduce((next, folder) => Math.max(next, folder.id + 1), 1);
+  nextTextId = textBlocks.reduce((next, textBlock) => Math.max(next, textBlock.id + 1), 1);
+  renderTextBlocks();
   renderExpressions();
   renderTables();
   draw();
@@ -3658,6 +3749,8 @@ workspaceAdd.addEventListener("change", () => {
     addExpression();
   } else if (workspaceAdd.value === "table") {
     addTable();
+  } else if (workspaceAdd.value === "text") {
+    addTextBlock();
   } else if (workspaceAdd.value === "folder") {
     createFolder();
   }
@@ -3677,18 +3770,6 @@ document.querySelector("#reset-view")!.addEventListener("click", () => {
   scale = 48;
   draw();
 });
-document.querySelectorAll<HTMLButtonElement>("[data-pan]").forEach((button) => {
-  button.addEventListener("click", () => {
-    switch (button.dataset.pan) {
-      case "up": centerY += 80 / verticalScale(); break;
-      case "down": centerY -= 80 / verticalScale(); break;
-      case "left": centerX -= 80 / scale; break;
-      case "right": centerX += 80 / scale; break;
-    }
-    draw();
-  });
-});
-
 const settingsDialog = document.querySelector<HTMLDialogElement>("#settings-dialog")!;
 document.querySelector("#open-settings")!.addEventListener("click", () => settingsDialog.showModal());
 document.querySelector("#close-settings")!.addEventListener("click", () => settingsDialog.close());
@@ -3762,9 +3843,6 @@ desmosModeInput.addEventListener("change", () => {
   precisionValue.value = graphMode === "desmos"
     ? `≈${FAST_MODE_PRECISION_DIGITS} digits`
     : `${graphSettings.precisionDigits} digits`;
-  document.querySelector("#mode-note")!.textContent = graphMode === "desmos"
-    ? "Desmos mode · fast math"
-    : "Exact where possible · configurable precision";
   renderExpressions();
   draw();
 });
@@ -3875,6 +3953,7 @@ window.addEventListener("resize", draw);
 desmosModeInput.checked = true;
 desmosModeInput.dispatchEvent(new Event("change"));
 setProjectStatus(projectStatus);
+renderTextBlocks();
 renderExpressions();
 renderTables();
 draw();

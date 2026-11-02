@@ -4,14 +4,22 @@ A browser-based graphing calculator built with TypeScript and Vite. Its small st
 
 ## Versioning
 
-The current app version is **1.5**. For each push, increment the second number (for example, `1.4` to `1.5`) and keep the package version in `package.json` in sync as `1.5.0`. When the user explicitly says a change is major enough, increment the first number and reset the second to zero (for example, `1.5` to `2.0`).
+The current app version is **2.0**. Keep the package version in `package.json` in sync as `2.0.0`.
 
 ## Run locally
 
-Requires Node.js 20 or newer.
+Requires Node.js 20 or newer. To run Better Desmos as a standalone file without a local server, build it and open `dist/better-desmos.html` in a browser:
 
 ```sh
 npm install
+npm run build
+```
+
+The generated HTML contains the app's JavaScript and CSS, so it can be copied and opened directly. Keep the project file to rebuild after changing the source.
+
+To run the development version with hot reload:
+
+```sh
 npm run dev
 ```
 
@@ -41,11 +49,11 @@ Single-letter parameters such as `a` or `b` automatically get sliders (default r
 
 `list(v1, v2, ...)` plots the values as points at x-coordinates 1, 2, and so on. The numeric functions `sum`, `product`, `min`, `max`, `mean`, `median`, `variance`, `stdev`, and `factorial` can be used as expression rows with comma-separated arguments. Their results use standard JavaScript number arithmetic; `variance` and `stdev` are population statistics, and factorial is limited to integers 0–170.
 
-Expressions can be hidden and given notes. Expressions and tables can be grouped together in editable workspace folders. Tables show count, mean x/y, median y, population standard deviation, and y range. Available regression models include linear, polynomial, logarithmic, exponential, power, sine, and tangent. Exponential and power fits use log-transformed least squares and require positive y-values; power fits also require positive x-values. All graph types and regressions are limited numerical implementations, not full Desmos syntax or symbolic algebra.
+Expressions can be hidden. Add standalone text blocks from the workspace Add menu for notes and explanations; text blocks, expressions, and tables can all be grouped in editable folders. Tables show count, mean x/y, median y, population standard deviation, and y range. Available regression models include linear, polynomial, logarithmic, exponential, power, sine, and tangent. Exponential and power fits use log-transformed least squares and require positive y-values; power fits also require positive x-values. All graph types and regressions are limited numerical implementations, not full Desmos syntax or symbolic algebra.
 
 ## Tables and regressions
 
-Expressions and tables appear together in one ordered workspace list under the **Workspace** heading. Use the shared **Add to workspace** menu to add an expression, table, or folder. Folders can be collapsed with the arrow beside their name. Drag items into folders to group them, and drag items to reorder them; focus an item's reorder handle and use the up/down arrow keys for keyboard reordering. Folder membership, collapsed state, and mixed item order are saved with the project and included in exports and share links. Older projects without an explicit order open with expressions before tables, preserving existing expression folders.
+Expressions, tables, and text blocks appear together in one ordered workspace list beneath the app name and project controls. Use the **+** menu to add an expression, table, text block, or folder. Folders can be collapsed with the arrow beside their name. Drag items into folders to group them, and drag items to reorder them; focus an item's reorder handle and use the up/down arrow keys for keyboard reordering. Folder membership, collapsed state, text, and mixed item order are saved with the project and included in exports and share links. Older projects without an explicit order open with expressions before tables, preserving existing expression folders; legacy expression notes are imported as text blocks.
 
 In each table, add or remove rows and complete rows with finite numbers to plot their points. Empty rows are ignored; a partly filled row is reported as an error. Tables can be removed independently.
 
@@ -65,7 +73,7 @@ Finite decimal literals and arithmetic made only from rational values are repres
 
 Operations involving `pi`, `e`, variables, or transcendental functions use `decimal.js` at the configured precision (50 significant digits by default) with round-half-even rounding. These are high-precision approximations, not symbolic or mathematically exact results. The graph is itself an approximation: explicit curves are sampled about once per horizontal screen pixel by default, with adaptive subdivision around steep or sharply curved regions so branches can reach the viewport edge near asymptotes. Explicit samples are reused across redraws when the expression and slider values have not changed. The graph canvas is rendered at three times the visible viewport width and height, leaving one viewport of pre-rendered graph area beyond each edge. During graph dragging, the rendered canvas is translated as a quick preview; nearby panning reveals that buffered area immediately, while longer drags can expose empty edges until the graph is recalculated after release. The graph stays static while idle and redraws only in response to changes. Implicit contours use a zoom-dependent grid from one screen pixel up to the configured spacing (six pixels by default), then join samples with linear interpolation. Narrow features can be missed, and discontinuities or ambiguous contour intersections are detected heuristically. The graph coordinates originate from JavaScript canvas coordinates and are therefore approximate too.
 
-Expressions are parsed once and reused until edited. Open **Settings** beside the graph controls to show or hide the grid, x- and y-axes, and axis numbers, or change the ratio of the axes' screen scales. Equal units (1:1) is the default; changing the ratio changes how graph shapes are displayed. These graph display preferences are saved with projects. The same menu contains the accuracy and performance controls.
+Expressions are parsed once and reused until edited. Open the gear-shaped **Settings** control over the graph to show or hide the grid, x- and y-axes, and axis numbers, or change the ratio of the axes' screen scales. Equal units (1:1) is the default; changing the ratio changes how graph shapes are displayed. These graph display preferences are saved with projects. The same menu contains the accuracy and performance controls. The vertical icon stack provides Settings, zoom out, zoom in, and reset view (home) in that order. Drag the graph to pan.
 
 ## Accuracy and performance controls
 
@@ -94,4 +102,4 @@ This is a numerical graphing prototype, not a proof system or a guarantee of cor
 
 ## Saving and sharing
 
-Click **Save** to open a confirmation dialog. Choose whether to enable **Auto-save** for future changes, then confirm to save the project in browser local storage on this device. The auto-save preference is remembered on this device and can be changed the next time you save. **Export** downloads a JSON project file; **Import** validates and loads a project JSON file. **Share** copies a URL containing the project data, so anyone with that link can open the same expressions, tables, sliders, folders, notes, and graph view. Share links are self-contained and have a 50,000-character limit; use JSON export/import for larger projects. There is no cloud account or server-side project storage.
+Click **Save** to open a confirmation dialog. Choose whether to enable **Auto-save** for future changes, then confirm to save the project in browser local storage on this device. The auto-save preference is remembered on this device and can be changed the next time you save. **Export** downloads a JSON project file; **Import** validates and loads a project JSON file. **Share** copies a URL containing the project data, so anyone with that link can open the same expressions, tables, text blocks, sliders, folders, and graph view. Share links are self-contained and have a 50,000-character limit; use JSON export/import for larger projects. There is no cloud account or server-side project storage.
