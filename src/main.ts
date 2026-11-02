@@ -708,6 +708,7 @@ const performanceProfile: PerformanceProfile = {
 };
 let nextTableRevision = 1;
 let drawFrame: number | undefined;
+let clearDragTransformAfterDraw = false;
 let graphMode: "precise" | "desmos" = "precise";
 const graphOptions: GraphOptions = initialProject?.graphOptions ?? {
   showGrid: true,
@@ -738,7 +739,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 2.1 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.1</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 2.2 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.2</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -2229,6 +2230,10 @@ function scheduleDraw(): void {
   drawFrame = window.requestAnimationFrame(() => {
     drawFrame = undefined;
     draw();
+    if (clearDragTransformAfterDraw) {
+      canvas.style.transform = "";
+      clearDragTransformAfterDraw = false;
+    }
   });
 }
 
@@ -4222,11 +4227,12 @@ canvas.addEventListener("pointerup", (event) => {
   }
   const moved = drag?.moved ?? false;
   drag = undefined;
-  canvas.style.transform = "";
   if (moved) {
     hoverPosition = undefined;
+    clearDragTransformAfterDraw = true;
     scheduleDraw();
   } else {
+    canvas.style.transform = "";
     drawHoverOverlay();
   }
 });
@@ -4236,6 +4242,7 @@ canvas.addEventListener("pointercancel", () => {
     centerY = drag.centerY;
   }
   drag = undefined;
+  clearDragTransformAfterDraw = false;
   canvas.style.transform = "";
   drawHoverOverlay();
 });
