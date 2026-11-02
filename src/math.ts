@@ -197,7 +197,7 @@ function parse(
       continue;
     }
     const remaining = expression.slice(offset);
-    const match = /^(?:\d+(?:\.\d*)?|\.\d+)|^[a-zA-Z]+|^[+\-*/^(),]/.exec(remaining);
+    const match = /^(?:\d+(?:\.\d*)?|\.\d+)|^[a-zA-Z]+(?:_[a-zA-Z0-9]+)?|^[+\-*/^(),]/.exec(remaining);
     if (!match) {
       throw new Error(`Unexpected character "${expression[offset]}"`);
     }
@@ -270,7 +270,7 @@ function parse(
     if (token === "(" || /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(token ?? "")) {
       return true;
     }
-    if (!token || !/^[a-zA-Z]+$/.test(token)) {
+    if (!token || !/^[a-zA-Z]+(?:_[a-zA-Z0-9]+)?$/.test(token)) {
       return false;
     }
     const name = token.toLowerCase();
@@ -1233,7 +1233,7 @@ export function compileTickerAction(
   source: string,
   variables: Record<string, number>,
 ): { target: string; evaluate: () => number } {
-  const match = /^\s*([a-z])\s*=\s*(.+)\s*$/i.exec(source);
+  const match = /^\s*([a-z](?:_[a-z0-9]+)?)\s*=\s*(.+)\s*$/i.exec(source);
   if (!match) {
     throw new Error("Ticker action must be an assignment such as a = a + 1");
   }
@@ -1525,10 +1525,11 @@ function compilePointGraph(
   const coordinates = splitCallArguments(trimmed.slice(1, -1));
   if (coordinates.length !== 2) return undefined;
   const variablesInCoordinate = (coordinate: string): string[] => {
-    const identifiers = coordinate.match(/[a-z]+/gi)?.map((name) => name.toLowerCase()) ?? [];
+    const identifiers = coordinate.match(/[a-z]+(?:_[a-z0-9]+)?/gi)?.map((name) => name.toLowerCase()) ?? [];
     const sliderVariables = [...new Set(identifiers.filter((name) =>
       name !== "pi" && name !== "e" && !functions.has(name)))];
-    if (sliderVariables.some((name) => name.length !== 1 || POINT_NON_SLIDER_VARIABLES.has(name))) {
+    if (sliderVariables.some((name) =>
+      !/^[a-z](?:_[a-z0-9]+)?$/.test(name) || POINT_NON_SLIDER_VARIABLES.has(name))) {
       throw new Error("Draggable point coordinates must use slider variables and supported math operations");
     }
     return sliderVariables;

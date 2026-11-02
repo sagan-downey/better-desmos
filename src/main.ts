@@ -68,6 +68,8 @@ interface TableRow {
 interface DataTable {
   id: number;
   rows: TableRow[];
+  name?: string;
+  collapsed?: boolean;
   folderId?: number;
   sourceExpressionId?: number;
   regressionDegree?: number;
@@ -94,6 +96,8 @@ interface TextBlock {
 interface Ticker {
   id: number;
   action: string;
+  name?: string;
+  collapsed?: boolean;
   intervalMs: number;
   runMode: "repeat" | "count";
   tickCount: number;
@@ -429,7 +433,9 @@ function parseProjectState(text: string): ProjectState {
   const parsedTables = value.tables.map((item): DataTable => {
     if (!isRecord(item) || !Number.isSafeInteger(item.id) || Number(item.id) < 1 ||
         !Array.isArray(item.rows) || item.rows.length > 5000 ||
-        typeof item.color !== "string" || !/^#[\da-f]{6}$/i.test(item.color)) {
+        typeof item.color !== "string" || !/^#[\da-f]{6}$/i.test(item.color) ||
+        (item.name !== undefined && (typeof item.name !== "string" || item.name.length > 40)) ||
+        (item.collapsed !== undefined && typeof item.collapsed !== "boolean")) {
       throw new Error("Project contains an invalid table.");
     }
     const rows = item.rows.map((row): TableRow => {
@@ -453,6 +459,8 @@ function parseProjectState(text: string): ProjectState {
     return {
       id: item.id as number,
       rows,
+      name: item.name as string | undefined,
+      collapsed: item.collapsed as boolean | undefined,
       color: item.color,
       sourceExpressionId: Number.isInteger(item.sourceExpressionId)
         ? item.sourceExpressionId as number
@@ -491,6 +499,8 @@ function parseProjectState(text: string): ProjectState {
     for (const item of value.tickers) {
       if (!isRecord(item) || !Number.isSafeInteger(item.id) || Number(item.id) < 1 ||
           typeof item.action !== "string" || item.action.length > 512 ||
+          (item.name !== undefined && (typeof item.name !== "string" || item.name.length > 40)) ||
+          (item.collapsed !== undefined && typeof item.collapsed !== "boolean") ||
           typeof item.intervalMs !== "number" || !Number.isInteger(item.intervalMs) ||
           item.intervalMs < 10 || item.intervalMs > 60_000 ||
           (item.runMode !== "repeat" && item.runMode !== "count") ||
@@ -502,6 +512,8 @@ function parseProjectState(text: string): ProjectState {
       parsedTickers.push({
         id: item.id as number,
         action: item.action,
+        name: item.name as string | undefined,
+        collapsed: item.collapsed as boolean | undefined,
         intervalMs: item.intervalMs,
         runMode: item.runMode,
         tickCount: item.tickCount,
@@ -511,7 +523,8 @@ function parseProjectState(text: string): ProjectState {
   }
   const sliders: Record<string, number> = {};
   for (const [name, slider] of Object.entries(value.sliders)) {
-    if (!/^[a-z]$/i.test(name) || typeof slider !== "number" || !Number.isFinite(slider)) {
+    if (!/^[a-z](?:_[a-z0-9]+)?$/i.test(name) ||
+        typeof slider !== "number" || !Number.isFinite(slider)) {
       throw new Error("Project contains an invalid slider.");
     }
     sliders[name] = slider;
@@ -520,7 +533,7 @@ function parseProjectState(text: string): ProjectState {
   if (value.sliderOptions !== undefined) {
     if (!isRecord(value.sliderOptions)) throw new Error("Project contains invalid slider settings.");
     for (const [name, options] of Object.entries(value.sliderOptions)) {
-      if (!/^[a-z]$/i.test(name) || !isRecord(options) ||
+      if (!/^[a-z](?:_[a-z0-9]+)?$/i.test(name) || !isRecord(options) ||
           typeof options.min !== "number" || !Number.isFinite(options.min) ||
           typeof options.max !== "number" || !Number.isFinite(options.max) ||
           options.max <= options.min || Math.abs(options.min) > 1_000_000 ||
@@ -815,7 +828,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 2.5 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.5</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 2.6 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.6</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -2543,17 +2556,17 @@ if (import.meta.env.DEV) {
 function sliderNames(): string[] {
   const reserved = new Set([
     "x", "y", "t", "pi", "e", "sqrt", "sin", "cos", "tan", "asin", "acos",
-    "atan", "ln", "log", "exp", "abs", "parametric", "polar", "derivative", "integral",
+    "atan", "ln", "log", "exp", "abs", "floor", "ceil", "parametric", "polar", "derivative", "integral",
     "list", "sum", "product", "min", "max", "mean", "median", "variance", "stdev", "factorial",
   ]);
   return [...new Set(expressions.flatMap((expression) =>
     [expression.text, expression.hsv?.hue ?? "",
       expression.hsv?.saturation ?? "", expression.hsv?.value ?? ""]
-      .flatMap((source) => source.match(/[a-zA-Z]+/g) ?? [])
+      .flatMap((source) => source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [])
   ).concat(tickers.flatMap((ticker) =>
-    ticker.action.match(/[a-zA-Z]+/g) ?? []
+    ticker.action.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? []
   )).map((name) => name.toLowerCase()).filter((name) =>
-    name.length === 1 && !reserved.has(name)))].sort();
+    /^[a-z](?:_[a-z0-9]+)?$/.test(name) && !reserved.has(name)))].sort();
 }
 
 function renderSliders(): void {
@@ -2583,7 +2596,12 @@ function renderSliders(): void {
     const row = document.createElement("label");
     row.className = "slider-row";
     const title = document.createElement("span");
-    title.textContent = name;
+    title.className = "slider-name";
+    title.title = name;
+    const titleText = document.createElement("span");
+    titleText.className = "slider-name-text";
+    titleText.textContent = name;
+    title.append(titleText);
     const range = document.createElement("input");
     range.type = "range";
     range.min = String(options.min);
@@ -2675,6 +2693,11 @@ function renderSliders(): void {
     speedInput.addEventListener("change", updateOptions);
     row.append(title, play, range, number);
     sliderList.append(row);
+    const nameOverflow = titleText.scrollWidth - title.clientWidth;
+    if (nameOverflow > 0) {
+      title.style.setProperty("--slider-name-shift", `${-nameOverflow}px`);
+      title.classList.add("slider-name-overflow");
+    }
     const boundsRow = document.createElement("div");
     boundsRow.className = "slider-settings-row";
     boundsRow.append(
@@ -3604,16 +3627,39 @@ function renderTables(): void {
     container.className = "data-table";
     const heading = document.createElement("div");
     heading.className = "data-table-heading";
-    const title = document.createElement("span");
     const sourceExpression = table.sourceExpressionId === undefined
       ? undefined
       : expressions.findIndex((entry) => entry.id === table.sourceExpressionId);
-    title.textContent = sourceExpression === undefined
+    const defaultTitle = sourceExpression === undefined
       ? `Table ${tableIndex + 1}`
       : sourceExpression < 0
         ? `Table ${tableIndex + 1} · source removed`
         : `Table ${tableIndex + 1} · Expression ${sourceExpression + 1}`;
-    title.style.color = table.color;
+    const collapse = document.createElement("button");
+    collapse.type = "button";
+    collapse.className = "table-collapse";
+    collapse.textContent = table.collapsed ? "▸" : "▾";
+    collapse.setAttribute("aria-label", `${table.collapsed ? "Expand" : "Collapse"} ${table.name || defaultTitle}`);
+    collapse.setAttribute("aria-expanded", String(!table.collapsed));
+    const name = document.createElement("input");
+    name.type = "text";
+    name.className = "workspace-item-name";
+    name.value = table.name ?? "";
+    name.placeholder = defaultTitle;
+    name.maxLength = 40;
+    name.setAttribute("aria-label", `Table ${tableIndex + 1} name`);
+    name.style.color = table.color;
+    name.addEventListener("input", () => {
+      table.name = name.value;
+      collapse.setAttribute(
+        "aria-label",
+        `${table.collapsed ? "Expand" : "Collapse"} ${table.name || defaultTitle}`,
+      );
+      scheduleProjectSave();
+    });
+    name.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") event.stopPropagation();
+    });
     const removeTable = document.createElement("button");
     removeTable.className = "table-remove";
     removeTable.type = "button";
@@ -3624,8 +3670,16 @@ function renderTables(): void {
       renderTables();
       draw();
     });
-    heading.append(title, removeTable);
+    collapse.addEventListener("click", () => {
+      table.collapsed = !table.collapsed;
+      renderTables();
+      scheduleProjectSave();
+    });
+    heading.append(collapse, name, removeTable);
 
+    const content = document.createElement("div");
+    content.className = "data-table-content";
+    content.hidden = Boolean(table.collapsed);
     const columns = document.createElement("div");
     columns.className = "table-columns";
     const xHeading = document.createElement("span");
@@ -3771,7 +3825,8 @@ function renderTables(): void {
     const stats = document.createElement("p");
     stats.className = "table-stats";
     stats.textContent = tableStatistics(table);
-    container.append(heading, columns, rowList, actions, summary, stats, error);
+    content.append(columns, rowList, actions, summary, stats, error);
+    container.append(heading, content);
     wrapper.append(container);
     tableList.append(wrapper);
   }
@@ -3821,8 +3876,30 @@ function renderTickers(): void {
     panel.className = "ticker-panel";
     const heading = document.createElement("div");
     heading.className = "ticker-heading";
-    const title = document.createElement("strong");
-    title.textContent = `Ticker ${index + 1}`;
+    const collapse = document.createElement("button");
+    collapse.type = "button";
+    collapse.className = "table-collapse";
+    collapse.textContent = ticker.collapsed ? "▸" : "▾";
+    collapse.setAttribute("aria-label", `${ticker.collapsed ? "Expand" : "Collapse"} ${ticker.name || `Ticker ${index + 1}`}`);
+    collapse.setAttribute("aria-expanded", String(!ticker.collapsed));
+    const name = document.createElement("input");
+    name.type = "text";
+    name.className = "workspace-item-name";
+    name.value = ticker.name ?? "";
+    name.placeholder = `Ticker ${index + 1}`;
+    name.maxLength = 40;
+    name.setAttribute("aria-label", `Ticker ${index + 1} name`);
+    name.addEventListener("input", () => {
+      ticker.name = name.value;
+      collapse.setAttribute(
+        "aria-label",
+        `${ticker.collapsed ? "Expand" : "Collapse"} ${ticker.name || `Ticker ${index + 1}`}`,
+      );
+      scheduleProjectSave();
+    });
+    name.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") event.stopPropagation();
+    });
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "remove-button";
@@ -3837,7 +3914,15 @@ function renderTickers(): void {
       renderExpressions();
       scheduleProjectSave();
     });
-    heading.append(title, remove);
+    collapse.addEventListener("click", () => {
+      ticker.collapsed = !ticker.collapsed;
+      renderTickers();
+      scheduleProjectSave();
+    });
+    heading.append(collapse, name, remove);
+    const content = document.createElement("div");
+    content.className = "ticker-content";
+    content.hidden = Boolean(ticker.collapsed);
 
     const action = document.createElement("input");
     action.type = "text";
@@ -3944,7 +4029,8 @@ function renderTickers(): void {
     error.setAttribute("role", "status");
     error.textContent = ticker.error ?? "";
 
-    panel.append(heading, action, intervalLabel, runMode, countLabel, play, error);
+    content.append(action, intervalLabel, runMode, countLabel, play, error);
+    panel.append(heading, content);
     wrapper.append(panel);
     tickerList.append(wrapper);
   }
@@ -3986,6 +4072,8 @@ function addExpression(text = ""): void {
 function addTable(): void {
   const table = {
     id: nextTableId++,
+    name: "",
+    collapsed: false,
     rows: [
       { id: nextRowId++, x: "", y: "" },
       { id: nextRowId++, x: "", y: "" },
@@ -4007,6 +4095,8 @@ function addTicker(): void {
   const ticker: Ticker = {
     id: nextTickerId++,
     action: "a = a + 1",
+    name: "",
+    collapsed: false,
     intervalMs: 1000,
     runMode: "repeat",
     tickCount: 10,
@@ -4028,11 +4118,11 @@ function currentProjectState(): ProjectState {
     expressions: expressions.map((
       { id, text, color, lineWidth, opacity, folderId, hidden, draggable, hsv },
     ) => ({ id, text, color, lineWidth, opacity, folderId, hidden, draggable, hsv })),
-    tables: tables.map(({ id, rows, sourceExpressionId, regressionDegree, regressionKind, color, folderId }) =>
-      ({ id, rows, sourceExpressionId, regressionDegree, regressionKind, color, folderId })),
+    tables: tables.map(({ id, rows, name, collapsed, sourceExpressionId, regressionDegree, regressionKind, color, folderId }) =>
+      ({ id, rows, name, collapsed, sourceExpressionId, regressionDegree, regressionKind, color, folderId })),
     texts: textBlocks.map(({ id, text, folderId }) => ({ id, text, folderId })),
-    tickers: tickers.map(({ id, action, intervalMs, runMode, tickCount, folderId }) =>
-      ({ id, action, intervalMs, runMode, tickCount, folderId })),
+    tickers: tickers.map(({ id, action, name, collapsed, intervalMs, runMode, tickCount, folderId }) =>
+      ({ id, action, name, collapsed, intervalMs, runMode, tickCount, folderId })),
     workspaceOrder: [...workspaceOrder],
     folders: folders.map(({ id, name, collapsed }) => ({ id, name, collapsed })),
     sliders: { ...sliderValues },
@@ -4139,6 +4229,8 @@ function applyProjectState(project: ProjectState, recordHistory = true): void {
   tables = project.tables.map((table) => ({
     id: table.id,
     rows: table.rows.map((row) => ({ ...row })),
+    name: table.name,
+    collapsed: table.collapsed,
     sourceExpressionId: table.sourceExpressionId,
     regressionDegree: table.regressionDegree,
     regressionKind: table.regressionKind,

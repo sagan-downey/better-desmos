@@ -61,6 +61,29 @@ describe("compileExpression", () => {
     expect(compileExpression("2sin(pi / 2)")(0).value.toNumber()).toBeCloseTo(2);
   });
 
+  it("supports letter-and-number subscripted slider variables", () => {
+    const variables = { a_1: 3, x_mean: 4, b_12c: 2 };
+    expect(compileExpression("a_1 + x_mean * b_12c", variables)(0).value.toNumber()).toBe(11);
+    expect(compileExpression("2a_1", variables)(0).value.toNumber()).toBe(6);
+
+    const point = compileGraphExpression("(a_mean + 1, floor(b_12))", {
+      a_mean: 2.5,
+      b_12: 3.8,
+    });
+    expect(point.kind).toBe("point");
+    if (point.kind === "point") {
+      expect(point.xVariables).toEqual(["a_mean"]);
+      expect(point.yVariables).toEqual(["b_12"]);
+      expect(point.evaluate()).toEqual([3.5, 3]);
+    }
+
+    const ticker = compileTickerAction("x_mean = x_mean + 1", { x_mean: 4 });
+    expect(ticker.target).toBe("x_mean");
+    expect(ticker.evaluate()).toBe(5);
+    expect(() => compileExpression("a_", variables)).toThrow();
+    expect(() => compileExpression("a_mean", { a: 1 })).toThrow(/Unknown name/);
+  });
+
   it("evaluates supported functions with approximate values", () => {
     const result = compileExpression("sin(pi / 2)")(0);
     expect(result.exact).toBe(false);
