@@ -257,4 +257,22 @@ describe("compileExpression", () => {
     expect(() => compileImplicitEquation("x + unknown = y")).toThrow('Unknown name "unknown"');
     expect(compileImplicitEquation("tan(35.6x)=0")(Math.PI / 35.6, 3).toNumber()).toBeCloseTo(0, 14);
   });
+
+  it("plots equations linear in y as explicit curves, including factored forms", () => {
+    const factored = compileGraphExpression("(x - 1)(x + 1) = y");
+    expect(factored.kind).toBe("explicit");
+    if (factored.kind === "explicit") {
+      const result = factored.evaluate(2);
+      expect(typeof result === "number" ? result : result.value.toNumber()).toBeCloseTo(3);
+    }
+
+    const shifted = compileFastGraphExpression("y + 2 = (x - 1)(x + 1)");
+    expect(shifted.kind).toBe("explicit");
+    if (shifted.kind === "explicit") {
+      expect(shifted.evaluate(2)).toBeCloseTo(1);
+    }
+    expect(compileFastGraphExpression("x^2 + y^2 = 4").kind).toBe("implicit");
+    expect(compileFastGraphExpression("x * y = x^2").kind).toBe("implicit");
+    expect(compileFastGraphExpression("x + y = x + y").kind).toBe("implicit");
+  });
 });

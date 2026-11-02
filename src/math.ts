@@ -539,6 +539,199 @@ function assertFiniteFastResult(value: number): number {
   return value;
 }
 
+interface YAffineExpression {
+  coefficient: Node;
+  constant: Node;
+}
+
+function zeroNode(): Node {
+  return { type: "number", value: rational(0n) };
+}
+
+function oneNode(): Node {
+  return { type: "number", value: rational(1n) };
+}
+
+function isZeroNode(node: Node): boolean {
+  return node.type === "number" && node.value.numerator === 0n;
+}
+
+function isOneNode(node: Node): boolean {
+  return node.type === "number" && node.value.numerator === node.value.denominator;
+}
+
+function negateNode(node: Node): Node {
+  if (node.type === "number") {
+    return { type: "number", value: rational(-node.value.numerator, node.value.denominator) };
+  }
+  if (node.type === "unary" && node.operator === "-") {
+    return node.operand;
+  }
+  return { type: "unary", operator: "-", operand: node };
+}
+
+function binaryNode(operator: "+" | "-" | "*" | "/", left: Node, right: Node): Node {
+  if (operator === "+") {
+    if (isZeroNode(left)) return right;
+    if (isZeroNode(right)) return left;
+  } else if (operator === "-") {
+    if (isZeroNode(right)) return left;
+    if (isZeroNode(left)) return negateNode(right);
+  } else if (operator === "*") {
+    if (isZeroNode(left) || isZeroNode(right)) return zeroNode();
+    if (isOneNode(left)) return right;
+    if (isOneNode(right)) return left;
+  } else {
+    if (isZeroNode(left)) return zeroNode();
+    if (isOneNode(right)) return left;
+  }
+  return { type: "binary", operator, left, right };
+}
+
+function affineInY(node: Node): YAffineExpression | undefined {
+  if (node.type === "variable" && node.name === "y") {
+    return { coefficient: oneNode(), constant: zeroNode() };
+  }
+  if (node.type === "number" || node.type === "constant" ||
+      (node.type === "variable" && node.name !== "y")) {
+    return { coefficient: zeroNode(), constant: node };
+  }
+  if (node.type === "unary") {
+    const operand = affineInY(node.operand);
+    if (!operand) return undefined;
+    return node.operator === "+"
+      ? operand
+      : {
+        coefficient: negateNode(operand.coefficient),
+        constant: negateNode(operand.constant),
+      };
+  }
+  if (node.type === "call") {
+    return node.argument.type === "variable" && node.argument.name === "y"
+      ? undefined
+      : containsY(node.argument)
+        ? undefined
+        : { coefficient: zeroNode(), constant: node };
+  }
+  if (node.type !== "binary") {
+    return undefined;
+  }
+
+  const leftContainsY = containsY(node.left);
+  const rightContainsY = containsY(node.right);
+  if (!leftContainsY && !rightContainsY) {
+    return { coefficient: zeroNode(), constant: node };
+  }
+  if (node.operator === "+" || node.operator === "-") {
+    const left = affineInY(node.left);
+    const right = affineInY(node.right);
+    if (!left || !right) return undefined;
+    return {
+      coefficient: binaryNode(node.operator, left.coefficient, right.coefficient),
+      constant: binaryNode(node.operator, left.constant, right.constant),
+    };
+  }
+  if (node.operator === "*" && leftContainsY !== rightContainsY) {
+    const affine = affineInY(leftContainsY ? node.left : node.right);
+    const factor = leftContainsY ? node.right : node.left;
+    if (!affine) return undefined;
+    return {
+      coefficient: binaryNode("*", affine.coefficient, factor),
+      constant: binaryNode("*", affine.constant, factor),
+    };
+  }
+  if (node.operator === "/" && !rightContainsY) {
+    const numerator = affineInY(node.left);
+    if (!numerator) return undefined;
+    return {
+      coefficient: binaryNode("/", numerator.coefficient, node.right),
+      constant: binaryNode("/", numerator.constant, node.right),
+    };
+  }
+  return undefined;
+}
+
+function containsY(node: Node): boolean {
+  switch (node.type) {
+    case "variable":
+      return node.name === "y";
+    case "unary":
+      return containsY(node.operand);
+    case "binary":
+      return containsY(node.left) || containsY(node.right);
+    case "call":
+      return containsY(node.argument);
+    default:
+      return false;
+  }
+}
+
+function containsX(node: Node): boolean {
+  switch (node.type) {
+    case "variable":
+      return node.name === "x";
+    case "unary":
+      return containsX(node.operand);
+    case "binary":
+      return containsX(node.left) || containsX(node.right);
+    case "call":
+      return containsX(node.argument);
+    default:
+      return false;
+  }
+}
+
+function compileYAffineEquation(
+  left: Node,
+  right: Node,
+  variables: Record<string, number>,
+  fast: boolean,
+): Extract<GraphExpression, { kind: "explicit" }> | undefined {
+  const leftAffine = affineInY(left);
+  const rightAffine = affineInY(right);
+  if (!leftAffine || !rightAffine) return undefined;
+  const coefficient = binaryNode("-", leftAffine.coefficient, rightAffine.coefficient);
+  const constant = binaryNode("-", leftAffine.constant, rightAffine.constant);
+  if (containsY(coefficient) || containsY(constant) || containsX(coefficient)) {
+    return undefined;
+  }
+  const solution = binaryNode("/", negateNode(constant), coefficient);
+
+  if (fast) {
+    if (evaluateFast(coefficient, 0, undefined, variables) === 0) return undefined;
+    return {
+      kind: "explicit",
+      evaluate: (x: number) => {
+        if (!Number.isFinite(x)) {
+          throw new Error("x must be a finite number");
+        }
+        const value = evaluateFast(solution, x, undefined, variables);
+        if (!Number.isFinite(value)) {
+          throw new Error("Equation does not define a y-value for this x");
+        }
+        return assertFiniteFastResult(value);
+      },
+    };
+  }
+
+  if (asDecimal(evaluate(coefficient, new Decimal(0), undefined, variables)).isZero()) {
+    return undefined;
+  }
+  return {
+    kind: "explicit",
+    evaluate: (x: number) => {
+      if (!Number.isFinite(x)) {
+        throw new Error("x must be a finite number");
+      }
+      const value = evaluate(solution, new Decimal(x.toString()), undefined, variables);
+      return {
+        value: asDecimal(value),
+        exact: value.kind === "rational",
+      };
+    },
+  };
+}
+
 function integerSquareRoot(value: bigint): bigint {
   if (value < 2n) {
     return value;
@@ -1296,6 +1489,15 @@ export function compileGraphExpression(
     return { kind: "explicit", evaluate: compileExpression(source, variables) };
   }
   if (source.includes("=")) {
+    const equals = [...source.matchAll(/=/g)];
+    if (equals.length === 1) {
+      const splitAt = equals[0]!.index!;
+      const variableNames = Object.keys(variables);
+      const left = parse(source.slice(0, splitAt), true, false, variableNames);
+      const right = parse(source.slice(splitAt + 1), true, false, variableNames);
+      const explicit = compileYAffineEquation(left, right, variables, false);
+      if (explicit) return explicit;
+    }
     return { kind: "implicit", evaluate: compileImplicitEquation(source, variables) };
   }
   return { kind: "explicit", evaluate: compileExpression(source, variables) };
@@ -1344,6 +1546,8 @@ export function compileFastGraphExpression(
   const variableNames = Object.keys(variables);
   const left = parse(leftSource, true, false, variableNames);
   const right = parse(rightSource, true, false, variableNames);
+  const explicit = compileYAffineEquation(left, right, variables, true);
+  if (explicit) return explicit;
   return {
     kind: "implicit",
     evaluate: (x: number, y: number) => {

@@ -4,7 +4,7 @@ A browser-based graphing calculator built with TypeScript and Vite. Its small st
 
 ## Versioning
 
-The current app version is **1.4**. For each push, increment the second number (for example, `1.3` to `1.4`) and keep the package version in `package.json` in sync as `1.4.0`. When the user explicitly says a change is major enough, increment the first number and reset the second to zero (for example, `1.4` to `2.0`).
+The current app version is **1.5**. For each push, increment the second number (for example, `1.4` to `1.5`) and keep the package version in `package.json` in sync as `1.5.0`. When the user explicitly says a change is major enough, increment the first number and reset the second to zero (for example, `1.5` to `2.0`).
 
 ## Run locally
 
@@ -24,7 +24,7 @@ npm run build
 
 ## Expressions
 
-Each row can plot `y` as a function of `x`, an implicit equation whose contour is graphed where both sides are equal, or a shaded inequality. For example, `x^2 + y^2 = 4` draws a circle and `y >= x^2` shades the region above a parabola. The optional `y =` prefix is accepted for explicit functions. Supported syntax:
+Each row can plot `y` as a function of `x`, an implicit equation whose contour is graphed where both sides are equal, or a shaded inequality. Equations that can be solved linearly for `y` are graphed as explicit functions even if `y` is on the right or appears with an offset, such as `(x - 1)(x + 1) = y` or `y + 2 = (x - 1)(x + 1)`. Equations nonlinear in `y`, such as `x^2 + y^2 = 4`, use the implicit contour renderer. The optional `y =` prefix is accepted for explicit functions. The expression text is kept as entered; compiled parser trees and graph-sample caches are internal and are never shown as a rewritten or simplified expression. Supported syntax:
 
 - Numbers, parentheses, `x`, `pi`, and `e`
 - `+`, `-`, `*`, `/`, and `^`; implicit multiplication is supported (for example, `2x`, `35.6x`, or `2(x + 1)`)
@@ -41,11 +41,13 @@ Single-letter parameters such as `a` or `b` automatically get sliders (default r
 
 `list(v1, v2, ...)` plots the values as points at x-coordinates 1, 2, and so on. The numeric functions `sum`, `product`, `min`, `max`, `mean`, `median`, `variance`, `stdev`, and `factorial` can be used as expression rows with comma-separated arguments. Their results use standard JavaScript number arithmetic; `variance` and `stdev` are population statistics, and factorial is limited to integers 0–170.
 
-Expressions can be hidden, assigned to editable folders, and given notes. Tables show count, mean x/y, median y, population standard deviation, and y range. Available regression models include linear, polynomial, logarithmic, exponential, power, sine, and tangent. Exponential and power fits use log-transformed least squares and require positive y-values; power fits also require positive x-values. All graph types and regressions are limited numerical implementations, not full Desmos syntax or symbolic algebra.
+Expressions can be hidden and given notes. Expressions and tables can be grouped together in editable workspace folders. Tables show count, mean x/y, median y, population standard deviation, and y range. Available regression models include linear, polynomial, logarithmic, exponential, power, sine, and tangent. Exponential and power fits use log-transformed least squares and require positive y-values; power fits also require positive x-values. All graph types and regressions are limited numerical implementations, not full Desmos syntax or symbolic algebra.
 
 ## Tables and regressions
 
-Select **Add table** to create an editable x/y data table. Add or remove rows, and complete rows with finite numbers to plot their points. Empty rows are ignored; a partly filled row is reported as an error. Tables can be removed independently.
+Expressions and tables appear together in one ordered workspace list under the **Workspace** heading. Use the shared **Add to workspace** menu to add an expression, table, or folder. Folders can be collapsed with the arrow beside their name. Drag items into folders to group them, and drag items to reorder them; focus an item's reorder handle and use the up/down arrow keys for keyboard reordering. Folder membership, collapsed state, and mixed item order are saved with the project and included in exports and share links. Older projects without an explicit order open with expressions before tables, preserving existing expression folders.
+
+In each table, add or remove rows and complete rows with finite numbers to plot their points. Empty rows are ignored; a partly filled row is reported as an error. Tables can be removed independently.
 
 Click near a plotted explicit or parametric curve to add the snapped point to a table for that expression. The first click creates the table, and later clicks on the same curve append rows to it. Click-and-drag continues to pan the graph. Implicit contours and shaded inequalities are not sampled into tables because a single x-value can correspond to multiple y-values.
 
@@ -61,24 +63,35 @@ At most 10 axis intercepts per curve are retained, prioritizing those nearest th
 
 Finite decimal literals and arithmetic made only from rational values are represented as reduced `BigInt` fractions. This preserves exact rational values internally, including fractions such as `1 / 3`; conversion to decimal occurs when a value needs to be plotted. Exact square roots and integer powers are retained as rationals when practical.
 
-Operations involving `pi`, `e`, variables, or transcendental functions use `decimal.js` at the configured precision (50 significant digits by default) with round-half-even rounding. These are high-precision approximations, not symbolic or mathematically exact results. The graph is itself an approximation: explicit curves are sampled about once per horizontal screen pixel by default. Implicit contours use a zoom-dependent grid from one screen pixel up to the configured spacing (six pixels by default), then join samples with linear interpolation. Narrow features can be missed, and discontinuities or ambiguous contour intersections are detected heuristically. The graph coordinates originate from JavaScript canvas coordinates and are therefore approximate too.
+Operations involving `pi`, `e`, variables, or transcendental functions use `decimal.js` at the configured precision (50 significant digits by default) with round-half-even rounding. These are high-precision approximations, not symbolic or mathematically exact results. The graph is itself an approximation: explicit curves are sampled about once per horizontal screen pixel by default, with adaptive subdivision around steep or sharply curved regions so branches can reach the viewport edge near asymptotes. Explicit samples are reused across redraws when the expression and slider values have not changed. The graph canvas is rendered at three times the visible viewport width and height, leaving one viewport of pre-rendered graph area beyond each edge. During graph dragging, the rendered canvas is translated as a quick preview; nearby panning reveals that buffered area immediately, while longer drags can expose empty edges until the graph is recalculated after release. The graph stays static while idle and redraws only in response to changes. Implicit contours use a zoom-dependent grid from one screen pixel up to the configured spacing (six pixels by default), then join samples with linear interpolation. Narrow features can be missed, and discontinuities or ambiguous contour intersections are detected heuristically. The graph coordinates originate from JavaScript canvas coordinates and are therefore approximate too.
 
-Expressions are parsed once and reused until edited. The coordinate grid is drawn over the plotted curves for readability.
+Expressions are parsed once and reused until edited. Open **Settings** beside the graph controls to show or hide the grid, x- and y-axes, and axis numbers, or change the ratio of the axes' screen scales. Equal units (1:1) is the default; changing the ratio changes how graph shapes are displayed. These graph display preferences are saved with projects. The same menu contains the accuracy and performance controls.
 
 ## Accuracy and performance controls
 
-Open **Accuracy & performance** in the expression panel to adjust:
+Open **Settings** and expand **Accuracy & performance** to adjust:
 
-- **Desmos mode**: switches to maximum-performance graph settings and rounds native JavaScript `Number`/`Math` calculations to 10 significant digits. It uses the widest graph sample spacing (4 px for explicit curves, 12 px maximum for implicit contours) and restores your previous settings when turned off. This is a fast approximate mode, not the official Desmos engine. Results are approximate and may differ from precise mode; the math precision slider is disabled while this mode is on.
+- **Desmos mode**: enabled by default. It switches to fast graph settings and rounds native JavaScript `Number`/`Math` calculations to 10 significant digits. Explicit curves are sampled at 1 px to keep sharp curves such as reciprocals legible, and implicit contours use 12 px maximum spacing. It restores your previous settings when turned off. This is a fast approximate mode, not the official Desmos engine. Results are approximate and may differ from precise mode; the math precision slider is disabled while this mode is on.
 - All three sliders are oriented consistently: **left = better performance**, **right = worse performance**.
-- **Math precision**: 20–100 significant digits for approximate Decimal calculations (default 50). Moving right increases numeric precision and may increase calculation cost.
-- **Explicit curve spacing**: 4–0.5 screen pixels between samples from left to right (default 1). Moving right samples the curve more densely, which may show more detail but can take longer.
-- **Implicit contour spacing**: 12–1 screen pixels for the contour grid's maximum spacing from left to right (default 6). Moving right may capture more contour detail at a higher cost. The grid remains zoom-adaptive and uses at least one pixel between samples.
+- **Math precision**: 20–100 significant digits for approximate Decimal calculations (default 50 in precise mode). Moving right increases numeric precision and may increase calculation cost.
+- **Explicit curve spacing**: 4–0.5 screen pixels between samples from left to right (default 1 in precise mode). Moving right samples the curve more densely, which may show more detail but can take longer.
+- **Implicit contour spacing**: 12–1 screen pixels for the contour grid's maximum spacing from left to right (default 6 in precise mode). Moving right may capture more contour detail at a higher cost. The grid remains zoom-adaptive and uses at least one pixel between samples.
 
 These are different tradeoffs: Desmos mode uses 10-digit standard floating-point arithmetic and wider sampling; increasing Decimal precision does not add more graph samples, and a denser graph does not increase Decimal precision. Rendered curves remain numerical approximations. Desmos mode does not reproduce Desmos-specific rendering effects such as Bernard. The current graph of `tan(35.6x)=0` shows the sampled zero contours.
+
+### Measuring graph performance during development
+
+When running `npm run dev`, use the browser developer console:
+
+```js
+window.betterDesmosProfiler.benchmark(30)
+window.betterDesmosProfiler.snapshot()
+```
+
+The benchmark compares repeated redraws of the current graph with the explicit-expression evaluation cache bypassed and enabled. It warms up each mode, then reports median and 95th-percentile draw time, expression evaluations, cache hits, and cache bypasses. Use the same browser, viewport, graph, and settings when comparing changes. The benchmark runs synchronously and may briefly pause the page; the profiler is development-only and is not included in production builds. `snapshot()` reports recent draw activity; if its draw count does not increase while the app is idle, the graph is not redrawing in the background.
 
 This is a numerical graphing prototype, not a proof system or a guarantee of correctly rendered features at every scale. Expressions are parsed by the app's own bounded parser and are never executed as JavaScript.
 
 ## Saving and sharing
 
-Projects autosave in browser local storage on the current device. **Export** downloads a JSON project file; **Import** validates and loads a project JSON file. **Share** copies a URL containing the project data, so anyone with that link can open the same expressions, tables, sliders, folders, notes, and graph view. Share links are self-contained and have a 50,000-character limit; use JSON export/import for larger projects. There is no cloud account or server-side project storage.
+Click **Save** to open a confirmation dialog. Choose whether to enable **Auto-save** for future changes, then confirm to save the project in browser local storage on this device. The auto-save preference is remembered on this device and can be changed the next time you save. **Export** downloads a JSON project file; **Import** validates and loads a project JSON file. **Share** copies a URL containing the project data, so anyone with that link can open the same expressions, tables, sliders, folders, notes, and graph view. Share links are self-contained and have a 50,000-character limit; use JSON export/import for larger projects. There is no cloud account or server-side project storage.

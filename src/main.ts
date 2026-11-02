@@ -66,6 +66,7 @@ interface TableRow {
 interface DataTable {
   id: number;
   rows: TableRow[];
+  folderId?: number;
   sourceExpressionId?: number;
   regressionDegree?: number;
   regressionKind?: "logarithmic" | "exponential" | "power" | "sine" | "tangent";
@@ -79,18 +80,40 @@ interface DataTable {
 interface Folder {
   id: number;
   name: string;
+  collapsed?: boolean;
 }
 
 interface ProjectState {
   version: 1;
   expressions: Expression[];
   tables: DataTable[];
+  workspaceOrder: WorkspaceItem[];
   folders: Folder[];
   sliders: Record<string, number>;
   sliderOptions?: Record<string, SliderOptions>;
   centerX: number;
   centerY: number;
   scale: number;
+  graphOptions?: GraphOptions;
+}
+
+interface GraphOptions {
+  showGrid: boolean;
+  showXAxis: boolean;
+  showYAxis: boolean;
+  showLabels: boolean;
+  aspectRatio: 0.5 | 1 | 2;
+}
+
+interface WorkspaceItem {
+  type: "expression" | "table" | "folder";
+  id: number;
+  folderId?: number;
+}
+
+interface WorkspaceBlock {
+  key: string;
+  items: WorkspaceItem[];
 }
 
 interface SliderOptions {
@@ -150,6 +173,8 @@ const defaultExpressions: Expression[] = [
   { id: 4, text: "x^2 + y^2 = 4", color: colors[3]! },
 ];
 let projectStatus = "";
+const PROJECT_STORAGE_KEY = "better-desmos-project-v1";
+const AUTO_SAVE_STORAGE_KEY = "better-desmos-autosave-v1";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -175,6 +200,16 @@ function parseProjectState(text: string): ProjectState {
       value.scale <= 0 || value.expressions.length > 200 ||
       value.tables.length > 100 || value.folders.length > 100) {
     throw new Error("Project file has an invalid or unsupported structure.");
+  }
+  const graphOptions = value.graphOptions;
+  if (graphOptions !== undefined &&
+      (!isRecord(graphOptions) ||
+        typeof graphOptions.showGrid !== "boolean" ||
+        typeof graphOptions.showXAxis !== "boolean" ||
+        typeof graphOptions.showYAxis !== "boolean" ||
+        typeof graphOptions.showLabels !== "boolean" ||
+        ![0.5, 1, 2].includes(Number(graphOptions.aspectRatio)))) {
+    throw new Error("Project contains invalid graph settings.");
   }
   const parsedExpressions = value.expressions.map((item): Expression => {
     const hsv = isRecord(item) ? item.hsv : undefined;
@@ -212,10 +247,15 @@ function parseProjectState(text: string): ProjectState {
   });
   const parsedFolders = value.folders.map((item): Folder => {
     if (!isRecord(item) || !Number.isSafeInteger(item.id) || Number(item.id) < 1 ||
-        typeof item.name !== "string" || item.name.length > 40) {
+        typeof item.name !== "string" || item.name.length > 40 ||
+        (item.collapsed !== undefined && typeof item.collapsed !== "boolean")) {
       throw new Error("Project contains an invalid folder.");
     }
-    return { id: item.id as number, name: item.name };
+    return {
+      id: item.id as number,
+      name: item.name,
+      collapsed: item.collapsed as boolean | undefined,
+    };
   });
   const parsedTables = value.tables.map((item): DataTable => {
     if (!isRecord(item) || !Number.isSafeInteger(item.id) || Number(item.id) < 1 ||
@@ -248,6 +288,7 @@ function parseProjectState(text: string): ProjectState {
       sourceExpressionId: Number.isInteger(item.sourceExpressionId)
         ? item.sourceExpressionId as number
         : undefined,
+      folderId: Number.isInteger(item.folderId) ? item.folderId as number : undefined,
       regressionDegree: item.regressionDegree as number | undefined,
       regressionKind: regressionKind as DataTable["regressionKind"],
     };
@@ -290,16 +331,70 @@ function parseProjectState(text: string): ProjectState {
       parsedTables.reduce((count, table) => count + table.rows.length, 0) > 20_000) {
     throw new Error("Project contains duplicate IDs or too many table rows.");
   }
+  const rawWorkspaceOrder = value.workspaceOrder;
+  if (rawWorkspaceOrder !== undefined &&
+      (!Array.isArray(rawWorkspaceOrder) || rawWorkspaceOrder.length > 300)) {
+    throw new Error("Project contains an invalid workspace order.");
+  }
+  const parsedWorkspaceOrder = rawWorkspaceOrder === undefined
+    ? [
+      ...parsedExpressions.map(({ id, folderId }): WorkspaceItem => ({
+        type: "expression", id, folderId,
+      })),
+      ...parsedTables.map(({ id, folderId }): WorkspaceItem => ({
+        type: "table", id, folderId,
+      })),
+      ...parsedFolders.map(({ id }): WorkspaceItem => ({ type: "folder", id })),
+    ]
+    : rawWorkspaceOrder.map((item): WorkspaceItem => {
+      if (!isRecord(item) ||
+          (item.type !== "expression" && item.type !== "table" && item.type !== "folder") ||
+          !Number.isSafeInteger(item.id) || Number(item.id) < 1 ||
+          (item.type === "folder" && item.folderId !== undefined) ||
+          (item.folderId !== undefined && !Number.isSafeInteger(item.folderId))) {
+        throw new Error("Project contains an invalid workspace order.");
+      }
+      return {
+        type: item.type,
+        id: item.id as number,
+        folderId: item.folderId as number | undefined,
+      };
+    });
+  for (const folder of parsedFolders) {
+    if (!parsedWorkspaceOrder.some((item) =>
+      item.type === "folder" && item.id === folder.id)) {
+      parsedWorkspaceOrder.push({ type: "folder", id: folder.id });
+    }
+  }
+  const workspaceKeys = parsedWorkspaceOrder.map(({ type, id }) => `${type}:${id}`);
+  const expectedWorkspaceKeys = [
+    ...expressionIds.map((id) => `expression:${id}`),
+    ...tableIds.map((id) => `table:${id}`),
+    ...folderIds.map((id) => `folder:${id}`),
+  ];
+  if (new Set(workspaceKeys).size !== workspaceKeys.length ||
+      workspaceKeys.length !== expectedWorkspaceKeys.length ||
+      expectedWorkspaceKeys.some((key) => !workspaceKeys.includes(key))) {
+    throw new Error("Project workspace order must include each expression, table, and folder exactly once.");
+  }
   return {
     version: 1,
     expressions: parsedExpressions,
     tables: parsedTables,
+    workspaceOrder: parsedWorkspaceOrder,
     folders: parsedFolders,
     sliders,
     sliderOptions,
     centerX: value.centerX,
     centerY: value.centerY,
     scale: Math.min(100_000, Math.max(0.001, value.scale)),
+    graphOptions: graphOptions === undefined ? undefined : {
+      showGrid: graphOptions.showGrid as boolean,
+      showXAxis: graphOptions.showXAxis as boolean,
+      showYAxis: graphOptions.showYAxis as boolean,
+      showLabels: graphOptions.showLabels as boolean,
+      aspectRatio: Number(graphOptions.aspectRatio) as GraphOptions["aspectRatio"],
+    },
   };
 }
 
@@ -319,7 +414,7 @@ function loadInitialProject(): ProjectState | undefined {
   try {
     const shared = decodeProjectHash();
     if (shared) return parseProjectState(shared);
-    const saved = localStorage.getItem("better-desmos-project-v1");
+    const saved = localStorage.getItem(PROJECT_STORAGE_KEY);
     return saved ? parseProjectState(saved) : undefined;
   } catch (reason) {
     projectStatus = reason instanceof Error ? reason.message : "Could not load saved project.";
@@ -328,9 +423,25 @@ function loadInitialProject(): ProjectState | undefined {
 }
 
 const initialProject = loadInitialProject();
+function loadAutomaticSavingPreference(): boolean {
+  try {
+    return localStorage.getItem(AUTO_SAVE_STORAGE_KEY) === "true";
+  } catch (reason) {
+    projectStatus = reason instanceof Error
+      ? `Could not read auto-save preference: ${reason.message}`
+      : "Could not read auto-save preference.";
+    return false;
+  }
+}
+let automaticSavingEnabled = loadAutomaticSavingPreference();
 let expressions: Expression[] = initialProject?.expressions ?? defaultExpressions;
 let tables: DataTable[] = initialProject?.tables ?? [];
 let folders: Folder[] = initialProject?.folders ?? [];
+let workspaceOrder: WorkspaceItem[] = initialProject?.workspaceOrder ?? [
+  ...expressions.map(({ id }): WorkspaceItem => ({ type: "expression", id })),
+  ...tables.map(({ id }): WorkspaceItem => ({ type: "table", id })),
+  ...folders.map(({ id }): WorkspaceItem => ({ type: "folder", id })),
+];
 const sliderValues: Record<string, number> = initialProject?.sliders ?? {};
 const sliderOptions: Record<string, SliderOptions> = initialProject?.sliderOptions ?? {};
 let sliderAnimation: { name: string; direction: 1 | -1; lastTime: number } | undefined;
@@ -344,7 +455,73 @@ let nextFolderId = Math.max(0, ...folders.map((folder) => folder.id)) + 1;
 let centerX = initialProject?.centerX ?? 0;
 let centerY = initialProject?.centerY ?? 0;
 let scale = initialProject?.scale ?? 48;
+const tableValuesCache = new WeakMap<DataTable, { x: number[]; y: number[]; error?: string }>();
+const tableRevisions = new WeakMap<DataTable, number>();
+const explicitEvaluationCaches = new WeakMap<
+  Expression,
+  {
+    key: string;
+    values: Map<number, { value: number } | { error: string }>;
+    cacheable: boolean;
+  }
+>();
+const MAX_EXPRESSION_SAMPLE_CACHE_SIZE = 4_096;
+interface PerformanceProfile {
+  enabled: boolean;
+  cacheEnabled: boolean;
+  drawCount: number;
+  drawTimes: number[];
+  evaluationCount: number;
+  cacheHits: number;
+  cacheMisses: number;
+  cacheBypasses: number;
+}
+interface DrawPerformanceSnapshot {
+  drawCount: number;
+  medianDrawMs: number;
+  p95DrawMs: number;
+  evaluationCount: number;
+  cacheHits: number;
+  cacheMisses: number;
+  cacheBypasses: number;
+  cacheHitRate: number;
+}
+interface DrawPerformanceBenchmark {
+  cacheDisabled: DrawPerformanceSnapshot;
+  cacheEnabled: DrawPerformanceSnapshot;
+  drawTimeReductionPercent: number;
+  evaluationReductionPercent: number;
+}
+interface BetterDesmosProfiler {
+  reset(): void;
+  snapshot(): DrawPerformanceSnapshot;
+  benchmark(iterations?: number): DrawPerformanceBenchmark;
+}
+declare global {
+  interface Window {
+    betterDesmosProfiler?: BetterDesmosProfiler;
+  }
+}
+const performanceProfile: PerformanceProfile = {
+  enabled: import.meta.env.DEV,
+  cacheEnabled: true,
+  drawCount: 0,
+  drawTimes: [],
+  evaluationCount: 0,
+  cacheHits: 0,
+  cacheMisses: 0,
+  cacheBypasses: 0,
+};
+let nextTableRevision = 1;
+let drawFrame: number | undefined;
 let graphMode: "precise" | "desmos" = "precise";
+const graphOptions: GraphOptions = initialProject?.graphOptions ?? {
+  showGrid: true,
+  showXAxis: true,
+  showYAxis: true,
+  showLabels: true,
+  aspectRatio: 1,
+};
 const graphSettings = {
   precisionDigits: getPrecisionDigits(),
   explicitSampleSpacing: 1,
@@ -365,52 +542,28 @@ let hoverCurves: CurveGeometry[] = [];
 const app = document.querySelector<HTMLDivElement>("#app")!;
 app.innerHTML = `
   <header class="topbar">
-    <a class="brand" href="#" aria-label="Better Desmos 1.4 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">1.4</span></a>
+    <a class="brand" href="#" aria-label="Better Desmos 1.5 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">1.5</span></a>
     <div class="top-note"><span class="status-dot"></span><span id="mode-note">Exact where possible · configurable precision</span></div>
   </header>
   <main class="workspace">
     <aside class="sidebar">
       <div class="panel-heading">
-        <div><p class="eyebrow">WORKSPACE</p><h1>Expressions</h1></div>
+        <div><h1>Workspace</h1></div>
         <div class="workspace-actions">
-          <button class="add-button" id="add-folder" type="button" aria-label="Add folder" title="Add folder">▱</button>
-          <button class="add-button" id="add-expression" type="button" aria-label="Add expression">+</button>
+          <label class="workspace-add-control">
+            <span class="visually-hidden">Add to workspace</span>
+            <select id="workspace-add" aria-label="Add to workspace">
+              <option value="" selected>Add…</option>
+              <option value="expression">Add expression</option>
+              <option value="table">Add table</option>
+              <option value="folder">Add folder</option>
+            </select>
+          </label>
         </div>
       </div>
       <div class="sidebar-scroll">
-        <div class="expressions" id="expressions"></div>
+        <div class="workspace-items" id="workspace-items" aria-label="Expressions and tables"></div>
         <section class="sliders-panel" id="sliders" aria-label="Parameter sliders"></section>
-        <section class="tables-panel" aria-label="Data tables">
-          <div class="tables-heading"><h2>Tables</h2><button class="add-button" id="add-table" type="button" aria-label="Add table">+</button></div>
-          <div id="tables"></div>
-        </section>
-        <details class="graph-settings">
-        <summary>Accuracy &amp; performance</summary>
-        <div class="setting-control">
-          <label class="mode-setting" for="desmos-mode">
-            <span><strong>Desmos mode</strong><small>Potato-PC settings · fast math (~10 digits)</small></span>
-            <input id="desmos-mode" type="checkbox" />
-          </label>
-        </div>
-        <div class="setting-control">
-          <label for="precision-setting">Math precision <output id="precision-value">50 digits</output></label>
-          <input id="precision-setting" type="range" min="20" max="100" step="10" value="50" />
-          <div class="setting-scale"><span>Better performance</span><span>Worse performance · more precision</span></div>
-          <p id="precision-help">Digits used for approximate calculations. Higher precision takes more work. Desmos mode uses standard JavaScript number precision instead.</p>
-        </div>
-        <div class="setting-control">
-          <label for="explicit-spacing-setting">Explicit curve spacing <output id="explicit-spacing-value">1 px</output></label>
-          <input id="explicit-spacing-setting" type="range" min="0" max="7" step="1" value="6" />
-          <div class="setting-scale"><span>Better performance · less detail</span><span>Worse performance · more detail</span></div>
-          <p>Screen pixels between samples for curves such as <code>y = sin(x)</code>.</p>
-        </div>
-        <div class="setting-control">
-          <label for="implicit-spacing-setting">Implicit contour spacing <output id="implicit-spacing-value">6 px</output></label>
-          <input id="implicit-spacing-setting" type="range" min="0" max="11" step="1" value="6" />
-          <div class="setting-scale"><span>Better performance · less detail</span><span>Worse performance · more detail</span></div>
-          <p>Maximum grid spacing for equations such as <code>x^2 + y^2 = 4</code>. Smaller spacing may show more detail but takes longer.</p>
-        </div>
-        </details>
         <div class="sidebar-bottom">
           <p class="eyebrow">QUICK GUIDE</p>
           <p>Graph <code>y = f(x)</code>, add a table, or plot an implicit equation.</p>
@@ -431,6 +584,7 @@ app.innerHTML = `
           <input type="file" id="project-file" accept="application/json,.json" hidden />
           <span id="project-status" role="status"></span>
         </div>
+        <button type="button" class="settings-button" id="open-settings" aria-haspopup="dialog">Settings</button>
         <div class="view-controls">
           <button type="button" data-pan="up" aria-label="Pan up">↑</button>
           <button type="button" data-pan="left" aria-label="Pan left">←</button>
@@ -444,89 +598,185 @@ app.innerHTML = `
         </div>
       </div>
       <div class="canvas-wrap"><canvas id="graph" aria-label="Graph of the entered expressions"></canvas><canvas id="graph-points" aria-hidden="true"></canvas></div>
-      <div class="graph-footer"><span>Click a curve to collect points · drag to pan · scroll to zoom</span><span id="view-readout"></span></div>
     </section>
   </main>
+  <dialog class="settings-dialog" id="settings-dialog" aria-labelledby="settings-title">
+    <div class="settings-dialog-heading">
+      <h2 id="settings-title">Settings</h2>
+      <button type="button" id="close-settings" aria-label="Close settings">×</button>
+    </div>
+    <section class="settings-section" aria-labelledby="graph-options-heading">
+      <h3 id="graph-options-heading">Graph</h3>
+      <label class="setting-check" for="show-grid-setting"><span>Show grid</span><input id="show-grid-setting" type="checkbox" /></label>
+      <label class="setting-check" for="show-x-axis-setting"><span>Show x-axis</span><input id="show-x-axis-setting" type="checkbox" /></label>
+      <label class="setting-check" for="show-y-axis-setting"><span>Show y-axis</span><input id="show-y-axis-setting" type="checkbox" /></label>
+      <label class="setting-check" for="show-labels-setting"><span>Show axis numbers</span><input id="show-labels-setting" type="checkbox" /></label>
+      <div class="setting-control">
+        <label for="aspect-ratio-setting">Axis scale ratio</label>
+        <select id="aspect-ratio-setting">
+          <option value="1">Equal units (1:1)</option>
+          <option value="2">Wider x scale (2:1)</option>
+          <option value="0.5">Taller y scale (1:2)</option>
+        </select>
+        <p>Controls how many screen pixels represent one unit on each axis.</p>
+      </div>
+    </section>
+    <details class="settings-section graph-settings">
+      <summary>Accuracy &amp; performance</summary>
+      <div class="setting-control">
+        <label class="mode-setting" for="desmos-mode">
+          <span><strong>Desmos mode</strong><small>Fast math (~10 digits)</small></span>
+          <input id="desmos-mode" type="checkbox" />
+        </label>
+      </div>
+      <div class="setting-control">
+        <label for="precision-setting">Math precision <output id="precision-value">50 digits</output></label>
+        <input id="precision-setting" type="range" min="20" max="100" step="10" value="50" />
+        <div class="setting-scale"><span>Better performance</span><span>Worse performance · more precision</span></div>
+        <p id="precision-help">Digits used for approximate calculations. Higher precision takes more work. Desmos mode uses standard JavaScript number precision instead.</p>
+      </div>
+      <div class="setting-control">
+        <label for="explicit-spacing-setting">Explicit curve spacing <output id="explicit-spacing-value">1 px</output></label>
+        <input id="explicit-spacing-setting" type="range" min="0" max="7" step="1" value="6" />
+        <div class="setting-scale"><span>Better performance · less detail</span><span>Worse performance · more detail</span></div>
+        <p>Screen pixels between samples for curves such as <code>y = sin(x)</code>.</p>
+      </div>
+      <div class="setting-control">
+        <label for="implicit-spacing-setting">Implicit contour spacing <output id="implicit-spacing-value">6 px</output></label>
+        <input id="implicit-spacing-setting" type="range" min="0" max="11" step="1" value="6" />
+        <div class="setting-scale"><span>Better performance · less detail</span><span>Worse performance · more detail</span></div>
+        <p>Maximum grid spacing for equations such as <code>x^2 + y^2 = 4</code>. Smaller spacing may show more detail but takes longer.</p>
+      </div>
+    </details>
+  </dialog>
+  <dialog class="settings-dialog save-dialog" id="save-dialog" aria-labelledby="save-dialog-title">
+    <form id="save-dialog-form">
+      <div class="settings-dialog-heading">
+        <h2 id="save-dialog-title">Save project</h2>
+      </div>
+      <p class="save-dialog-description">Save this project on this device.</p>
+      <label class="save-autosave-option">
+        <input type="checkbox" id="save-autosave-option" />
+        <span><strong>Auto-save</strong><small>Automatically save future changes on this device.</small></span>
+      </label>
+      <div class="save-dialog-actions">
+        <button type="button" id="cancel-save">Cancel</button>
+        <button type="submit" id="confirm-save" autofocus>Save</button>
+      </div>
+    </form>
+  </dialog>
 `;
 
-const expressionList = document.querySelector<HTMLDivElement>("#expressions")!;
+const workspaceList = document.querySelector<HTMLDivElement>("#workspace-items")!;
+const expressionList = document.createElement("div");
+expressionList.className = "expressions";
 const sliderList = document.querySelector<HTMLElement>("#sliders")!;
-const tableList = document.querySelector<HTMLDivElement>("#tables")!;
+const tableList = document.createElement("div");
+tableList.className = "tables-panel";
+const workspaceAdd = document.querySelector<HTMLSelectElement>("#workspace-add")!;
 const canvas = document.querySelector<HTMLCanvasElement>("#graph")!;
 const context = canvas.getContext("2d")!;
+const canvasWrap = canvas.parentElement as HTMLDivElement;
 const pointCanvas = document.querySelector<HTMLCanvasElement>("#graph-points")!;
 const pointContext = pointCanvas.getContext("2d")!;
-const viewReadout = document.querySelector<HTMLSpanElement>("#view-readout")!;
+const GRAPH_BUFFER_VIEWPORTS = 1;
+const GRAPH_BUFFER_SCALE = GRAPH_BUFFER_VIEWPORTS * 2 + 1;
+let workspaceDragState: {
+  pointerId: number;
+  sourceKey: string;
+  handle: HTMLButtonElement;
+  sourceItem: HTMLElement;
+  startX: number;
+  startY: number;
+  active: boolean;
+  preview?: HTMLDivElement;
+} | undefined;
 
 function formatTick(value: number): string {
   if (Math.abs(value) < 1e-9) return "0";
   return Number(value.toPrecision(4)).toString();
 }
 
-function tickStep(): number {
-  const raw = 72 / scale;
+function tickStep(pixelsPerUnit = scale): number {
+  const raw = 72 / pixelsPerUnit;
   const power = 10 ** Math.floor(Math.log10(raw));
   const fraction = raw / power;
   return (fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10) * power;
 }
 
+function verticalScale(): number {
+  return scale / graphOptions.aspectRatio;
+}
+
 function drawGrid(width: number, height: number): void {
+  const yScale = verticalScale();
   const originX = width / 2 - centerX * scale;
-  const originY = height / 2 + centerY * scale;
-  const step = tickStep();
+  const originY = height / 2 + centerY * yScale;
+  const xStep = tickStep();
+  const yStep = tickStep(yScale);
   context.font = "12px Inter, ui-sans-serif, system-ui, sans-serif";
   context.lineWidth = 1;
   context.beginPath();
 
-  for (let xValue = Math.ceil((centerX - width / (2 * scale)) / step) * step;
-    xValue <= centerX + width / (2 * scale); xValue += step) {
-    const x = originX + xValue * scale;
-    const axis = Math.abs(xValue) < step / 1000;
-    if (axis) {
-      continue;
+  if (graphOptions.showGrid) {
+    for (let xValue = Math.ceil((centerX - width / (2 * scale)) / xStep) * xStep;
+      xValue <= centerX + width / (2 * scale); xValue += xStep) {
+      const x = originX + xValue * scale;
+      const axis = Math.abs(xValue) < xStep / 1000;
+      if (axis) {
+        continue;
+      }
+      context.moveTo(Math.round(x) + 0.5, 0);
+      context.lineTo(Math.round(x) + 0.5, height);
     }
-    context.moveTo(Math.round(x) + 0.5, 0);
-    context.lineTo(Math.round(x) + 0.5, height);
-  }
-  for (let yValue = Math.ceil((centerY - height / (2 * scale)) / step) * step;
-    yValue <= centerY + height / (2 * scale); yValue += step) {
-    const axis = Math.abs(yValue) < step / 1000;
-    if (axis) {
-      continue;
+    for (let yValue = Math.ceil((centerY - height / (2 * yScale)) / yStep) * yStep;
+      yValue <= centerY + height / (2 * yScale); yValue += yStep) {
+      const axis = Math.abs(yValue) < yStep / 1000;
+      if (axis) {
+        continue;
+      }
+      const y = originY - yValue * yScale;
+      context.moveTo(0, Math.round(y) + 0.5);
+      context.lineTo(width, Math.round(y) + 0.5);
     }
-    const y = originY - yValue * scale;
-    context.moveTo(0, Math.round(y) + 0.5);
-    context.lineTo(width, Math.round(y) + 0.5);
+    context.strokeStyle = "rgba(255, 255, 255, 0.22)";
+    context.stroke();
   }
-  context.strokeStyle = "rgba(255, 255, 255, 0.22)";
-  context.stroke();
 
   context.beginPath();
   const zeroX = originX;
   const zeroY = originY;
-  context.moveTo(Math.round(zeroX) + 0.5, 0);
-  context.lineTo(Math.round(zeroX) + 0.5, height);
-  context.moveTo(0, Math.round(zeroY) + 0.5);
-  context.lineTo(width, Math.round(zeroY) + 0.5);
+  if (graphOptions.showYAxis) {
+    context.moveTo(Math.round(zeroX) + 0.5, 0);
+    context.lineTo(Math.round(zeroX) + 0.5, height);
+  }
+  if (graphOptions.showXAxis) {
+    context.moveTo(0, Math.round(zeroY) + 0.5);
+    context.lineTo(width, Math.round(zeroY) + 0.5);
+  }
   context.strokeStyle = "rgba(255, 255, 255, 0.72)";
   context.stroke();
 
-  for (let xValue = Math.ceil((centerX - width / (2 * scale)) / step) * step;
-    xValue <= centerX + width / (2 * scale); xValue += step) {
-    if (Math.abs(xValue) < step / 1000) {
-      continue;
+  if (graphOptions.showLabels && graphOptions.showXAxis) {
+    for (let xValue = Math.ceil((centerX - width / (2 * scale)) / xStep) * xStep;
+      xValue <= centerX + width / (2 * scale); xValue += xStep) {
+      if (Math.abs(xValue) < xStep / 1000) {
+        continue;
+      }
+      const x = originX + xValue * scale;
+      context.fillStyle = "#ffffff";
+      context.fillText(formatTick(xValue), x + 5, Math.min(Math.max(originY + 16, 16), height - 8));
     }
-    const x = originX + xValue * scale;
-    context.fillStyle = "#ffffff";
-    context.fillText(formatTick(xValue), x + 5, Math.min(Math.max(originY + 16, 16), height - 8));
   }
 
-  for (let yValue = Math.ceil((centerY - height / (2 * scale)) / step) * step;
-    yValue <= centerY + height / (2 * scale); yValue += step) {
-    const y = originY - yValue * scale;
-    if (Math.abs(yValue) >= step / 1000) {
-      context.fillStyle = "#ffffff";
-      context.fillText(formatTick(yValue), Math.min(Math.max(originX + 6, 6), width - 36), y - 5);
+  if (graphOptions.showLabels && graphOptions.showYAxis) {
+    for (let yValue = Math.ceil((centerY - height / (2 * yScale)) / yStep) * yStep;
+      yValue <= centerY + height / (2 * yScale); yValue += yStep) {
+      const y = originY - yValue * yScale;
+      if (Math.abs(yValue) >= yStep / 1000) {
+        context.fillStyle = "#ffffff";
+        context.fillText(formatTick(yValue), Math.min(Math.max(originX + 6, 6), width - 36), y - 5);
+      }
     }
   }
 }
@@ -593,7 +843,7 @@ function strokeColoredSegments(
     const x2 = geometry.segments[index + 2]!;
     const y2 = geometry.segments[index + 3]!;
     const x = ((x1 + x2) / 2 - width / 2) / scale + centerX;
-    const y = (height / 2 - (y1 + y2) / 2) / scale + centerY;
+    const y = (height / 2 - (y1 + y2) / 2) / verticalScale() + centerY;
     let color: string;
     try {
       color = colorAt(x, y);
@@ -638,7 +888,9 @@ function drawImplicit(
     }
     geometry.segments.push(x1, y1, x2, y2);
   };
-  const step = Math.max(1, Math.min(graphSettings.implicitSampleSpacing, scale * 0.15));
+  const step = Math.max(1, Math.min(
+    graphSettings.implicitSampleSpacing, Math.min(scale, verticalScale()) * 0.15,
+  ));
   const columns = Math.ceil(width / step) + 1;
   const rows = Math.ceil(height / step) + 1;
   const screenX = (column: number) => Math.min(column * step, width);
@@ -646,7 +898,9 @@ function drawImplicit(
   const screenXs = Float64Array.from({ length: columns }, (_, column) => screenX(column));
   const screenYs = Float64Array.from({ length: rows }, (_, row) => screenY(row));
   const xCoordinates = Float64Array.from(screenXs, (px) => (px - width / 2) / scale + centerX);
-  const yCoordinates = Float64Array.from(screenYs, (py) => (height / 2 - py) / scale + centerY);
+  const yCoordinates = Float64Array.from(
+    screenYs, (py) => (height / 2 - py) / verticalScale() + centerY,
+  );
   const values = new Float64Array(columns * rows);
   values.fill(Number.NaN);
 
@@ -800,7 +1054,7 @@ function addPointCandidate(
   height: number,
 ): void {
   const screenX = width / 2 + (x - centerX) * scale;
-  const screenY = height / 2 - (y - centerY) * scale;
+  const screenY = height / 2 - (y - centerY) * verticalScale();
   if (!Number.isFinite(screenX) || !Number.isFinite(screenY) ||
       screenX < -8 || screenX > width + 8 || screenY < -8 || screenY > height + 8) {
     return;
@@ -833,7 +1087,8 @@ function drawExplicitCurve(
 ): ExplicitCurveData {
   const samples: GraphSample[] = [];
   const geometry: ExplicitCurveData = { id, color, samples, segments: [], colorAt };
-  const originY = height / 2 + centerY * scale;
+  const yScale = verticalScale();
+  const originY = height / 2 + centerY * yScale;
   context.save();
   context.globalAlpha = opacity;
   if (!colorAt) {
@@ -841,39 +1096,111 @@ function drawExplicitCurve(
     context.lineWidth = lineWidth;
     context.beginPath();
   }
-  let previousY: number | undefined;
-  let drawing = false;
-  for (let screenX = 0; screenX <= width; screenX += graphSettings.explicitSampleSpacing) {
-    const x = (screenX - width / 2) / scale + centerX;
+  const sampleAt = (x: number, screenX: number): GraphSample => {
     try {
       const y = evaluate(x);
-      const screenY = originY - y * scale;
-      const valid = Number.isFinite(screenY) && screenY >= -height * 2 && screenY <= height * 3;
-      const connected = valid && drawing && previousY !== undefined &&
-        Math.abs(screenY - previousY) <= height;
-      if (!valid || (previousY !== undefined && Math.abs(screenY - previousY) > height)) {
-        drawing = false;
-        previousY = screenY;
-        samples.push({ x, y, screenX, screenY, connected: false });
-        continue;
-      }
-      if (!drawing) {
-        if (!colorAt) context.moveTo(screenX, screenY);
-        drawing = true;
-      } else {
-        if (!colorAt) context.lineTo(screenX, screenY);
-      }
-      if (connected && samples.length > 0) {
-        const previous = samples[samples.length - 1]!;
-        geometry.segments.push(previous.screenX, previous.screenY, screenX, screenY);
-      }
-      samples.push({ x, y, screenX, screenY, connected });
-      previousY = screenY;
+      const screenY = originY - y * yScale;
+      return {
+        x,
+        y,
+        screenX,
+        screenY,
+        connected: false,
+      };
     } catch {
+      return { x, y: Number.NaN, screenX, screenY: Number.NaN, connected: false };
+    }
+  };
+  const refineInterval = (
+    first: GraphSample,
+    second: GraphSample,
+    depth: number,
+  ): GraphSample[] => {
+    if (depth >= 10) {
+      return [second];
+    }
+
+    const firstValid = Number.isFinite(first.screenY) &&
+      first.screenY >= -height * 2 && first.screenY <= height * 3;
+    const secondValid = Number.isFinite(second.screenY) &&
+      second.screenY >= -height * 2 && second.screenY <= height * 3;
+    const screenDelta = Math.abs(second.screenY - first.screenY);
+    const midpointX = (first.x + second.x) / 2;
+    const midpointScreenX = (first.screenX + second.screenX) / 2;
+    const midpoint = sampleAt(midpointX, midpointScreenX);
+    const midpointValid = Number.isFinite(midpoint.screenY) &&
+      midpoint.screenY >= -height * 2 && midpoint.screenY <= height * 3;
+    if (![first, second, midpoint].some((sample) => Number.isFinite(sample.screenY))) {
+      return [second];
+    }
+    const linearMidpoint = (first.screenY + second.screenY) / 2;
+    const curvature = Math.abs(midpoint.screenY - linearMidpoint);
+    const refine = !firstValid || !secondValid || !midpointValid ||
+      screenDelta > 24 || curvature > 0.5;
+    if (!firstValid && !secondValid && !midpointValid &&
+        Math.sign(first.screenY - height / 2) === Math.sign(second.screenY - height / 2) &&
+        Math.sign(second.screenY - height / 2) === Math.sign(midpoint.screenY - height / 2) &&
+        screenDelta <= 24 && curvature <= 0.5) {
+      return [second];
+    }
+    if (!refine) {
+      return [second];
+    }
+    return [
+      ...refineInterval(first, midpoint, depth + 1),
+      ...refineInterval(midpoint, second, depth + 1),
+    ];
+  };
+  let previousY: number | undefined;
+  let drawing = false;
+  let first = sampleAt((0 - width / 2) / scale + centerX, 0);
+  const firstIsValid = Number.isFinite(first.screenY) &&
+    first.screenY >= -height * 2 && first.screenY <= height * 3;
+  if (firstIsValid) {
+    drawing = true;
+    if (!colorAt) context.moveTo(first.screenX, first.screenY);
+    samples.push(first);
+    previousY = first.screenY;
+  }
+  const drawSample = (sample: GraphSample): void => {
+    const { y, screenX, screenY } = sample;
+    if (!Number.isFinite(y)) {
       drawing = false;
       previousY = undefined;
-      samples.push({ x, y: Number.NaN, screenX, screenY: Number.NaN, connected: false });
+      samples.push(sample);
+      return;
     }
+    const valid = Number.isFinite(screenY) && screenY >= -height * 2 && screenY <= height * 3;
+    const jumpTooLarge = previousY !== undefined && Math.abs(screenY - previousY) > height;
+    const connected = valid && drawing && previousY !== undefined && !jumpTooLarge;
+    if (!valid || jumpTooLarge) {
+      drawing = false;
+      previousY = Number.isFinite(screenY) ? screenY : undefined;
+      samples.push(sample);
+      return;
+    }
+    if (!drawing) {
+      if (!colorAt) context.moveTo(screenX, screenY);
+      drawing = true;
+    } else if (!colorAt) {
+      context.lineTo(screenX, screenY);
+    }
+    if (connected && samples.length > 0) {
+      const previous = samples[samples.length - 1]!;
+      geometry.segments.push(previous.screenX, previous.screenY, screenX, screenY);
+    }
+    sample.connected = connected;
+    samples.push(sample);
+    previousY = screenY;
+  };
+  for (let screenX = graphSettings.explicitSampleSpacing;
+    screenX <= width; screenX += graphSettings.explicitSampleSpacing) {
+    const x = (screenX - width / 2) / scale + centerX;
+    const second = sampleAt(x, screenX);
+    for (const refinedSample of refineInterval(first, second, 0)) {
+      drawSample(refinedSample);
+    }
+    first = second;
   }
   if (colorAt) {
     strokeColoredSegments(geometry, colorAt, width, height, lineWidth, opacity);
@@ -993,7 +1320,8 @@ function detectExplicitIntersections(
     }
     const difference0 = a0.y - b0.y;
     const difference1 = a1.y - b1.y;
-    if (Math.abs(difference0) * scale < 0.25 && Math.abs(difference1) * scale < 0.25) {
+    if (Math.abs(difference0) * verticalScale() < 0.25 &&
+        Math.abs(difference1) * verticalScale() < 0.25) {
       continue;
     }
     if ((difference0 < 0 && difference1 < 0) || (difference0 > 0 && difference1 > 0) ||
@@ -1036,10 +1364,10 @@ function detectExplicitIntersections(
     const center = difference(index);
     const left = difference(index - 3);
     const right = difference(index + 3);
-    if (Math.abs(center) * scale > 0.25 ||
+    if (Math.abs(center) * verticalScale() > 0.25 ||
         Math.abs(center) > Math.abs(difference(index - 1)) ||
         Math.abs(center) > Math.abs(difference(index + 1)) ||
-        Math.min(Math.abs(left), Math.abs(right)) * scale < 0.05) {
+        Math.min(Math.abs(left), Math.abs(right)) * verticalScale() < 0.05) {
       continue;
     }
     const denominator = left - 2 * center + right;
@@ -1078,14 +1406,22 @@ function detectImplicitAxisIntercepts(
   height: number,
 ): void {
   const intercepts: PointCandidate[] = [];
-  const sampleSpacing = Math.max(1, Math.min(graphSettings.implicitSampleSpacing, scale * 0.15));
+  const sampleSpacing = Math.max(1, Math.min(
+    graphSettings.implicitSampleSpacing, Math.min(scale, verticalScale()) * 0.15,
+  ));
   const axes: Array<{ axis: "x" | "y"; min: number; max: number }> = [
     { axis: "x", min: centerX - width / (2 * scale), max: centerX + width / (2 * scale) },
-    { axis: "y", min: centerY - height / (2 * scale), max: centerY + height / (2 * scale) },
+    {
+      axis: "y",
+      min: centerY - height / (2 * verticalScale()),
+      max: centerY + height / (2 * verticalScale()),
+    },
   ];
 
   for (const { axis, min, max } of axes) {
-    const steps = Math.max(1, Math.ceil((max - min) * scale / sampleSpacing));
+    const steps = Math.max(1, Math.ceil(
+      (max - min) * (axis === "x" ? scale : verticalScale()) / sampleSpacing,
+    ));
     const valueAt = (value: number): number => axis === "x"
       ? implicitValue(evaluate, value, 0)
       : implicitValue(evaluate, 0, value);
@@ -1197,7 +1533,8 @@ function addGraphPointAt(screenX: number, screenY: number): void {
     return;
   }
 
-  const bounds = canvas.getBoundingClientRect();
+  const width = canvasWrap.clientWidth * GRAPH_BUFFER_SCALE;
+  const height = canvasWrap.clientHeight * GRAPH_BUFFER_SCALE;
   const pointCandidate = graph.kind === "explicit"
     ? hoverCandidates
       .filter((candidate) =>
@@ -1207,7 +1544,7 @@ function addGraphPointAt(screenX: number, screenY: number): void {
         Math.hypot(left.screenX - screenX, left.screenY - screenY) -
         Math.hypot(right.screenX - screenX, right.screenY - screenY))[0]
     : undefined;
-  const x = pointCandidate?.x ?? (nearest.x - bounds.width / 2) / scale + centerX;
+  const x = pointCandidate?.x ?? (nearest.x - width / 2) / scale + centerX;
   let y: number;
   if (graph.kind === "explicit") {
     try {
@@ -1217,7 +1554,7 @@ function addGraphPointAt(screenX: number, screenY: number): void {
       return;
     }
   } else {
-    y = (bounds.height / 2 - nearest.y) / scale + centerY;
+    y = (height / 2 - nearest.y) / verticalScale() + centerY;
   }
   if (!Number.isFinite(x) || !Number.isFinite(y)) {
     return;
@@ -1233,19 +1570,27 @@ function addGraphPointAt(screenX: number, screenY: number): void {
       color: expression.color,
     };
     tables.push(table);
+    workspaceOrder.push({ type: "table", id: table.id });
   } else {
     table.rows.push(row);
+    invalidateTableData(table);
   }
   renderTables();
-  document.querySelector(".tables-panel")?.scrollIntoView({ block: "nearest" });
+  workspaceList.querySelector(
+    `.workspace-item[data-workspace-key="table:${table.id}"]`,
+  )?.scrollIntoView({ block: "nearest" });
   draw();
 }
 
 function drawHoverOverlay(): void {
-  const bounds = canvas.getBoundingClientRect();
+  const bounds = canvasWrap.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   const width = Math.max(1, Math.round(bounds.width * dpr));
   const height = Math.max(1, Math.round(bounds.height * dpr));
+  const bufferX = bounds.width * GRAPH_BUFFER_VIEWPORTS;
+  const bufferY = bounds.height * GRAPH_BUFFER_VIEWPORTS;
+  const graphWidth = bounds.width * GRAPH_BUFFER_SCALE;
+  const graphHeight = bounds.height * GRAPH_BUFFER_SCALE;
   if (pointCanvas.width !== width || pointCanvas.height !== height) {
     pointCanvas.width = width;
     pointCanvas.height = height;
@@ -1279,8 +1624,12 @@ function drawHoverOverlay(): void {
     (candidate.type.split(" · ").some((type) => type === "table point" || type === "list point") &&
       Math.hypot(candidate.screenX - hoverPosition!.x, candidate.screenY - hoverPosition!.y) <= 10));
   for (const candidate of visibleCandidates) {
+    const screenX = candidate.screenX - bufferX;
+    const screenY = candidate.screenY - bufferY;
+    if (screenX < -8 || screenX > bounds.width + 8 ||
+        screenY < -8 || screenY > bounds.height + 8) continue;
     pointContext.beginPath();
-    pointContext.arc(candidate.screenX, candidate.screenY, 5, 0, Math.PI * 2);
+    pointContext.arc(screenX, screenY, 5, 0, Math.PI * 2);
     pointContext.fillStyle = candidate.color;
     pointContext.fill();
     pointContext.lineWidth = 2;
@@ -1300,8 +1649,8 @@ function drawHoverOverlay(): void {
   let label: string | undefined;
   let color = "#ffffff";
   if (selected) {
-    pointX = selected.screenX;
-    pointY = selected.screenY;
+    pointX = selected.screenX - bufferX;
+    pointY = selected.screenY - bufferY;
     const typeOrder = [
       "intersection", "vertex", "x-intercept", "y-intercept", "table point", "list point",
     ];
@@ -1311,16 +1660,16 @@ function drawHoverOverlay(): void {
     label = `${type} · (${formatTick(selected.x)}, ${formatTick(selected.y)})`;
     color = selected.color;
   } else if (nearest && nearest.curve.id.startsWith("implicit-")) {
-    pointX = nearest.x;
-    pointY = nearest.y;
+    pointX = nearest.x - bufferX;
+    pointY = nearest.y - bufferY;
     label = `implicit curve · (${formatTick(
-      (nearest.x - bounds.width / 2) / scale + centerX,
+      (nearest.x - graphWidth / 2) / scale + centerX,
     )}, ${formatTick(
-      (bounds.height / 2 - nearest.y) / scale + centerY,
+      (graphHeight / 2 - nearest.y) / verticalScale() + centerY,
     )})`;
     color = nearest.curve.colorAt?.(
-      (nearest.x - bounds.width / 2) / scale + centerX,
-      (bounds.height / 2 - nearest.y) / scale + centerY,
+      (nearest.x - graphWidth / 2) / scale + centerX,
+      (graphHeight / 2 - nearest.y) / verticalScale() + centerY,
     ) ?? nearest.curve.color;
   }
   if (pointX === undefined || pointY === undefined || !label) {
@@ -1378,7 +1727,7 @@ function drawParametricCurve(
     try {
       const [x, y] = evaluate(parameter);
       const screenX = width / 2 + (x - centerX) * scale;
-      const screenY = height / 2 - (y - centerY) * scale;
+      const screenY = height / 2 - (y - centerY) * verticalScale();
       const valid = Number.isFinite(screenX) && Number.isFinite(screenY) &&
         screenX >= -width * 2 && screenX <= width * 3 &&
         screenY >= -height * 2 && screenY <= height * 3;
@@ -1425,22 +1774,24 @@ function drawInequality(
   context.save();
   context.globalAlpha = 0.18 * opacity;
   for (let screenY = 0; screenY < height; screenY += cellSize) {
-    const y = (height / 2 - (screenY + cellSize / 2)) / scale + centerY;
+    const y = (height / 2 - (screenY + cellSize / 2)) / verticalScale() + centerY;
     for (let screenX = 0; screenX < width; screenX += cellSize) {
       const x = (screenX + cellSize / 2 - width / 2) / scale + centerX;
       try {
-        try {
-          context.fillStyle = colorAt ? colorAt(x, y) : color;
-        } catch {
-          context.fillStyle = color;
-        }
         const residual = evaluate(x, y);
         const value = typeof residual === "number" ? residual : residual.toNumber();
         const inside = relation === "<" ? value < 0
           : relation === "<=" ? value <= 0
             : relation === ">" ? value > 0
               : value >= 0;
-        if (inside) context.fillRect(screenX, screenY, cellSize, cellSize);
+        if (inside) {
+          try {
+            context.fillStyle = colorAt ? colorAt(x, y) : color;
+          } catch {
+            context.fillStyle = color;
+          }
+          context.fillRect(screenX, screenY, cellSize, cellSize);
+        }
       } catch {
         continue;
       }
@@ -1451,17 +1802,18 @@ function drawInequality(
 }
 
 function draw(): void {
-  const bounds = canvas.getBoundingClientRect();
+  const profileStart = performanceProfile.enabled ? performance.now() : 0;
+  const bounds = canvasWrap.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  const canvasWidth = Math.max(1, Math.round(bounds.width * dpr));
-  const canvasHeight = Math.max(1, Math.round(bounds.height * dpr));
+  const width = Math.max(1, bounds.width * GRAPH_BUFFER_SCALE);
+  const height = Math.max(1, bounds.height * GRAPH_BUFFER_SCALE);
+  const canvasWidth = Math.max(1, Math.round(width * dpr));
+  const canvasHeight = Math.max(1, Math.round(height * dpr));
   if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
     canvas.width = canvasWidth;
     canvas.height = canvasHeight;
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
-  const width = bounds.width;
-  const height = bounds.height;
   context.clearRect(0, 0, width, height);
   context.fillStyle = "#101722";
   context.fillRect(0, 0, width, height);
@@ -1519,17 +1871,17 @@ function draw(): void {
         if (values.some((value) => !Number.isFinite(value))) {
           throw new Error("List values must be finite numbers");
         }
-        const expressionError = expressionList.querySelector<HTMLParagraphElement>(
+        const expressionError = workspaceList.querySelector<HTMLParagraphElement>(
           `[data-expression-id="${expression.id}"] .expression-error`,
         );
         if (expressionError) expressionError.textContent = "";
-        expressionList.querySelector<HTMLInputElement>(
+        workspaceList.querySelector<HTMLInputElement>(
           `[data-expression-id="${expression.id}"] input[type="text"]`,
         )?.removeAttribute("aria-invalid");
         values.forEach((y, index) => {
           const x = index + 1;
           const screenX = width / 2 + (x - centerX) * scale;
-          const screenY = height / 2 - (y - centerY) * scale;
+          const screenY = height / 2 - (y - centerY) * verticalScale();
           const pointColor = colorAt?.(x, y) ?? expression.color;
           listPoints.push({ x, y, color: pointColor, graphId, opacity });
           if (screenX >= 0 && screenX <= width && screenY >= 0 && screenY <= height) {
@@ -1540,20 +1892,20 @@ function draw(): void {
         });
       } catch (reason) {
         expression.evaluationError = reason instanceof Error ? reason.message : "Could not evaluate list";
-        const error = expressionList.querySelector<HTMLParagraphElement>(
+        const error = workspaceList.querySelector<HTMLParagraphElement>(
           `[data-expression-id="${expression.id}"] .expression-error`,
         );
         if (error) error.textContent = expression.evaluationError;
-        expressionList.querySelector<HTMLInputElement>(
+        workspaceList.querySelector<HTMLInputElement>(
           `[data-expression-id="${expression.id}"] input[type="text"]`,
         )?.setAttribute("aria-invalid", "true");
       }
       continue;
     }
-    const evaluate = (x: number) => {
+    const evaluate = cachedExplicitEvaluator(expression, (x: number) => {
       const result = graph.evaluate(x);
       return typeof result === "number" ? result : result.value.toNumber();
-    };
+    });
     const curve = drawExplicitCurve(
       graphId, expression.color, evaluate, width, height, colorAt, lineWidth, opacity,
     );
@@ -1561,13 +1913,13 @@ function draw(): void {
     detectExplicitPoints(curve, evaluate, candidates, width, height);
   }
 
-  for (const table of tables) {
-    const values = tableValues(table);
+  const tableData = tables.map((table) => ({ table, values: tableValues(table) }));
+  for (const { table, values } of tableData) {
     for (let index = 0; index < values.x.length; index += 1) {
       const x = values.x[index]!;
       const y = values.y[index]!;
       const screenX = width / 2 + (x - centerX) * scale;
-      const screenY = height / 2 - (y - centerY) * scale;
+      const screenY = height / 2 - (y - centerY) * verticalScale();
       if (screenX < 0 || screenX > width || screenY < 0 || screenY > height) {
         continue;
       }
@@ -1598,7 +1950,7 @@ function draw(): void {
   drawGrid(width, height);
   for (const point of listPoints) {
     const screenX = width / 2 + (point.x - centerX) * scale;
-    const screenY = height / 2 - (point.y - centerY) * scale;
+    const screenY = height / 2 - (point.y - centerY) * verticalScale();
     if (screenX < -6 || screenX > width + 6 || screenY < -6 || screenY > height + 6) continue;
     context.save();
     context.globalAlpha = point.opacity;
@@ -1611,14 +1963,13 @@ function draw(): void {
     context.stroke();
     context.restore();
   }
-  for (const table of tables) {
-    const values = tableValues(table);
+  for (const { table, values } of tableData) {
     context.fillStyle = table.color;
     context.strokeStyle = "#ffffff";
     context.lineWidth = 1.5;
     for (let index = 0; index < values.x.length; index += 1) {
       const screenX = width / 2 + (values.x[index]! - centerX) * scale;
-      const screenY = height / 2 - (values.y[index]! - centerY) * scale;
+      const screenY = height / 2 - (values.y[index]! - centerY) * verticalScale();
       if (screenX < -6 || screenX > width + 6 || screenY < -6 || screenY > height + 6) {
         continue;
       }
@@ -1631,19 +1982,33 @@ function draw(): void {
   hoverCandidates = candidates;
   hoverCurves = [...explicitCurves, ...implicitCurves];
   for (const expression of expressions) {
-    const colorError = expressionList.querySelector<HTMLParagraphElement>(
+    const colorError = workspaceList.querySelector<HTMLParagraphElement>(
       `[data-expression-id="${expression.id}"] .color-formula-error`,
     );
     if (colorError) colorError.textContent = expression.colorError ?? "";
-    for (const channelInput of expressionList.querySelectorAll<HTMLInputElement>(
+    for (const channelInput of workspaceList.querySelectorAll<HTMLInputElement>(
       `[data-expression-id="${expression.id}"] .hsv-fields input`,
     )) {
       channelInput.setAttribute("aria-invalid", String(Boolean(expression.colorError)));
     }
   }
   drawHoverOverlay();
-  viewReadout.textContent = `Center (${formatTick(centerX)}, ${formatTick(centerY)}) · ${formatTick(1 / scale)} units/px`;
   scheduleProjectSave();
+  if (performanceProfile.enabled) {
+    performanceProfile.drawCount += 1;
+    performanceProfile.drawTimes.push(performance.now() - profileStart);
+    if (performanceProfile.drawTimes.length > 300) {
+      performanceProfile.drawTimes.shift();
+    }
+  }
+}
+
+function scheduleDraw(): void {
+  if (drawFrame !== undefined) return;
+  drawFrame = window.requestAnimationFrame(() => {
+    drawFrame = undefined;
+    draw();
+  });
 }
 
 function getCompiled(expression: Expression): CompiledGraph | undefined {
@@ -1662,6 +2027,139 @@ function getCompiled(expression: Expression): CompiledGraph | undefined {
     }
   }
   return expression.compiled;
+}
+
+function cachedExplicitEvaluator(
+  expression: Expression,
+  evaluate: (x: number) => number,
+): (x: number) => number {
+  const sliderSignature = JSON.stringify(
+    Object.entries(sliderValues).sort(([left], [right]) => left.localeCompare(right)),
+  );
+  const key = `${graphMode}:${graphSettings.precisionDigits}\u0000${expression.text}\u0000${sliderSignature}`;
+  let cache = explicitEvaluationCaches.get(expression);
+  if (!cache || cache.key !== key) {
+    cache = { key, values: new Map(), cacheable: true };
+    explicitEvaluationCaches.set(expression, cache);
+  }
+  const values = cache.values;
+  return (x: number) => {
+    if (!performanceProfile.cacheEnabled || !cache.cacheable) {
+      if (performanceProfile.enabled) {
+        performanceProfile.cacheMisses += 1;
+        performanceProfile.evaluationCount += 1;
+        if (performanceProfile.cacheEnabled && !cache.cacheable) {
+          performanceProfile.cacheBypasses += 1;
+        }
+      }
+      return evaluate(x);
+    }
+
+    const cached = values.get(x);
+    if (cached) {
+      if (performanceProfile.enabled) performanceProfile.cacheHits += 1;
+      if ("error" in cached) throw new Error(cached.error);
+      return cached.value;
+    }
+
+    if (performanceProfile.enabled) {
+      performanceProfile.cacheMisses += 1;
+      performanceProfile.evaluationCount += 1;
+    }
+    try {
+      const value = evaluate(x);
+      if (values.size >= MAX_EXPRESSION_SAMPLE_CACHE_SIZE) {
+        values.clear();
+        cache.cacheable = false;
+        if (performanceProfile.enabled) performanceProfile.cacheBypasses += 1;
+      } else {
+        values.set(x, { value });
+      }
+      return value;
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "Could not evaluate expression";
+      if (values.size >= MAX_EXPRESSION_SAMPLE_CACHE_SIZE) {
+        values.clear();
+        cache.cacheable = false;
+        if (performanceProfile.enabled) performanceProfile.cacheBypasses += 1;
+      } else {
+        values.set(x, { error: message });
+      }
+      throw reason;
+    }
+  };
+}
+
+function resetPerformanceMeasurements(): void {
+  performanceProfile.drawCount = 0;
+  performanceProfile.drawTimes = [];
+  performanceProfile.evaluationCount = 0;
+  performanceProfile.cacheHits = 0;
+  performanceProfile.cacheMisses = 0;
+  performanceProfile.cacheBypasses = 0;
+}
+
+function getPerformanceSnapshot(): DrawPerformanceSnapshot {
+  const sortedTimes = [...performanceProfile.drawTimes].sort((left, right) => left - right);
+  const percentile = (fraction: number) => sortedTimes.length === 0
+    ? 0
+    : sortedTimes[Math.min(sortedTimes.length - 1, Math.ceil(sortedTimes.length * fraction) - 1)]!;
+  const requests = performanceProfile.cacheHits + performanceProfile.cacheMisses;
+  return {
+    drawCount: performanceProfile.drawCount,
+    medianDrawMs: percentile(0.5),
+    p95DrawMs: percentile(0.95),
+    evaluationCount: performanceProfile.evaluationCount,
+    cacheHits: performanceProfile.cacheHits,
+    cacheMisses: performanceProfile.cacheMisses,
+    cacheBypasses: performanceProfile.cacheBypasses,
+    cacheHitRate: requests === 0 ? 0 : performanceProfile.cacheHits / requests,
+  };
+}
+
+function benchmarkGraphDraws(iterations = 12): DrawPerformanceBenchmark {
+  if (!Number.isInteger(iterations) || iterations < 1 || iterations > 50) {
+    throw new Error("Benchmark iterations must be an integer from 1 to 50.");
+  }
+  const previousCacheEnabled = performanceProfile.cacheEnabled;
+  try {
+    performanceProfile.cacheEnabled = false;
+    draw();
+    resetPerformanceMeasurements();
+    for (let index = 0; index < iterations; index += 1) draw();
+    const cacheDisabled = getPerformanceSnapshot();
+
+    performanceProfile.cacheEnabled = true;
+    for (const expression of expressions) {
+      explicitEvaluationCaches.delete(expression);
+    }
+    draw();
+    resetPerformanceMeasurements();
+    for (let index = 0; index < iterations; index += 1) draw();
+    const cacheEnabled = getPerformanceSnapshot();
+    const drawTimeReductionPercent = cacheDisabled.medianDrawMs === 0
+      ? 0
+      : (1 - cacheEnabled.medianDrawMs / cacheDisabled.medianDrawMs) * 100;
+    const evaluationReductionPercent = cacheDisabled.evaluationCount === 0
+      ? 0
+      : (1 - cacheEnabled.evaluationCount / cacheDisabled.evaluationCount) * 100;
+    return {
+      cacheDisabled,
+      cacheEnabled,
+      drawTimeReductionPercent,
+      evaluationReductionPercent,
+    };
+  } finally {
+    performanceProfile.cacheEnabled = previousCacheEnabled;
+  }
+}
+
+if (import.meta.env.DEV) {
+  window.betterDesmosProfiler = {
+    reset: resetPerformanceMeasurements,
+    snapshot: getPerformanceSnapshot,
+    benchmark: benchmarkGraphDraws,
+  };
 }
 
 function sliderNames(): string[] {
@@ -1726,7 +2224,7 @@ function renderSliders(): void {
       sliderValues[name] = Math.min(options.max, Math.max(options.min, parsed));
       range.value = String(sliderValues[name]);
       number.value = String(sliderValues[name]);
-      draw();
+      scheduleDraw();
       scheduleProjectSave();
     };
     range.addEventListener("input", () => update(range.value));
@@ -1788,7 +2286,7 @@ function renderSliders(): void {
       number.min = String(min);
       number.max = String(max);
       number.value = String(sliderValues[name]);
-      draw();
+      scheduleDraw();
       scheduleProjectSave();
     };
     minInput.addEventListener("change", updateOptions);
@@ -1860,6 +2358,308 @@ function startSliderAnimation(name: string): void {
   }, 30);
 }
 
+function workspaceItemKey(item: WorkspaceItem): string {
+  return `${item.type}:${item.id}`;
+}
+
+function workspaceBlocks(): WorkspaceBlock[] {
+  const blocks: WorkspaceBlock[] = [];
+  const groupedFolders = new Set<number>();
+  for (const item of workspaceOrder) {
+    if (item.type === "folder") {
+      if (groupedFolders.has(item.id)) continue;
+      groupedFolders.add(item.id);
+      blocks.push({
+        key: workspaceItemKey(item),
+        items: workspaceOrder.filter((candidate) =>
+          candidate.type !== "folder" && candidate.folderId === item.id),
+      });
+      continue;
+    }
+    const folderId = item.folderId;
+    if (folderId !== undefined && folders.some((folder) => folder.id === folderId)) {
+      if (groupedFolders.has(folderId)) continue;
+      groupedFolders.add(folderId);
+      const members = workspaceOrder.filter((candidate) => candidate.folderId === folderId);
+      blocks.push({ key: `folder:${folderId}`, items: members });
+    } else {
+      blocks.push({ key: workspaceItemKey(item), items: [item] });
+    }
+  }
+  for (const folder of folders) {
+    if (!groupedFolders.has(folder.id)) {
+      blocks.push({ key: `folder:${folder.id}`, items: [] });
+    }
+  }
+  return blocks;
+}
+
+function synchronizeWorkspaceOrder(): void {
+  const items: WorkspaceItem[] = [
+    ...expressions.map(({ id, folderId }) =>
+      ({ type: "expression" as const, id, folderId })),
+    ...tables.map(({ id, folderId }) =>
+      ({ type: "table" as const, id, folderId })),
+    ...folders.map(({ id }) => ({ type: "folder" as const, id })),
+  ];
+  const availableKeys = new Set(items.map(workspaceItemKey));
+  const seen = new Set<string>();
+  const order = workspaceOrder.filter((item) => {
+    const key = workspaceItemKey(item);
+    if (!availableKeys.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).map((item): WorkspaceItem => {
+    const source = items.find((candidate) => workspaceItemKey(candidate) === workspaceItemKey(item));
+    const folderId = item.type !== "folder" && folders.some((folder) => folder.id === item.folderId)
+      ? item.folderId
+      : item.type === "folder" ? undefined : source?.folderId;
+    return {
+      ...item,
+      folderId: item.type !== "folder" && folders.some((folder) => folder.id === folderId)
+        ? folderId
+        : undefined,
+    };
+  });
+  for (const item of items) {
+    const key = workspaceItemKey(item);
+    if (!seen.has(key)) order.push({ ...item });
+  }
+  workspaceOrder = order;
+  for (const item of workspaceOrder) {
+    if (item.type === "expression") {
+      const expression = expressions.find((entry) => entry.id === item.id);
+      if (expression) expression.folderId = item.folderId;
+    } else if (item.type === "table") {
+      const table = tables.find((entry) => entry.id === item.id);
+      if (table) table.folderId = item.folderId;
+    }
+  }
+}
+
+function workspaceOrderFromBlocks(blocks: WorkspaceBlock[]): WorkspaceItem[] {
+  return blocks.flatMap((block) => block.key.startsWith("folder:")
+    ? [
+      { type: "folder" as const, id: Number(block.key.slice("folder:".length)) },
+      ...block.items,
+    ]
+    : block.items);
+}
+
+function renderWorkspaceItems(): void {
+  synchronizeWorkspaceOrder();
+  const nodes = new Map<string, HTMLElement>();
+  for (const element of workspaceList.querySelectorAll<HTMLElement>(".workspace-item[data-workspace-key]")) {
+    if (element.dataset.workspaceKey) nodes.set(element.dataset.workspaceKey, element);
+  }
+  for (const staging of [expressionList, tableList]) {
+    for (const item of staging.children) {
+      const element = item as HTMLElement;
+      if (element.dataset.workspaceKey) nodes.set(element.dataset.workspaceKey, element);
+    }
+  }
+  workspaceList.replaceChildren();
+  for (const block of workspaceBlocks()) {
+    if (block.key.startsWith("folder:")) {
+      const folderId = Number(block.key.slice("folder:".length));
+      const folder = folders.find((entry) => entry.id === folderId);
+      if (!folder) continue;
+      const wrapper = createWorkspaceItem(block.key, `Folder ${folder.name}`);
+      wrapper.classList.add("workspace-folder", "folder-drop-target");
+      wrapper.dataset.folderDropId = String(folder.id);
+      const group = document.createElement("section");
+      group.className = "folder-group";
+      const header = document.createElement("div");
+      header.className = "folder-heading";
+      const toggleFolder = document.createElement("button");
+      toggleFolder.type = "button";
+      toggleFolder.className = "folder-toggle";
+      toggleFolder.textContent = folder.collapsed ? "▸" : "▾";
+      toggleFolder.setAttribute("aria-label", `${folder.collapsed ? "Expand" : "Collapse"} folder ${folder.name}`);
+      toggleFolder.setAttribute("aria-expanded", String(!folder.collapsed));
+      toggleFolder.setAttribute("aria-controls", `folder-contents-${folder.id}`);
+      toggleFolder.addEventListener("click", () => {
+        folder.collapsed = !folder.collapsed;
+        renderWorkspaceItems();
+        scheduleProjectSave();
+      });
+      const name = document.createElement("input");
+      name.value = folder.name;
+      name.maxLength = 40;
+      name.setAttribute("aria-label", `Folder ${folder.name} name`);
+      name.addEventListener("keydown", (event) => {
+        if (event.key === "ArrowLeft" || event.key === "ArrowRight") event.stopPropagation();
+      });
+      name.addEventListener("input", () => {
+        folder.name = name.value;
+        scheduleProjectSave();
+      });
+      const removeFolder = document.createElement("button");
+      removeFolder.type = "button";
+      removeFolder.className = "remove-button";
+      removeFolder.textContent = "×";
+      removeFolder.setAttribute("aria-label", `Remove folder ${folder.name}`);
+      removeFolder.addEventListener("click", () => {
+        workspaceOrder = workspaceOrder.map((item) =>
+          item.folderId === folder.id ? { ...item, folderId: undefined } : item);
+        expressions = expressions.map((expression) =>
+          expression.folderId === folder.id ? { ...expression, folderId: undefined } : expression);
+        tables = tables.map((table) =>
+          table.folderId === folder.id ? { ...table, folderId: undefined } : table);
+        folders = folders.filter((entry) => entry.id !== folder.id);
+        renderExpressions();
+        renderTables();
+      });
+      header.append(toggleFolder, name, removeFolder);
+      const children = document.createElement("div");
+      children.className = "folder-contents";
+      children.id = `folder-contents-${folder.id}`;
+      children.hidden = Boolean(folder.collapsed);
+      for (const item of block.items) {
+        const node = nodes.get(workspaceItemKey(item));
+        if (node) {
+          children.append(node);
+          nodes.delete(workspaceItemKey(item));
+        }
+      }
+      group.append(header, children);
+      wrapper.append(group);
+      workspaceList.append(wrapper);
+      continue;
+    }
+    const node = nodes.get(block.key);
+    if (node) workspaceList.append(node);
+  }
+}
+
+function reorderWorkspaceBlock(
+  sourceKey: string,
+  beforeKey: string | undefined,
+  targetFolderId: number | undefined,
+): void {
+  const blocks = workspaceBlocks();
+  const sourceBlockIndex = blocks.findIndex((block) =>
+    block.key === sourceKey || block.items.some((item) => workspaceItemKey(item) === sourceKey));
+  if (sourceBlockIndex < 0) return;
+  const sourceBlock = blocks[sourceBlockIndex]!;
+
+  if (sourceKey.startsWith("folder:")) {
+    if (targetFolderId !== undefined) return;
+    blocks.splice(sourceBlockIndex, 1);
+    const targetBlockIndex = beforeKey
+      ? blocks.findIndex((block) =>
+        block.key === beforeKey || block.items.some((item) => workspaceItemKey(item) === beforeKey))
+      : blocks.length;
+    blocks.splice(Math.max(0, targetBlockIndex), 0, sourceBlock);
+    workspaceOrder = workspaceOrderFromBlocks(blocks);
+    renderWorkspaceItems();
+    scheduleProjectSave();
+    return;
+  }
+
+  const itemIndex = sourceBlock.items.findIndex((item) => workspaceItemKey(item) === sourceKey);
+  const [source] = sourceBlock.items.splice(itemIndex, 1);
+  if (!source) return;
+  if (!sourceBlock.key.startsWith("folder:")) {
+    blocks.splice(sourceBlockIndex, 1);
+  }
+
+  const validFolderId = targetFolderId !== undefined &&
+      folders.some((folder) => folder.id === targetFolderId)
+    ? targetFolderId
+    : undefined;
+  source.folderId = validFolderId;
+  if (source.type === "expression") {
+    const expression = expressions.find((entry) => entry.id === source.id);
+    if (expression) expression.folderId = validFolderId;
+  } else {
+    const table = tables.find((entry) => entry.id === source.id);
+    if (table) table.folderId = validFolderId;
+  }
+
+  if (validFolderId !== undefined) {
+    let folderBlock = blocks.find((block) => block.key === `folder:${validFolderId}`);
+    if (!folderBlock) {
+      folderBlock = { key: `folder:${validFolderId}`, items: [] };
+      blocks.push(folderBlock);
+    }
+    const targetIndex = beforeKey
+      ? folderBlock.items.findIndex((item) => workspaceItemKey(item) === beforeKey)
+      : -1;
+    folderBlock.items.splice(targetIndex < 0 ? folderBlock.items.length : targetIndex, 0, source);
+  } else {
+    const targetIndex = beforeKey
+      ? blocks.findIndex((block) =>
+        block.key === beforeKey || block.items.some((item) => workspaceItemKey(item) === beforeKey))
+      : -1;
+    blocks.splice(targetIndex < 0 ? blocks.length : targetIndex, 0, {
+      key: workspaceItemKey(source),
+      items: [source],
+    });
+  }
+  workspaceOrder = workspaceOrderFromBlocks(blocks);
+  renderExpressions();
+  renderTables();
+  scheduleProjectSave();
+}
+
+function createFolder(): void {
+  const folder = { id: nextFolderId++, name: `Folder ${folders.length + 1}` };
+  folders.push(folder);
+  workspaceOrder.push({ type: "folder", id: folder.id });
+  renderWorkspaceItems();
+  workspaceList.querySelector<HTMLInputElement>(
+    `.workspace-folder[data-folder-drop-id="${folder.id}"] .folder-heading input`,
+  )?.focus();
+  scheduleProjectSave();
+}
+
+function createWorkspaceItem(key: string, label: string): HTMLDivElement {
+  const wrapper = document.createElement("div");
+  wrapper.className = "workspace-item";
+  wrapper.dataset.workspaceKey = key;
+  const handle = document.createElement("button");
+  handle.type = "button";
+  handle.className = "workspace-drag-handle";
+  handle.textContent = "⋮⋮";
+  handle.setAttribute("aria-label", `Reorder ${label}; use up and down arrow keys to move`);
+  handle.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const workspaceItem = workspaceOrder.find((item) => workspaceItemKey(item) === key);
+    const delta = event.key === "ArrowUp" ? -1 : 1;
+    if (workspaceItem?.folderId !== undefined) {
+      const siblings = workspaceOrder.filter((item) => item.folderId === workspaceItem.folderId);
+      const index = siblings.findIndex((item) => workspaceItemKey(item) === key);
+      const targetIndex = index + delta;
+      if (targetIndex >= 0 && targetIndex < siblings.length) {
+        const next = siblings[targetIndex + (delta > 0 ? 1 : 0)];
+        reorderWorkspaceBlock(
+          key,
+          next ? workspaceItemKey(next) : undefined,
+          workspaceItem.folderId,
+        );
+        workspaceList.querySelector<HTMLButtonElement>(
+          `.workspace-item[data-workspace-key="${key}"] .workspace-drag-handle`,
+        )?.focus();
+      }
+      return;
+    }
+    const blocks = workspaceBlocks();
+    const index = blocks.findIndex((block) => block.key === key);
+    const targetIndex = index + delta;
+    if (targetIndex >= 0 && targetIndex < blocks.length) {
+      const next = blocks[targetIndex + (delta > 0 ? 1 : 0)];
+      reorderWorkspaceBlock(key, next?.key, undefined);
+      workspaceList.querySelector<HTMLButtonElement>(
+        `.workspace-item[data-workspace-key="${key}"] .workspace-drag-handle`,
+      )?.focus();
+    }
+  });
+  wrapper.append(handle);
+  return wrapper;
+}
+
 function renderExpressions(): void {
   for (const name of sliderNames()) sliderValues[name] ??= 1;
   expressionList.replaceChildren();
@@ -1891,7 +2691,7 @@ function renderExpressions(): void {
     colorPicker.addEventListener("input", () => {
       expression.color = colorPicker.value;
       marker.style.backgroundColor = expression.color;
-      draw();
+      scheduleDraw();
       scheduleProjectSave();
     });
     const colorControl = document.createElement("label");
@@ -1909,7 +2709,7 @@ function renderExpressions(): void {
     lineWidth.addEventListener("input", () => {
       expression.lineWidth = Number(lineWidth.value);
       lineWidthValue.textContent = `${lineWidth.value}px`;
-      draw();
+      scheduleDraw();
       scheduleProjectSave();
     });
     const opacity = document.createElement("input");
@@ -1924,7 +2724,7 @@ function renderExpressions(): void {
     opacity.addEventListener("input", () => {
       expression.opacity = Number(opacity.value) / 100;
       opacityValue.textContent = `${opacity.value}%`;
-      draw();
+      scheduleDraw();
       scheduleProjectSave();
     });
     const appearanceControls = document.createElement("div");
@@ -1971,7 +2771,7 @@ function renderExpressions(): void {
         error.textContent = expression.compileError;
         input.setAttribute("aria-invalid", "true");
       }
-      draw();
+      scheduleDraw();
       return;
     });
     const visibility = document.createElement("button");
@@ -2029,7 +2829,7 @@ function renderExpressions(): void {
         compileSpatialColor(expression);
         channelInput.setAttribute("aria-invalid", String(Boolean(expression.colorError)));
         colorError.textContent = expression.colorError ?? "";
-        draw();
+        scheduleDraw();
         scheduleProjectSave();
       });
       hsvFields.append(channelInput);
@@ -2045,24 +2845,6 @@ function renderExpressions(): void {
     hsvHeading.append(hsvTitle);
     hsvControls.append(hsvHeading, hsvFields, hsvHelp, colorError);
     appearanceDetails.append(appearanceControls, hsvControls);
-    const folderSelect = document.createElement("select");
-    folderSelect.className = "expression-folder";
-    folderSelect.setAttribute("aria-label", `Expression ${index + 1} folder`);
-    const noFolder = document.createElement("option");
-    noFolder.value = "";
-    noFolder.textContent = "No folder";
-    folderSelect.append(noFolder);
-    for (const folder of folders) {
-      const option = document.createElement("option");
-      option.value = String(folder.id);
-      option.textContent = folder.name;
-      folderSelect.append(option);
-    }
-    folderSelect.value = expression.folderId === undefined ? "" : String(expression.folderId);
-    folderSelect.addEventListener("change", () => {
-      expression.folderId = folderSelect.value ? Number(folderSelect.value) : undefined;
-      renderExpressions();
-    });
     const noteDetails = document.createElement("details");
     noteDetails.className = "expression-note";
     const noteSummary = document.createElement("summary");
@@ -2076,53 +2858,22 @@ function renderExpressions(): void {
       scheduleProjectSave();
     });
     noteDetails.append(noteSummary, note);
-    row.append(marker, input, visibility, remove, error, appearanceDetails, folderSelect, noteDetails);
+    row.append(marker, input, visibility, remove, error, appearanceDetails, noteDetails);
     container.append(row);
   };
   for (const [index, expression] of expressions.entries()) {
-    if (expression.folderId === undefined || !folders.some((folder) => folder.id === expression.folderId)) {
-      renderExpression(expression, index, expressionList);
-    }
-  }
-  for (const folder of folders) {
-    const group = document.createElement("section");
-    group.className = "folder-group";
-    const header = document.createElement("div");
-    header.className = "folder-heading";
-    const name = document.createElement("input");
-    name.value = folder.name;
-    name.maxLength = 40;
-    name.setAttribute("aria-label", `Folder ${folder.name} name`);
-    name.addEventListener("input", () => {
-      folder.name = name.value;
-      for (const option of expressionList.querySelectorAll<HTMLOptionElement>(
-        `.expression-folder option[value="${folder.id}"]`,
-      )) option.textContent = folder.name;
-      scheduleProjectSave();
-    });
-    const removeFolder = document.createElement("button");
-    removeFolder.type = "button";
-    removeFolder.className = "remove-button";
-    removeFolder.textContent = "×";
-    removeFolder.setAttribute("aria-label", `Remove folder ${folder.name}`);
-    removeFolder.addEventListener("click", () => {
-      expressions = expressions.map((expression) =>
-        expression.folderId === folder.id ? { ...expression, folderId: undefined } : expression);
-      folders = folders.filter((entry) => entry.id !== folder.id);
-      renderExpressions();
-    });
-    header.append(name, removeFolder);
-    group.append(header);
-    for (const [index, expression] of expressions.entries()) {
-      if (expression.folderId === folder.id) renderExpression(expression, index, group);
-    }
-    expressionList.append(group);
+    const wrapper = createWorkspaceItem(`expression:${expression.id}`, `Expression ${index + 1}`);
+    renderExpression(expression, index, wrapper);
+    expressionList.append(wrapper);
   }
   renderSliders();
+  renderWorkspaceItems();
   scheduleProjectSave();
 }
 
 function tableValues(table: DataTable): { x: number[]; y: number[]; error?: string } {
+  const cached = tableValuesCache.get(table);
+  if (cached) return cached;
   const x: number[] = [];
   const y: number[] = [];
   for (const [index, row] of table.rows.entries()) {
@@ -2132,24 +2883,36 @@ function tableValues(table: DataTable): { x: number[]; y: number[]; error?: stri
       continue;
     }
     if (!xText || !yText) {
-      return { x, y, error: `Enter both x and y values in row ${index + 1}.` };
+      const values = { x, y, error: `Enter both x and y values in row ${index + 1}.` };
+      tableValuesCache.set(table, values);
+      return values;
     }
     const xValue = Number(xText);
     const yValue = Number(yText);
     if (!Number.isFinite(xValue) || !Number.isFinite(yValue)) {
-      return { x, y, error: `Row ${index + 1} must contain finite numbers.` };
+      const values = { x, y, error: `Row ${index + 1} must contain finite numbers.` };
+      tableValuesCache.set(table, values);
+      return values;
     }
     x.push(xValue);
     y.push(yValue);
   }
-  return { x, y };
+  const values = { x, y };
+  tableValuesCache.set(table, values);
+  return values;
+}
+
+function invalidateTableData(table: DataTable): void {
+  tableValuesCache.delete(table);
+  tableRevisions.set(table, nextTableRevision++);
+  table.regressionKey = undefined;
 }
 
 function updateTableRegression(table: DataTable): void {
   const key = JSON.stringify([
     table.regressionDegree,
     table.regressionKind,
-    table.rows.map((row) => [row.x, row.y]),
+    tableRevisions.get(table) ?? 0,
   ]);
   if (table.regressionKey === key) {
     return;
@@ -2357,6 +3120,7 @@ function renderTables(): void {
   tableList.replaceChildren();
   for (const [tableIndex, table] of tables.entries()) {
     updateTableRegression(table);
+    const wrapper = createWorkspaceItem(`table:${table.id}`, `Table ${tableIndex + 1}`);
     const container = document.createElement("section");
     container.className = "data-table";
     const heading = document.createElement("div");
@@ -2413,6 +3177,7 @@ function renderTables(): void {
       const updateValues = () => {
         dataRow.x = xInput.value;
         dataRow.y = yInput.value;
+        invalidateTableData(table);
         const values = tableValues(table);
         const rowTouched = Boolean(dataRow.x.trim() || dataRow.y.trim());
         xInput.setAttribute("aria-invalid", String(
@@ -2425,12 +3190,13 @@ function renderTables(): void {
         error.textContent = table.regressionError ?? values.error ?? "";
         updateRegressionSummary(summary, table, tableIndex);
         stats.textContent = tableStatistics(table);
-        draw();
+        scheduleDraw();
       };
       xInput.addEventListener("input", updateValues);
       yInput.addEventListener("input", updateValues);
       removeRow.addEventListener("click", () => {
         table.rows = table.rows.filter((entry) => entry.id !== dataRow.id);
+        invalidateTableData(table);
         renderTables();
         draw();
       });
@@ -2445,9 +3211,10 @@ function renderTables(): void {
     addRow.textContent = "Add row";
     addRow.addEventListener("click", () => {
       table.rows.push({ id: nextRowId++, x: "", y: "" });
+      invalidateTableData(table);
       renderTables();
       draw();
-      tableList.querySelector<HTMLInputElement>(
+      workspaceList.querySelector<HTMLInputElement>(
         `[aria-label="Table ${tableIndex + 1} x value ${table.rows.length}"]`,
       )?.focus();
     });
@@ -2526,8 +3293,11 @@ function renderTables(): void {
     stats.className = "table-stats";
     stats.textContent = tableStatistics(table);
     container.append(heading, columns, rowList, actions, summary, stats, error);
-    tableList.append(container);
+    wrapper.append(container);
+    tableList.append(wrapper);
   }
+  renderWorkspaceItems();
+  scheduleProjectSave();
 }
 
 function isRegressionKind(value: string): value is NonNullable<DataTable["regressionKind"]> {
@@ -2536,14 +3306,38 @@ function isRegressionKind(value: string): value is NonNullable<DataTable["regres
 }
 
 function addExpression(text = ""): void {
-  expressions.push({
+  const expression = {
     id: nextId++,
     text,
     color: colors[(nextId - 2) % colors.length]!,
-  });
+  };
+  expressions.push(expression);
+  workspaceOrder.push({ type: "expression", id: expression.id });
   renderExpressions();
   draw();
-  expressionList.lastElementChild?.querySelector<HTMLInputElement>("input")?.focus();
+  workspaceList.querySelector<HTMLInputElement>(
+    `.workspace-item[data-workspace-key="expression:${expression.id}"] input[aria-label^="Expression"]`,
+  )?.focus();
+}
+
+function addTable(): void {
+  const table = {
+    id: nextTableId++,
+    rows: [
+      { id: nextRowId++, x: "", y: "" },
+      { id: nextRowId++, x: "", y: "" },
+      { id: nextRowId++, x: "", y: "" },
+    ],
+    color: colors[(tables.length + 2) % colors.length]!,
+  };
+  tables.push(table);
+  workspaceOrder.push({ type: "table", id: table.id });
+  renderTables();
+  workspaceList.scrollTop = workspaceList.scrollHeight;
+  workspaceList.querySelector<HTMLInputElement>(
+    `.workspace-item[data-workspace-key="table:${table.id}"] input[aria-label="Table ${tables.length} x value 1"]`,
+  )?.focus();
+  draw();
 }
 
 function currentProjectState(): ProjectState {
@@ -2552,14 +3346,16 @@ function currentProjectState(): ProjectState {
     expressions: expressions.map((
       { id, text, color, lineWidth, opacity, folderId, note, hidden, hsv },
     ) => ({ id, text, color, lineWidth, opacity, folderId, note, hidden, hsv })),
-    tables: tables.map(({ id, rows, sourceExpressionId, regressionDegree, regressionKind, color }) =>
-      ({ id, rows, sourceExpressionId, regressionDegree, regressionKind, color })),
-    folders: folders.map(({ id, name }) => ({ id, name })),
+    tables: tables.map(({ id, rows, sourceExpressionId, regressionDegree, regressionKind, color, folderId }) =>
+      ({ id, rows, sourceExpressionId, regressionDegree, regressionKind, color, folderId })),
+    workspaceOrder: [...workspaceOrder],
+    folders: folders.map(({ id, name, collapsed }) => ({ id, name, collapsed })),
     sliders: { ...sliderValues },
     sliderOptions: { ...sliderOptions },
     centerX,
     centerY,
     scale,
+    graphOptions: { ...graphOptions },
   };
 }
 
@@ -2570,8 +3366,7 @@ function setProjectStatus(message: string): void {
 
 function saveProjectLocally(): boolean {
   try {
-    localStorage.setItem("better-desmos-project-v1", JSON.stringify(currentProjectState()));
-    automaticSavingEnabled = true;
+    localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(currentProjectState()));
     return true;
   } catch (reason) {
     setProjectStatus(reason instanceof Error
@@ -2581,12 +3376,13 @@ function saveProjectLocally(): boolean {
   }
 }
 
-let automaticSavingEnabled = !projectStatus;
 let saveTimer: number | undefined;
 function scheduleProjectSave(): void {
   if (!automaticSavingEnabled || sliderAnimation) return;
   if (saveTimer !== undefined) window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(() => {
+    saveTimer = undefined;
+    if (!automaticSavingEnabled || sliderAnimation) return;
     if (saveProjectLocally()) setProjectStatus("Saved on this device");
   }, 400);
 }
@@ -2594,6 +3390,7 @@ function scheduleProjectSave(): void {
 function applyProjectState(project: ProjectState): void {
   stopSliderAnimation();
   expressions = project.expressions.map((expression) => ({ ...expression }));
+  workspaceOrder = project.workspaceOrder.map((item) => ({ ...item }));
   tables = project.tables.map((table) => ({
     id: table.id,
     rows: table.rows.map((row) => ({ ...row })),
@@ -2601,6 +3398,7 @@ function applyProjectState(project: ProjectState): void {
     regressionDegree: table.regressionDegree,
     regressionKind: table.regressionKind,
     color: table.color,
+    folderId: table.folderId,
   }));
   folders = project.folders.map((folder) => ({ ...folder }));
   for (const key of Object.keys(sliderValues)) delete sliderValues[key];
@@ -2610,6 +3408,14 @@ function applyProjectState(project: ProjectState): void {
   centerX = project.centerX;
   centerY = project.centerY;
   scale = project.scale;
+  Object.assign(graphOptions, project.graphOptions ?? {
+    showGrid: true,
+    showXAxis: true,
+    showYAxis: true,
+    showLabels: true,
+    aspectRatio: 1,
+  });
+  updateGraphOptionControls();
   nextId = expressions.reduce((next, expression) => Math.max(next, expression.id + 1), 1);
   nextTableId = tables.reduce((next, table) => Math.max(next, table.id + 1), 1);
   nextRowId = tables.reduce(
@@ -2636,8 +3442,37 @@ function encodeProjectShareLink(): string {
   return url.href;
 }
 
+const saveDialog = document.querySelector<HTMLDialogElement>("#save-dialog")!;
+const autoSaveOption = document.querySelector<HTMLInputElement>("#save-autosave-option")!;
 document.querySelector("#save-project")!.addEventListener("click", () => {
-  if (saveProjectLocally()) setProjectStatus("Saved on this device");
+  autoSaveOption.checked = automaticSavingEnabled;
+  saveDialog.showModal();
+});
+document.querySelector("#cancel-save")!.addEventListener("click", () => saveDialog.close());
+document.querySelector<HTMLFormElement>("#save-dialog-form")!.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!saveProjectLocally()) return;
+  const enabled = autoSaveOption.checked;
+  let preferenceSaved = false;
+  try {
+    localStorage.setItem(AUTO_SAVE_STORAGE_KEY, String(enabled));
+    automaticSavingEnabled = enabled;
+    preferenceSaved = true;
+  } catch (reason) {
+    setProjectStatus(reason instanceof Error
+      ? `Saved, but could not update auto-save: ${reason.message}`
+      : "Saved, but could not update auto-save.");
+  }
+  if (preferenceSaved && enabled) {
+    setProjectStatus("Saved on this device · auto-save on");
+  } else if (preferenceSaved) {
+    if (saveTimer !== undefined) {
+      window.clearTimeout(saveTimer);
+      saveTimer = undefined;
+    }
+    setProjectStatus("Saved on this device · auto-save off");
+  }
+  saveDialog.close();
 });
 document.querySelector("#export-project")!.addEventListener("click", () => {
   const blob = new Blob([JSON.stringify(currentProjectState(), null, 2)], {
@@ -2680,25 +3515,153 @@ document.querySelector("#share-project")!.addEventListener("click", async () => 
   }
 });
 
-document.querySelector("#add-expression")!.addEventListener("click", () => addExpression());
-document.querySelector("#add-folder")!.addEventListener("click", () => {
-  folders.push({ id: nextFolderId++, name: `Folder ${folders.length + 1}` });
-  renderExpressions();
-});
-document.querySelector("#add-table")!.addEventListener("click", () => {
-  tables.push({
-    id: nextTableId++,
-    rows: [
-      { id: nextRowId++, x: "", y: "" },
-      { id: nextRowId++, x: "", y: "" },
-      { id: nextRowId++, x: "", y: "" },
-    ],
-    color: colors[(tables.length + 2) % colors.length]!,
+function updateWorkspaceDropPosition(clientY: number, eventTarget: EventTarget | null): void {
+  workspaceList.querySelectorAll(".workspace-drop-before").forEach((item) =>
+    item.classList.remove("workspace-drop-before"));
+  workspaceList.querySelectorAll(".folder-drop-active").forEach((folder) =>
+    folder.classList.remove("folder-drop-active"));
+  workspaceList.classList.remove("workspace-drop-end");
+  delete workspaceList.dataset.dropBeforeKey;
+  delete workspaceList.dataset.dropFolderId;
+
+  const sourceKey = workspaceDragState?.sourceKey;
+  if (!sourceKey) return;
+  const folder = eventTarget instanceof Element
+    ? eventTarget.closest<HTMLElement>(".workspace-folder")
+    : null;
+  if (folder && !sourceKey.startsWith("folder:")) {
+    folder.classList.add("folder-drop-active");
+    workspaceList.dataset.dropFolderId = folder.dataset.folderDropId;
+    const children = [...folder.querySelectorAll<HTMLElement>(
+      ".folder-contents > .workspace-item",
+    )].filter((item) => item.dataset.workspaceKey !== sourceKey);
+    const before = children.find((item) => {
+      const bounds = item.getBoundingClientRect();
+      return clientY < bounds.top + bounds.height / 2;
+    });
+    if (before?.dataset.workspaceKey) {
+      workspaceList.dataset.dropBeforeKey = before.dataset.workspaceKey;
+      before.classList.add("workspace-drop-before");
+    }
+    return;
+  }
+
+  const items = [...workspaceList.children].filter(
+    (item): item is HTMLElement =>
+      item instanceof HTMLElement && item.dataset.workspaceKey !== sourceKey,
+  );
+  const before = items.find((item) => {
+    const bounds = item.getBoundingClientRect();
+    return clientY < bounds.top + bounds.height / 2;
   });
-  renderTables();
-  document.querySelector(".tables-panel")?.scrollIntoView({ block: "nearest" });
-  tableList.querySelector<HTMLInputElement>(`[aria-label="Table ${tables.length} x value 1"]`)?.focus();
-  draw();
+  if (before?.dataset.workspaceKey) {
+    workspaceList.dataset.dropBeforeKey = before.dataset.workspaceKey;
+    before.classList.add("workspace-drop-before");
+  } else {
+    workspaceList.classList.add("workspace-drop-end");
+  }
+}
+
+function clearWorkspaceDropPosition(): void {
+  workspaceList.querySelectorAll(".workspace-drop-before").forEach((item) =>
+    item.classList.remove("workspace-drop-before"));
+  workspaceList.querySelectorAll(".folder-drop-active").forEach((folder) =>
+    folder.classList.remove("folder-drop-active"));
+  workspaceList.classList.remove("workspace-drop-end");
+}
+
+function finishWorkspaceDrag(commit: boolean): void {
+  const state = workspaceDragState;
+  if (!state) return;
+  workspaceDragState = undefined;
+  if (commit && state.active) {
+    const targetFolderId = workspaceList.dataset.dropFolderId === undefined
+      ? undefined
+      : Number(workspaceList.dataset.dropFolderId);
+    reorderWorkspaceBlock(
+      state.sourceKey,
+      workspaceList.dataset.dropBeforeKey,
+      Number.isSafeInteger(targetFolderId) ? targetFolderId : undefined,
+    );
+  }
+  state.sourceItem.classList.remove("workspace-item-dragging");
+  state.preview?.remove();
+  clearWorkspaceDropPosition();
+  delete workspaceList.dataset.dropBeforeKey;
+  delete workspaceList.dataset.dropFolderId;
+  if (state.handle.hasPointerCapture(state.pointerId)) {
+    state.handle.releasePointerCapture(state.pointerId);
+  }
+}
+
+workspaceList.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || !(event.target instanceof Element)) return;
+  const handle = event.target.closest<HTMLButtonElement>(".workspace-drag-handle");
+  const sourceItem = handle?.closest<HTMLElement>(".workspace-item");
+  const sourceKey = sourceItem?.dataset.workspaceKey;
+  if (!handle || !sourceItem || !sourceKey) return;
+  workspaceDragState = {
+    pointerId: event.pointerId,
+    sourceKey,
+    handle,
+    sourceItem,
+    startX: event.clientX,
+    startY: event.clientY,
+    active: false,
+  };
+  handle.setPointerCapture(event.pointerId);
+});
+workspaceList.addEventListener("pointermove", (event) => {
+  const state = workspaceDragState;
+  if (!state || event.pointerId !== state.pointerId) return;
+  if (!state.active && Math.hypot(event.clientX - state.startX, event.clientY - state.startY) < 5) {
+    return;
+  }
+  if (!state.active) {
+    state.active = true;
+    state.sourceItem.classList.add("workspace-item-dragging");
+    const label = state.handle.getAttribute("aria-label") ?? "Workspace item";
+    state.preview = document.createElement("div");
+    state.preview.className = "workspace-drag-preview";
+    state.preview.textContent = label.replace(/^Reorder /, "").replace(/;.*$/, "");
+    document.body.append(state.preview);
+  }
+  const scrollContainer = workspaceList.closest<HTMLElement>(".sidebar-scroll");
+  if (scrollContainer) {
+    const bounds = scrollContainer.getBoundingClientRect();
+    const edgeSize = 48;
+    if (event.clientY < bounds.top + edgeSize) {
+      scrollContainer.scrollTop -= Math.max(4, (bounds.top + edgeSize - event.clientY) / 3);
+    } else if (event.clientY > bounds.bottom - edgeSize) {
+      scrollContainer.scrollTop += Math.max(4, (event.clientY - bounds.bottom + edgeSize) / 3);
+    }
+  }
+  if (state.preview) {
+    state.preview.style.left = `${event.clientX + 14}px`;
+    state.preview.style.top = `${event.clientY + 14}px`;
+  }
+  updateWorkspaceDropPosition(event.clientY, document.elementFromPoint(event.clientX, event.clientY));
+});
+workspaceList.addEventListener("pointerup", (event) => {
+  if (!workspaceDragState || event.pointerId !== workspaceDragState.pointerId) return;
+  if (workspaceDragState.active) {
+    updateWorkspaceDropPosition(event.clientY, document.elementFromPoint(event.clientX, event.clientY));
+  }
+  finishWorkspaceDrag(workspaceDragState.active);
+});
+workspaceList.addEventListener("pointercancel", () => finishWorkspaceDrag(false));
+workspaceList.addEventListener("lostpointercapture", () => {
+  if (workspaceDragState) finishWorkspaceDrag(false);
+});
+workspaceAdd.addEventListener("change", () => {
+  if (workspaceAdd.value === "expression") {
+    addExpression();
+  } else if (workspaceAdd.value === "table") {
+    addTable();
+  } else if (workspaceAdd.value === "folder") {
+    createFolder();
+  }
+  workspaceAdd.value = "";
 });
 document.querySelector("#zoom-in")!.addEventListener("click", () => {
   scale = Math.min(scale * 1.25, 100_000);
@@ -2716,15 +3679,55 @@ document.querySelector("#reset-view")!.addEventListener("click", () => {
 });
 document.querySelectorAll<HTMLButtonElement>("[data-pan]").forEach((button) => {
   button.addEventListener("click", () => {
-    const amount = 80 / scale;
     switch (button.dataset.pan) {
-      case "up": centerY += amount; break;
-      case "down": centerY -= amount; break;
-      case "left": centerX -= amount; break;
-      case "right": centerX += amount; break;
+      case "up": centerY += 80 / verticalScale(); break;
+      case "down": centerY -= 80 / verticalScale(); break;
+      case "left": centerX -= 80 / scale; break;
+      case "right": centerX += 80 / scale; break;
     }
     draw();
   });
+});
+
+const settingsDialog = document.querySelector<HTMLDialogElement>("#settings-dialog")!;
+document.querySelector("#open-settings")!.addEventListener("click", () => settingsDialog.showModal());
+document.querySelector("#close-settings")!.addEventListener("click", () => settingsDialog.close());
+settingsDialog.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") settingsDialog.close();
+});
+
+function updateGraphOptionControls(): void {
+  document.querySelector<HTMLInputElement>("#show-grid-setting")!.checked = graphOptions.showGrid;
+  document.querySelector<HTMLInputElement>("#show-x-axis-setting")!.checked = graphOptions.showXAxis;
+  document.querySelector<HTMLInputElement>("#show-y-axis-setting")!.checked = graphOptions.showYAxis;
+  document.querySelector<HTMLInputElement>("#show-labels-setting")!.checked = graphOptions.showLabels;
+  document.querySelector<HTMLSelectElement>("#aspect-ratio-setting")!.value =
+    String(graphOptions.aspectRatio);
+}
+updateGraphOptionControls();
+
+const graphOptionInputs: Array<[keyof Omit<GraphOptions, "aspectRatio">, string]> = [
+  ["showGrid", "#show-grid-setting"],
+  ["showXAxis", "#show-x-axis-setting"],
+  ["showYAxis", "#show-y-axis-setting"],
+  ["showLabels", "#show-labels-setting"],
+];
+for (const [option, selector] of graphOptionInputs) {
+  const input = document.querySelector<HTMLInputElement>(selector)!;
+  input.addEventListener("change", () => {
+    graphOptions[option] = input.checked;
+    draw();
+  });
+}
+const aspectRatioInput = document.querySelector<HTMLSelectElement>("#aspect-ratio-setting")!;
+aspectRatioInput.value = String(graphOptions.aspectRatio);
+aspectRatioInput.addEventListener("change", () => {
+  const aspectRatio = Number(aspectRatioInput.value);
+  if (aspectRatio !== 0.5 && aspectRatio !== 1 && aspectRatio !== 2) {
+    throw new Error("Unsupported axis scale ratio.");
+  }
+  graphOptions.aspectRatio = aspectRatio;
+  draw();
 });
 
 const precisionInput = document.querySelector<HTMLInputElement>("#precision-setting")!;
@@ -2735,9 +3738,9 @@ desmosModeInput.addEventListener("change", () => {
   if (desmosModeInput.checked) {
     savedPreciseSettings = { ...graphSettings };
     graphMode = "desmos";
-    graphSettings.explicitSampleSpacing = explicitSpacingOptions[0]!;
+    graphSettings.explicitSampleSpacing = 1;
     graphSettings.implicitSampleSpacing = implicitSpacingOptions[0]!;
-    explicitSpacingInput.value = "0";
+    explicitSpacingInput.value = String(explicitSpacingOptions.indexOf(graphSettings.explicitSampleSpacing));
     implicitSpacingInput.value = "0";
     explicitSpacingValue.value = `${graphSettings.explicitSampleSpacing} px`;
     implicitSpacingValue.value = `${graphSettings.implicitSampleSpacing} px`;
@@ -2760,7 +3763,7 @@ desmosModeInput.addEventListener("change", () => {
     ? `≈${FAST_MODE_PRECISION_DIGITS} digits`
     : `${graphSettings.precisionDigits} digits`;
   document.querySelector("#mode-note")!.textContent = graphMode === "desmos"
-    ? "Desmos mode · maximum performance"
+    ? "Desmos mode · fast math"
     : "Exact where possible · configurable precision";
   renderExpressions();
   draw();
@@ -2794,35 +3797,57 @@ implicitSpacingInput.addEventListener("input", () => {
 canvas.addEventListener("pointerdown", (event) => {
   drag = { x: event.clientX, y: event.clientY, centerX, centerY, moved: false };
   canvas.setPointerCapture(event.pointerId);
+  const bounds = canvasWrap.getBoundingClientRect();
+  hoverPosition = {
+    x: event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS,
+    y: event.clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS,
+  };
   drawHoverOverlay();
 });
 canvas.addEventListener("pointermove", (event) => {
-  const bounds = canvas.getBoundingClientRect();
+  const bounds = canvasWrap.getBoundingClientRect();
   if (drag) {
     if (drag.moved || Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 4) {
       drag.moved = true;
-      centerX = drag.centerX - (event.clientX - drag.x) / scale;
-      centerY = drag.centerY + (event.clientY - drag.y) / scale;
-      draw();
+      const deltaX = event.clientX - drag.x;
+      const deltaY = event.clientY - drag.y;
+      centerX = drag.centerX - deltaX / scale;
+      centerY = drag.centerY + deltaY / verticalScale();
+      canvas.style.transform = `translate3d(${deltaX}px, ${deltaY}px, 0)`;
     }
   } else {
-    hoverPosition = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+    hoverPosition = {
+      x: event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS,
+      y: event.clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS,
+    };
     drawHoverOverlay();
   }
 });
 canvas.addEventListener("pointerup", (event) => {
-  const bounds = canvas.getBoundingClientRect();
+  const bounds = canvasWrap.getBoundingClientRect();
   if (drag && !drag.moved) {
-    const screenX = event.clientX - bounds.left;
-    const screenY = event.clientY - bounds.top;
+    const screenX = event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS;
+    const screenY = event.clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS;
     hoverPosition = { x: screenX, y: screenY };
     addGraphPointAt(screenX, screenY);
   }
+  const moved = drag?.moved ?? false;
   drag = undefined;
-  drawHoverOverlay();
+  canvas.style.transform = "";
+  if (moved) {
+    hoverPosition = undefined;
+    scheduleDraw();
+  } else {
+    drawHoverOverlay();
+  }
 });
 canvas.addEventListener("pointercancel", () => {
+  if (drag?.moved) {
+    centerX = drag.centerX;
+    centerY = drag.centerY;
+  }
   drag = undefined;
+  canvas.style.transform = "";
   drawHoverOverlay();
 });
 canvas.addEventListener("pointerleave", () => {
@@ -2833,18 +3858,22 @@ canvas.addEventListener("pointerleave", () => {
 });
 canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
-  const bounds = canvas.getBoundingClientRect();
-  const mouseX = event.clientX - bounds.left;
-  const mouseY = event.clientY - bounds.top;
-  const beforeX = (mouseX - bounds.width / 2) / scale + centerX;
-  const beforeY = (bounds.height / 2 - mouseY) / scale + centerY;
+  const bounds = canvasWrap.getBoundingClientRect();
+  const graphWidth = bounds.width * GRAPH_BUFFER_SCALE;
+  const graphHeight = bounds.height * GRAPH_BUFFER_SCALE;
+  const mouseX = event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS;
+  const mouseY = event.clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS;
+  const beforeX = (mouseX - graphWidth / 2) / scale + centerX;
+  const beforeY = (graphHeight / 2 - mouseY) / verticalScale() + centerY;
   scale = Math.min(100_000, Math.max(0.001, scale * (event.deltaY < 0 ? 1.12 : 1 / 1.12)));
-  centerX = beforeX - (mouseX - bounds.width / 2) / scale;
-  centerY = beforeY - (bounds.height / 2 - mouseY) / scale;
-  draw();
+  centerX = beforeX - (mouseX - graphWidth / 2) / scale;
+  centerY = beforeY - (graphHeight / 2 - mouseY) / verticalScale();
+  scheduleDraw();
 }, { passive: false });
 
 window.addEventListener("resize", draw);
+desmosModeInput.checked = true;
+desmosModeInput.dispatchEvent(new Event("change"));
 setProjectStatus(projectStatus);
 renderExpressions();
 renderTables();
