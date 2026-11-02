@@ -67,7 +67,7 @@ button { color: inherit; }
 .sidebar-brand .brand { font-size: 14px; }
 .sidebar-brand .brand-mark { font-size: 25px; }
 .panel-heading { padding: 8px 6px; border-bottom: 1px solid var(--border); }
-.project-controls { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); align-items: center; gap: 3px; }
+.project-controls { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); align-items: center; gap: 3px; }
 .project-controls > button, .project-controls > .workspace-add-control { width: auto; min-width: 0; height: 30px; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .workspace-add-control { position: relative; display: block; }
@@ -100,12 +100,14 @@ button { color: inherit; }
 .visibility-button { padding: 0; border: 0; background: transparent; color: var(--accent-soft); cursor: pointer; }
 .expression-appearance { grid-column: 2 / 5; color: var(--text-secondary); font-size: 10px; }
 .expression-appearance:not([open]) { display: none; }
-.appearance-controls { display: grid; grid-template-columns: minmax(60px, .7fr) minmax(80px, 1fr) minmax(80px, 1fr); align-items: center; gap: 7px; padding: 8px; border: 1px solid var(--border-medium); border-radius: 5px; background: var(--input-alt); }
+.appearance-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; gap: 7px; padding: 8px; border: 1px solid var(--border-medium); border-radius: 5px; background: var(--input-alt); }
 .appearance-color-control, .appearance-range-control { display: grid; align-items: center; gap: 3px; color: var(--text-secondary); }
-.appearance-color-control { grid-template-columns: 1fr 30px; }
-.appearance-range-control { grid-template-columns: 1fr auto; }
-.appearance-range-control input[type="range"] { grid-column: 1 / 3; width: 100%; padding: 0; border: 0; background: transparent; accent-color: var(--accent); }
+.appearance-color-control { grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr) 30px; }
+.appearance-range-control { grid-template-columns: minmax(0, 1fr) auto; min-width: 0; }
+.appearance-range-control input[type="range"] { grid-column: 1 / 3; width: 100%; min-width: 0; padding: 0; border: 0; background: transparent; accent-color: var(--accent); }
 .appearance-range-control output { color: var(--text); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.draggable-point-control { display: flex; align-items: center; gap: 6px; margin-top: 7px; color: var(--text-secondary); }
+.draggable-point-control input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
 .expression-row input.expression-color { width: 30px; height: 27px; padding: 2px; border: 1px solid var(--border-strong); border-radius: 5px; cursor: pointer; }
 .appearance-hsv-control { margin-top: 7px; padding: 8px; border: 1px solid var(--border-medium); border-radius: 5px; background: var(--input-alt); }
 .appearance-hsv-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -113,6 +115,15 @@ button { color: inherit; }
 .text-block { display: grid; grid-template-columns: minmax(0, 1fr) 25px; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-bg); }
 .text-block textarea { width: 100%; min-height: 56px; padding: 6px; resize: vertical; border: 1px solid var(--border-medium); border-radius: 4px; color: var(--text); background: var(--input-bg); font: inherit; font-size: 12px; line-height: 1.5; }
 .text-block textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ticker-panel { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; margin-bottom: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-bg); }
+.ticker-heading { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; color: var(--accent-soft); font-size: 11px; }
+.ticker-panel > input, .ticker-panel > select, .ticker-field input { min-width: 0; width: 100%; padding: 5px 6px; border: 1px solid var(--border-medium); border-radius: 4px; color: var(--text); background: var(--input-bg); font-size: 11px; }
+.ticker-panel > input:first-of-type { grid-column: 1 / -1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ticker-field { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 6px; color: var(--text-secondary); font-size: 10px; }
+.ticker-field input[hidden] { display: none; }
+.ticker-panel > button:not(.remove-button) { padding: 5px 8px; border: 1px solid var(--border-medium); border-radius: 5px; color: var(--text-secondary); background: var(--raised-bg); font-size: 11px; cursor: pointer; }
+.ticker-error { grid-column: 1 / -1; margin: 0; color: var(--error); font-size: 10px; overflow-wrap: anywhere; }
+.ticker-panel [aria-invalid="true"] { border-color: var(--error-border); }
 .hsv-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: 5px; }
 .expression-row .hsv-fields input { padding: 5px; font-size: 10px; }
 .appearance-hsv-control small { display: block; margin-top: 5px; color: var(--muted-text); line-height: 1.4; }
@@ -209,6 +220,8 @@ code { color: var(--accent-soft); font-family: ui-monospace, SFMono-Regular, Men
 .graph-toolbar { position: absolute; z-index: 2; top: 12px; right: 14px; display: flex; align-items: flex-start; justify-content: flex-end; gap: 8px; pointer-events: none; }
 .project-controls button { min-width: 0; padding: 5px 0; border: 1px solid var(--border-medium); border-radius: 5px; color: var(--text-secondary); background: var(--raised-bg); font-size: 10px; white-space: nowrap; cursor: pointer; }
 .project-controls button:hover { border-color: var(--accent); color: var(--text-strong); }
+.project-controls button:disabled { opacity: .45; cursor: default; }
+.project-controls button:disabled:hover { border-color: var(--border-medium); color: var(--text-secondary); }
 .save-dialog { width: min(390px, calc(100vw - 36px)); overflow: hidden; }
 .save-dialog #save-dialog-form { margin: 0; }
 .save-dialog-description { margin: 16px 18px 12px; color: var(--muted-text); font-size: 12px; }

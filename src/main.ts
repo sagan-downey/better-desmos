@@ -1,6 +1,7 @@
 import {
   compileFastGraphExpression,
   compileGraphExpression,
+  compileTickerAction,
   fitPolynomialRegression,
   fitLogarithmicRegression,
   fitExponentialRegression,
@@ -43,6 +44,7 @@ interface Expression {
   color: string;
   lineWidth?: number;
   opacity?: number;
+  draggable?: boolean;
   folderId?: number;
   note?: string;
   hidden?: boolean;
@@ -89,11 +91,22 @@ interface TextBlock {
   folderId?: number;
 }
 
+interface Ticker {
+  id: number;
+  action: string;
+  intervalMs: number;
+  runMode: "repeat" | "count";
+  tickCount: number;
+  folderId?: number;
+  error?: string;
+}
+
 interface ProjectState {
   version: 1;
   expressions: Expression[];
   tables: DataTable[];
   texts?: TextBlock[];
+  tickers?: Ticker[];
   workspaceOrder: WorkspaceItem[];
   folders: Folder[];
   sliders: Record<string, number>;
@@ -113,7 +126,7 @@ interface GraphOptions {
 }
 
 interface WorkspaceItem {
-  type: "expression" | "table" | "text" | "folder";
+  type: "expression" | "table" | "text" | "ticker" | "folder";
   id: number;
   folderId?: number;
 }
@@ -152,6 +165,19 @@ interface PointCandidate {
   type: string;
   graphIds: string[];
   color: string;
+}
+
+interface DraggableGraphPoint {
+  expressionId: number;
+  draggable: boolean;
+  xVariables: string[];
+  yVariables: string[];
+  x: number;
+  y: number;
+  screenX: number;
+  screenY: number;
+  color: string;
+  opacity: number;
 }
 
 interface CurveGeometry {
@@ -367,6 +393,7 @@ function parseProjectState(text: string): ProjectState {
         (item.folderId !== undefined && !Number.isInteger(item.folderId)) ||
         (item.note !== undefined && (typeof item.note !== "string" || item.note.length > 10_000)) ||
         (item.hidden !== undefined && typeof item.hidden !== "boolean") ||
+        (item.draggable !== undefined && typeof item.draggable !== "boolean") ||
         (hsv !== undefined && !isHSVFormulas(hsv))) {
       throw new Error("Project contains an invalid expression.");
     }
@@ -379,6 +406,7 @@ function parseProjectState(text: string): ProjectState {
       folderId: item.folderId as number | undefined,
       note: item.note as string | undefined,
       hidden: item.hidden as boolean | undefined,
+      draggable: item.draggable as boolean | undefined,
       hsv: hsv === undefined ? undefined : {
         hue: hsv.hue,
         saturation: hsv.saturation,
@@ -455,6 +483,32 @@ function parseProjectState(text: string): ProjectState {
   if (parsedTexts.length > 300) {
     throw new Error("Project contains too many text blocks.");
   }
+  const parsedTickers: Ticker[] = [];
+  if (value.tickers !== undefined) {
+    if (!Array.isArray(value.tickers) || value.tickers.length > 100) {
+      throw new Error("Project contains invalid tickers.");
+    }
+    for (const item of value.tickers) {
+      if (!isRecord(item) || !Number.isSafeInteger(item.id) || Number(item.id) < 1 ||
+          typeof item.action !== "string" || item.action.length > 512 ||
+          typeof item.intervalMs !== "number" || !Number.isInteger(item.intervalMs) ||
+          item.intervalMs < 10 || item.intervalMs > 60_000 ||
+          (item.runMode !== "repeat" && item.runMode !== "count") ||
+          typeof item.tickCount !== "number" || !Number.isInteger(item.tickCount) ||
+          item.tickCount < 1 || item.tickCount > 1_000_000 ||
+          (item.folderId !== undefined && !Number.isSafeInteger(item.folderId))) {
+        throw new Error("Project contains an invalid ticker.");
+      }
+      parsedTickers.push({
+        id: item.id as number,
+        action: item.action,
+        intervalMs: item.intervalMs,
+        runMode: item.runMode,
+        tickCount: item.tickCount,
+        folderId: item.folderId as number | undefined,
+      });
+    }
+  }
   const sliders: Record<string, number> = {};
   for (const [name, slider] of Object.entries(value.sliders)) {
     if (!/^[a-z]$/i.test(name) || typeof slider !== "number" || !Number.isFinite(slider)) {
@@ -511,12 +565,15 @@ function parseProjectState(text: string): ProjectState {
       ...parsedTexts.map(({ id, folderId }): WorkspaceItem => ({
         type: "text", id, folderId,
       })),
+      ...parsedTickers.map(({ id, folderId }): WorkspaceItem => ({
+        type: "ticker", id, folderId,
+      })),
       ...parsedFolders.map(({ id }): WorkspaceItem => ({ type: "folder", id })),
     ]
     : rawWorkspaceOrder.map((item): WorkspaceItem => {
       if (!isRecord(item) ||
           (item.type !== "expression" && item.type !== "table" &&
-            item.type !== "text" && item.type !== "folder") ||
+            item.type !== "text" && item.type !== "ticker" && item.type !== "folder") ||
           !Number.isSafeInteger(item.id) || Number(item.id) < 1 ||
           (item.type === "folder" && item.folderId !== undefined) ||
           (item.folderId !== undefined && !Number.isSafeInteger(item.folderId))) {
@@ -560,18 +617,20 @@ function parseProjectState(text: string): ProjectState {
     ...expressionIds.map((id) => `expression:${id}`),
     ...tableIds.map((id) => `table:${id}`),
     ...parsedTexts.map(({ id }) => `text:${id}`),
+    ...parsedTickers.map(({ id }) => `ticker:${id}`),
     ...folderIds.map((id) => `folder:${id}`),
   ];
   if (new Set(workspaceKeys).size !== workspaceKeys.length ||
       workspaceKeys.length !== expectedWorkspaceKeys.length ||
       expectedWorkspaceKeys.some((key) => !workspaceKeys.includes(key))) {
-    throw new Error("Project workspace order must include each expression, table, text block, and folder exactly once.");
+    throw new Error("Project workspace order must include each expression, table, text block, ticker, and folder exactly once.");
   }
   return {
     version: 1,
     expressions: parsedExpressions,
     tables: parsedTables,
     texts: parsedTexts,
+    tickers: parsedTickers,
     workspaceOrder: parsedWorkspaceOrder,
     folders: parsedFolders,
     sliders,
@@ -628,17 +687,28 @@ let automaticSavingEnabled = loadAutomaticSavingPreference();
 let expressions: Expression[] = initialProject?.expressions ?? [];
 let tables: DataTable[] = initialProject?.tables ?? [];
 let textBlocks: TextBlock[] = initialProject?.texts ?? [];
+let tickers: Ticker[] = initialProject?.tickers ?? [];
 let folders: Folder[] = initialProject?.folders ?? [];
 let workspaceOrder: WorkspaceItem[] = initialProject?.workspaceOrder ?? [
   ...expressions.map(({ id }): WorkspaceItem => ({ type: "expression", id })),
   ...tables.map(({ id }): WorkspaceItem => ({ type: "table", id })),
   ...textBlocks.map(({ id }): WorkspaceItem => ({ type: "text", id })),
+  ...tickers.map(({ id }): WorkspaceItem => ({ type: "ticker", id })),
   ...folders.map(({ id }): WorkspaceItem => ({ type: "folder", id })),
 ];
 const sliderValues: Record<string, number> = initialProject?.sliders ?? {};
 const sliderOptions: Record<string, SliderOptions> = initialProject?.sliderOptions ?? {};
-let sliderAnimation: { name: string; direction: 1 | -1; lastTime: number } | undefined;
+interface SliderAnimation {
+  direction: 1 | -1;
+  lastTime: number;
+}
+const sliderAnimations = new Map<string, SliderAnimation>();
 let sliderAnimationTimer: number | undefined;
+interface RunningTicker {
+  timer: number;
+  remainingTicks?: number;
+}
+const runningTickers = new Map<number, RunningTicker>();
 const explicitSpacingOptions = [4, 3.5, 3, 2.5, 2, 1.5, 1, 0.5];
 const implicitSpacingOptions = [12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
 let nextId = Math.max(0, ...expressions.map((expression) => expression.id)) + 1;
@@ -646,6 +716,7 @@ let nextTableId = Math.max(0, ...tables.map((table) => table.id)) + 1;
 let nextRowId = Math.max(0, ...tables.flatMap((table) => table.rows.map((row) => row.id))) + 1;
 let nextFolderId = Math.max(0, ...folders.map((folder) => folder.id)) + 1;
 let nextTextId = Math.max(0, ...textBlocks.map((textBlock) => textBlock.id)) + 1;
+let nextTickerId = Math.max(0, ...tickers.map((ticker) => ticker.id)) + 1;
 let centerX = initialProject?.centerX ?? 0;
 let centerY = initialProject?.centerY ?? 0;
 let scale = initialProject?.scale ?? 48;
@@ -729,17 +800,22 @@ let drag: {
   centerX: number;
   centerY: number;
   moved: boolean;
+  point?: DraggableGraphPoint;
+  startSliderValues?: Record<string, number>;
+  pointerOffsetX?: number;
+  pointerOffsetY?: number;
 } | undefined;
 let hoverPosition: HoverState | undefined;
 let hoverCandidates: PointCandidate[] = [];
 let hoverCurves: CurveGeometry[] = [];
+let draggableGraphPoints: DraggableGraphPoint[] = [];
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 2.4 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.4</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 2.5 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.5</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -747,6 +823,8 @@ app.innerHTML = `
           <button type="button" id="export-project">Export</button>
           <button type="button" id="import-project">Import</button>
           <button type="button" id="share-project">Share</button>
+          <button type="button" id="undo-project" aria-label="Undo" title="Undo">Undo</button>
+          <button type="button" id="redo-project" aria-label="Redo" title="Redo">Redo</button>
           <label class="workspace-add-control">
             <span class="visually-hidden">Add to workspace</span>
             <select id="workspace-add" aria-label="Add to workspace">
@@ -754,6 +832,7 @@ app.innerHTML = `
               <option value="expression">Add expression</option>
               <option value="table">Add table</option>
               <option value="text">Add text</option>
+              <option value="ticker">Add ticker</option>
               <option value="folder">Add folder</option>
             </select>
           </label>
@@ -887,6 +966,8 @@ const tableList = document.createElement("div");
 tableList.className = "tables-panel";
 const textList = document.createElement("div");
 textList.className = "text-blocks";
+const tickerList = document.createElement("div");
+tickerList.className = "tickers-panel";
 const workspaceAdd = document.querySelector<HTMLSelectElement>("#workspace-add")!;
 const canvas = document.querySelector<HTMLCanvasElement>("#graph")!;
 const context = canvas.getContext("2d")!;
@@ -934,8 +1015,15 @@ function themeColorWithAlpha(name: string, alpha: number): string {
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 }
 
+function alignCanvasStrokeCenter(coordinate: number, dpr: number, lineWidth: number): number {
+  const devicePixels = Math.round(lineWidth * dpr);
+  const halfPixel = devicePixels % 2 === 1 ? 0.5 : 0;
+  return (Math.round(coordinate * dpr) + halfPixel) / dpr;
+}
+
 function drawGrid(width: number, height: number): void {
   const yScale = verticalScale();
+  const dpr = window.devicePixelRatio || 1;
   const originX = width / 2 - centerX * scale;
   const originY = height / 2 + centerY * yScale;
   const xStep = tickStep();
@@ -952,8 +1040,9 @@ function drawGrid(width: number, height: number): void {
       if (axis) {
         continue;
       }
-      context.moveTo(Math.round(x) + 0.5, 0);
-      context.lineTo(Math.round(x) + 0.5, height);
+      const alignedX = alignCanvasStrokeCenter(x, dpr, context.lineWidth);
+      context.moveTo(alignedX, 0);
+      context.lineTo(alignedX, height);
     }
     for (let yValue = Math.ceil((centerY - height / (2 * yScale)) / yStep) * yStep;
       yValue <= centerY + height / (2 * yScale); yValue += yStep) {
@@ -962,8 +1051,9 @@ function drawGrid(width: number, height: number): void {
         continue;
       }
       const y = originY - yValue * yScale;
-      context.moveTo(0, Math.round(y) + 0.5);
-      context.lineTo(width, Math.round(y) + 0.5);
+      const alignedY = alignCanvasStrokeCenter(y, dpr, context.lineWidth);
+      context.moveTo(0, alignedY);
+      context.lineTo(width, alignedY);
     }
     context.strokeStyle = themeColorWithAlpha("text", 0.22);
     context.stroke();
@@ -973,12 +1063,14 @@ function drawGrid(width: number, height: number): void {
   const zeroX = originX;
   const zeroY = originY;
   if (graphOptions.showYAxis) {
-    context.moveTo(Math.round(zeroX) + 0.5, 0);
-    context.lineTo(Math.round(zeroX) + 0.5, height);
+    const alignedZeroX = alignCanvasStrokeCenter(zeroX, dpr, context.lineWidth);
+    context.moveTo(alignedZeroX, 0);
+    context.lineTo(alignedZeroX, height);
   }
   if (graphOptions.showXAxis) {
-    context.moveTo(0, Math.round(zeroY) + 0.5);
-    context.lineTo(width, Math.round(zeroY) + 0.5);
+    const alignedZeroY = alignCanvasStrokeCenter(zeroY, dpr, context.lineWidth);
+    context.moveTo(0, alignedZeroY);
+    context.lineTo(width, alignedZeroY);
   }
   context.strokeStyle = themeColorWithAlpha("text", 0.72);
   context.stroke();
@@ -2046,6 +2138,7 @@ function draw(): void {
   const candidates: PointCandidate[] = [];
   const explicitCurves: ExplicitCurveData[] = [];
   const implicitCurves: CurveGeometry[] = [];
+  const nextDraggableGraphPoints: DraggableGraphPoint[] = [];
   const listPoints: Array<{
     x: number;
     y: number;
@@ -2065,6 +2158,46 @@ function draw(): void {
     const colorAt = compileSpatialColor(expression);
     const lineWidth = expression.lineWidth ?? 2;
     const opacity = expression.opacity ?? 1;
+    if (graph.kind === "point") {
+      try {
+        const [x, y] = graph.evaluate();
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          throw new Error("Point coordinates must be finite numbers");
+        }
+        const pointColor = colorAt?.(x, y) ?? expression.color;
+        const screenX = alignCanvasStrokeCenter(
+          width / 2 + (x - centerX) * scale,
+          dpr,
+          1,
+        );
+        const screenY = alignCanvasStrokeCenter(
+          height / 2 - (y - centerY) * verticalScale(),
+          dpr,
+          1,
+        );
+        nextDraggableGraphPoints.push({
+          expressionId: expression.id,
+          draggable: expression.draggable !== false,
+          xVariables: graph.xVariables,
+          yVariables: graph.yVariables,
+          x,
+          y,
+          screenX,
+          screenY,
+          color: pointColor,
+          opacity,
+        });
+        addPointCandidate(
+          candidates, x, y, "draggable point", [graphId], pointColor, width, height,
+        );
+        expression.evaluationError = undefined;
+      } catch (reason) {
+        expression.evaluationError = reason instanceof Error
+          ? reason.message
+          : "Could not evaluate point";
+      }
+      continue;
+    }
     if (graph.kind === "implicit") {
       const curve = drawImplicit(
         graph.evaluate, width, height, graphId, expression.color, colorAt, lineWidth, opacity,
@@ -2189,6 +2322,20 @@ function draw(): void {
     context.stroke();
     context.restore();
   }
+  for (const point of nextDraggableGraphPoints) {
+    if (point.screenX < -8 || point.screenX > width + 8 ||
+        point.screenY < -8 || point.screenY > height + 8) continue;
+    context.save();
+    context.globalAlpha = point.opacity;
+    context.beginPath();
+    context.arc(point.screenX, point.screenY, 6, 0, Math.PI * 2);
+    context.fillStyle = point.color;
+    context.fill();
+    context.strokeStyle = currentThemeColor("text-strong");
+    context.lineWidth = 2;
+    context.stroke();
+    context.restore();
+  }
   for (const { table, values } of tableData) {
     context.fillStyle = table.color;
     context.strokeStyle = currentThemeColor("text-strong");
@@ -2207,6 +2354,7 @@ function draw(): void {
   }
   hoverCandidates = candidates;
   hoverCurves = [...explicitCurves, ...implicitCurves];
+  draggableGraphPoints = nextDraggableGraphPoints;
   for (const expression of expressions) {
     const colorError = workspaceList.querySelector<HTMLParagraphElement>(
       `[data-expression-id="${expression.id}"] .color-formula-error`,
@@ -2219,7 +2367,7 @@ function draw(): void {
     }
   }
   drawHoverOverlay();
-  scheduleProjectSave();
+  scheduleProjectSave(!drag?.point);
   if (performanceProfile.enabled) {
     performanceProfile.drawCount += 1;
     performanceProfile.drawTimes.push(performance.now() - profileStart);
@@ -2402,15 +2550,17 @@ function sliderNames(): string[] {
     [expression.text, expression.hsv?.hue ?? "",
       expression.hsv?.saturation ?? "", expression.hsv?.value ?? ""]
       .flatMap((source) => source.match(/[a-zA-Z]+/g) ?? [])
-  ).filter((name) =>
-    name.length === 1 && !reserved.has(name.toLowerCase())))].sort();
+  ).concat(tickers.flatMap((ticker) =>
+    ticker.action.match(/[a-zA-Z]+/g) ?? []
+  )).map((name) => name.toLowerCase()).filter((name) =>
+    name.length === 1 && !reserved.has(name)))].sort();
 }
 
 function renderSliders(): void {
   sliderList.replaceChildren();
   const names = sliderNames();
-  if (sliderAnimation && !names.includes(sliderAnimation.name)) {
-    stopSliderAnimation();
+  for (const name of sliderAnimations.keys()) {
+    if (!names.includes(name)) stopSliderAnimation(name);
   }
   if (names.length === 0) {
     sliderList.hidden = true;
@@ -2462,12 +2612,13 @@ function renderSliders(): void {
     const play = document.createElement("button");
     play.type = "button";
     play.className = "slider-play";
-    play.textContent = sliderAnimation?.name === name ? "Pause" : "Play";
-    play.setAttribute("aria-label", `${sliderAnimation?.name === name ? "Pause" : "Play"} slider ${name}`);
-    play.setAttribute("aria-pressed", String(sliderAnimation?.name === name));
+    const isPlaying = sliderAnimations.has(name);
+    play.textContent = isPlaying ? "Pause" : "Play";
+    play.setAttribute("aria-label", `${isPlaying ? "Pause" : "Play"} slider ${name}`);
+    play.setAttribute("aria-pressed", String(isPlaying));
     play.addEventListener("click", () => {
-      if (sliderAnimation?.name === name) {
-        stopSliderAnimation();
+      if (sliderAnimations.has(name)) {
+        stopSliderAnimation(name);
       } else {
         startSliderAnimation(name);
       }
@@ -2538,54 +2689,129 @@ function renderSliders(): void {
   }
 }
 
-function stopSliderAnimation(): void {
-  const wasAnimating = sliderAnimation !== undefined;
-  if (sliderAnimationTimer !== undefined) {
+function stopSliderAnimation(name?: string): void {
+  const wasAnimating = sliderAnimations.size > 0;
+  if (name !== undefined) {
+    sliderAnimations.delete(name);
+  } else {
+    sliderAnimations.clear();
+  }
+  if (sliderAnimations.size === 0 && sliderAnimationTimer !== undefined) {
     window.clearInterval(sliderAnimationTimer);
     sliderAnimationTimer = undefined;
   }
-  sliderAnimation = undefined;
-  if (wasAnimating && !saveProjectLocally()) scheduleProjectSave();
+  if (wasAnimating && sliderAnimations.size === 0 && runningTickers.size === 0) {
+    captureProjectHistory();
+    if (!saveProjectLocally()) scheduleProjectSave(false);
+  }
 }
 
 function startSliderAnimation(name: string): void {
-  stopSliderAnimation();
   const options = sliderOptions[name];
   if (!options) return;
-  sliderAnimation = { name, direction: 1, lastTime: performance.now() };
+  if (sliderAnimations.size === 0) flushPendingHistory();
+  sliderAnimations.set(name, { direction: 1, lastTime: performance.now() });
+  if (sliderAnimationTimer !== undefined) return;
   sliderAnimationTimer = window.setInterval(() => {
-    if (!sliderAnimation) return;
-    const activeOptions = sliderOptions[sliderAnimation.name];
-    if (!activeOptions) {
+    const now = performance.now();
+    let updated = false;
+    for (const [sliderName, animation] of sliderAnimations) {
+      const activeOptions = sliderOptions[sliderName];
+      if (!activeOptions) {
+        sliderAnimations.delete(sliderName);
+        continue;
+      }
+      const elapsedSeconds = Math.min(0.25, Math.max(0, now - animation.lastTime) / 1000);
+      animation.lastTime = now;
+      const span = activeOptions.max - activeOptions.min;
+      const currentOffset = sliderValues[sliderName]! - activeOptions.min;
+      const phase = animation.direction > 0 ? currentOffset : 2 * span - currentOffset;
+      const nextPhase = (phase + activeOptions.speed * elapsedSeconds) % (2 * span);
+      const movingForward = nextPhase <= span;
+      const value = movingForward
+        ? activeOptions.min + nextPhase
+        : activeOptions.max - (nextPhase - span);
+      animation.direction = movingForward ? 1 : -1;
+      sliderValues[sliderName] = value;
+      const number = sliderList.querySelector<HTMLInputElement>(
+        `[aria-label="Slider ${sliderName} value"]`,
+      );
+      const range = sliderList.querySelector<HTMLInputElement>(
+        `[aria-label="Slider ${sliderName}"]`,
+      );
+      if (number) number.value = String(Number(value.toPrecision(8)));
+      if (range) range.value = String(value);
+      updated = true;
+    }
+    if (updated) draw();
+    if (sliderAnimations.size === 0) {
       stopSliderAnimation();
       renderSliders();
-      return;
     }
-    const now = performance.now();
-    const elapsedSeconds = Math.min(0.25, Math.max(0, now - sliderAnimation.lastTime) / 1000);
-    sliderAnimation.lastTime = now;
-    const span = activeOptions.max - activeOptions.min;
-    const currentOffset = sliderValues[sliderAnimation.name]! - activeOptions.min;
-    const phase = sliderAnimation.direction > 0
-      ? currentOffset
-      : 2 * span - currentOffset;
-    const nextPhase = (phase + activeOptions.speed * elapsedSeconds) % (2 * span);
-    const movingForward = nextPhase <= span;
-    const value = movingForward
-      ? activeOptions.min + nextPhase
-      : activeOptions.max - (nextPhase - span);
-    sliderAnimation.direction = movingForward ? 1 : -1;
-    sliderValues[sliderAnimation.name] = value;
-    const number = sliderList.querySelector<HTMLInputElement>(
-      `[aria-label="Slider ${sliderAnimation.name} value"]`,
-    );
-    const range = sliderList.querySelector<HTMLInputElement>(
-      `[aria-label="Slider ${sliderAnimation.name}"]`,
-    );
-    if (number) number.value = String(Number(value.toPrecision(8)));
-    if (range) range.value = String(value);
-    draw();
   }, 30);
+}
+
+function stopTicker(id: number, save = true): void {
+  const runtime = runningTickers.get(id);
+  if (!runtime) return;
+  window.clearInterval(runtime.timer);
+  runningTickers.delete(id);
+  if (runningTickers.size === 0) {
+    if (save) {
+      captureProjectHistory();
+      scheduleProjectSave();
+    }
+  }
+}
+
+function stopAllTickers(save = true): void {
+  for (const id of [...runningTickers.keys()]) stopTicker(id, save);
+}
+
+function startTicker(ticker: Ticker): void {
+  if (runningTickers.has(ticker.id)) return;
+  for (const name of sliderNames()) sliderValues[name] ??= 1;
+  renderSliders();
+  let action: ReturnType<typeof compileTickerAction>;
+  try {
+    action = compileTickerAction(ticker.action, sliderValues);
+  } catch (reason) {
+    ticker.error = reason instanceof Error ? reason.message : "Could not start ticker.";
+    renderTickers();
+    return;
+  }
+  if (ticker.runMode === "count" &&
+      (!Number.isInteger(ticker.tickCount) || ticker.tickCount < 1 || ticker.tickCount > 1_000_000)) {
+    ticker.error = "Tick count must be between 1 and 1,000,000.";
+    renderTickers();
+    return;
+  }
+  if (runningTickers.size === 0 && sliderAnimations.size === 0) flushPendingHistory();
+  ticker.error = undefined;
+  const runtime: RunningTicker = {
+    timer: 0,
+    remainingTicks: ticker.runMode === "count" ? ticker.tickCount : undefined,
+  };
+  runtime.timer = window.setInterval(() => {
+    try {
+      sliderValues[action.target] = action.evaluate();
+      updateSliderInputValues(action.target);
+      scheduleDraw();
+      if (runtime.remainingTicks !== undefined) {
+        runtime.remainingTicks -= 1;
+        if (runtime.remainingTicks <= 0) {
+          stopTicker(ticker.id);
+          renderTickers();
+        }
+      }
+    } catch (reason) {
+      ticker.error = reason instanceof Error ? reason.message : "Ticker action failed.";
+      stopTicker(ticker.id);
+      renderTickers();
+    }
+  }, ticker.intervalMs);
+  runningTickers.set(ticker.id, runtime);
+  renderTickers();
 }
 
 function workspaceItemKey(item: WorkspaceItem): string {
@@ -2632,6 +2858,8 @@ function synchronizeWorkspaceOrder(): void {
       ({ type: "table" as const, id, folderId })),
     ...textBlocks.map(({ id, folderId }) =>
       ({ type: "text" as const, id, folderId })),
+    ...tickers.map(({ id, folderId }) =>
+      ({ type: "ticker" as const, id, folderId })),
     ...folders.map(({ id }) => ({ type: "folder" as const, id })),
   ];
   const availableKeys = new Set(items.map(workspaceItemKey));
@@ -2668,6 +2896,9 @@ function synchronizeWorkspaceOrder(): void {
     } else if (item.type === "text") {
       const textBlock = textBlocks.find((entry) => entry.id === item.id);
       if (textBlock) textBlock.folderId = item.folderId;
+    } else if (item.type === "ticker") {
+      const ticker = tickers.find((entry) => entry.id === item.id);
+      if (ticker) ticker.folderId = item.folderId;
     }
   }
 }
@@ -2687,7 +2918,7 @@ function renderWorkspaceItems(): void {
   for (const element of workspaceList.querySelectorAll<HTMLElement>(".workspace-item[data-workspace-key]")) {
     if (element.dataset.workspaceKey) nodes.set(element.dataset.workspaceKey, element);
   }
-  for (const staging of [expressionList, tableList, textList]) {
+  for (const staging of [expressionList, tableList, textList, tickerList]) {
     for (const item of staging.children) {
       const element = item as HTMLElement;
       if (element.dataset.workspaceKey) nodes.set(element.dataset.workspaceKey, element);
@@ -2743,8 +2974,11 @@ function renderWorkspaceItems(): void {
           table.folderId === folder.id ? { ...table, folderId: undefined } : table);
         textBlocks = textBlocks.map((textBlock) =>
           textBlock.folderId === folder.id ? { ...textBlock, folderId: undefined } : textBlock);
+        tickers = tickers.map((ticker) =>
+          ticker.folderId === folder.id ? { ...ticker, folderId: undefined } : ticker);
         folders = folders.filter((entry) => entry.id !== folder.id);
         renderTextBlocks();
+        renderTickers();
         renderExpressions();
         renderTables();
       });
@@ -2905,6 +3139,7 @@ function renderExpressions(): void {
   for (const name of sliderNames()) sliderValues[name] ??= 1;
   expressionList.replaceChildren();
   const renderExpression = (expression: Expression, index: number, container: HTMLElement) => {
+    const isPointExpression = getCompiled(expression)?.kind === "point";
     const row = document.createElement("div");
     row.className = `expression-row${expression.hidden ? " expression-hidden" : ""}`;
     row.dataset.expressionId = String(expression.id);
@@ -3085,7 +3320,23 @@ function renderExpressions(): void {
     hsvTitle.textContent = "Spatial HSV";
     hsvHeading.append(hsvTitle);
     hsvControls.append(hsvHeading, hsvFields, hsvHelp, colorError);
-    appearanceDetails.append(appearanceControls, hsvControls);
+    appearanceDetails.append(appearanceControls);
+    if (isPointExpression) {
+      const draggableControl = document.createElement("label");
+      draggableControl.className = "draggable-point-control";
+      const draggableInput = document.createElement("input");
+      draggableInput.type = "checkbox";
+      draggableInput.checked = expression.draggable !== false;
+      draggableInput.setAttribute("aria-label", `Enable dragging expression ${index + 1} point`);
+      draggableInput.addEventListener("change", () => {
+        expression.draggable = draggableInput.checked;
+        scheduleDraw();
+        scheduleProjectSave();
+      });
+      draggableControl.append(draggableInput, document.createTextNode("Allow dragging point"));
+      appearanceDetails.append(draggableControl);
+    }
+    appearanceDetails.append(hsvControls);
     row.append(marker, input, visibility, remove, error, appearanceDetails);
     container.append(row);
   };
@@ -3562,6 +3813,144 @@ function renderTextBlocks(): void {
   }
 }
 
+function renderTickers(): void {
+  tickerList.replaceChildren();
+  for (const [index, ticker] of tickers.entries()) {
+    const wrapper = createWorkspaceItem(`ticker:${ticker.id}`, `Ticker ${index + 1}`);
+    const panel = document.createElement("section");
+    panel.className = "ticker-panel";
+    const heading = document.createElement("div");
+    heading.className = "ticker-heading";
+    const title = document.createElement("strong");
+    title.textContent = `Ticker ${index + 1}`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "remove-button";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `Remove ticker ${index + 1}`);
+    remove.addEventListener("click", () => {
+      stopTicker(ticker.id);
+      tickers = tickers.filter((entry) => entry.id !== ticker.id);
+      workspaceOrder = workspaceOrder.filter((item) =>
+        item.type !== "ticker" || item.id !== ticker.id);
+      renderTickers();
+      renderExpressions();
+      scheduleProjectSave();
+    });
+    heading.append(title, remove);
+
+    const action = document.createElement("input");
+    action.type = "text";
+    action.maxLength = 512;
+    action.value = ticker.action;
+    action.placeholder = "a = a + 1";
+    action.setAttribute("aria-label", `Ticker ${index + 1} assignment`);
+    action.addEventListener("input", () => {
+      stopTicker(ticker.id);
+      ticker.action = action.value;
+      ticker.error = undefined;
+      error.textContent = "";
+      for (const name of sliderNames()) sliderValues[name] ??= 1;
+      renderSliders();
+      scheduleProjectSave();
+    });
+
+    const interval = document.createElement("input");
+    interval.type = "text";
+    interval.inputMode = "numeric";
+    interval.autocomplete = "off";
+    interval.value = String(ticker.intervalMs);
+    interval.setAttribute("aria-label", `Ticker ${index + 1} interval milliseconds`);
+    interval.addEventListener("change", () => {
+      const value = Number(interval.value);
+      if (!Number.isInteger(value) || value < 10 || value > 60_000) {
+        interval.setAttribute("aria-invalid", "true");
+        ticker.error = "Interval must be between 10 and 60,000 milliseconds.";
+        error.textContent = ticker.error;
+        return;
+      }
+      interval.removeAttribute("aria-invalid");
+      stopTicker(ticker.id);
+      ticker.intervalMs = value;
+      ticker.error = undefined;
+      error.textContent = "";
+      scheduleProjectSave();
+    });
+
+    const runMode = document.createElement("select");
+    runMode.setAttribute("aria-label", `Ticker ${index + 1} run mode`);
+    for (const [value, label] of [["repeat", "Repeat until paused"], ["count", "Run a set number of times"]]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      runMode.append(option);
+    }
+    runMode.value = ticker.runMode;
+    runMode.addEventListener("change", () => {
+      stopTicker(ticker.id);
+      ticker.runMode = runMode.value === "count" ? "count" : "repeat";
+      ticker.error = undefined;
+      renderTickers();
+      scheduleProjectSave();
+    });
+
+    const intervalLabel = document.createElement("label");
+    intervalLabel.className = "ticker-field";
+    intervalLabel.append(document.createTextNode("Interval (ms)"), interval);
+    const countLabel = document.createElement("label");
+    countLabel.className = "ticker-field";
+    countLabel.append(document.createTextNode("Number of ticks"));
+    const tickCount = document.createElement("input");
+    tickCount.type = "number";
+    tickCount.min = "1";
+    tickCount.max = "1000000";
+    tickCount.step = "1";
+    tickCount.value = String(ticker.tickCount);
+    tickCount.setAttribute("aria-label", `Ticker ${index + 1} number of ticks`);
+    tickCount.hidden = ticker.runMode !== "count";
+    tickCount.addEventListener("change", () => {
+      const value = Number(tickCount.value);
+      if (!Number.isInteger(value) || value < 1 || value > 1_000_000) {
+        tickCount.setAttribute("aria-invalid", "true");
+        ticker.error = "Tick count must be between 1 and 1,000,000.";
+        error.textContent = ticker.error;
+        return;
+      }
+      tickCount.removeAttribute("aria-invalid");
+      stopTicker(ticker.id);
+      ticker.tickCount = value;
+      ticker.error = undefined;
+      error.textContent = "";
+      scheduleProjectSave();
+    });
+    countLabel.append(tickCount);
+
+    const play = document.createElement("button");
+    play.type = "button";
+    const isRunning = runningTickers.has(ticker.id);
+    play.textContent = isRunning ? "Pause" : "Start";
+    play.setAttribute("aria-label", `${isRunning ? "Pause" : "Start"} ticker ${index + 1}`);
+    play.setAttribute("aria-pressed", String(isRunning));
+    play.addEventListener("click", () => {
+      if (runningTickers.has(ticker.id)) {
+        stopTicker(ticker.id);
+        renderTickers();
+      } else {
+        startTicker(ticker);
+      }
+    });
+    const error = document.createElement("p");
+    error.className = "ticker-error";
+    error.setAttribute("role", "status");
+    error.textContent = ticker.error ?? "";
+
+    panel.append(heading, action, intervalLabel, runMode, countLabel, play, error);
+    wrapper.append(panel);
+    tickerList.append(wrapper);
+  }
+  renderWorkspaceItems();
+}
+
 function addTextBlock(): void {
   const textBlock: TextBlock = { id: nextTextId++, text: "" };
   textBlocks.push(textBlock);
@@ -3614,15 +4003,36 @@ function addTable(): void {
   draw();
 }
 
+function addTicker(): void {
+  const ticker: Ticker = {
+    id: nextTickerId++,
+    action: "a = a + 1",
+    intervalMs: 1000,
+    runMode: "repeat",
+    tickCount: 10,
+  };
+  tickers.push(ticker);
+  workspaceOrder.push({ type: "ticker", id: ticker.id });
+  sliderValues.a ??= 1;
+  renderSliders();
+  renderTickers();
+  scheduleProjectSave();
+  workspaceList.querySelector<HTMLInputElement>(
+    `.workspace-item[data-workspace-key="ticker:${ticker.id}"] input[aria-label^="Ticker"]`,
+  )?.focus();
+}
+
 function currentProjectState(): ProjectState {
   return {
     version: 1,
     expressions: expressions.map((
-      { id, text, color, lineWidth, opacity, folderId, hidden, hsv },
-    ) => ({ id, text, color, lineWidth, opacity, folderId, hidden, hsv })),
+      { id, text, color, lineWidth, opacity, folderId, hidden, draggable, hsv },
+    ) => ({ id, text, color, lineWidth, opacity, folderId, hidden, draggable, hsv })),
     tables: tables.map(({ id, rows, sourceExpressionId, regressionDegree, regressionKind, color, folderId }) =>
       ({ id, rows, sourceExpressionId, regressionDegree, regressionKind, color, folderId })),
     texts: textBlocks.map(({ id, text, folderId }) => ({ id, text, folderId })),
+    tickers: tickers.map(({ id, action, intervalMs, runMode, tickCount, folderId }) =>
+      ({ id, action, intervalMs, runMode, tickCount, folderId })),
     workspaceOrder: [...workspaceOrder],
     folders: folders.map(({ id, name, collapsed }) => ({ id, name, collapsed })),
     sliders: { ...sliderValues },
@@ -3632,6 +4042,58 @@ function currentProjectState(): ProjectState {
     scale,
     graphOptions: { ...graphOptions },
   };
+}
+
+const MAX_HISTORY_STEPS = 20;
+const undoHistory: string[] = [JSON.stringify(currentProjectState())];
+const redoHistory: string[] = [];
+
+function updateHistoryButtons(): void {
+  const undoButton = document.querySelector<HTMLButtonElement>("#undo-project");
+  const redoButton = document.querySelector<HTMLButtonElement>("#redo-project");
+  if (undoButton) undoButton.disabled = undoHistory.length <= 1;
+  if (redoButton) redoButton.disabled = redoHistory.length === 0;
+}
+
+function captureProjectHistory(): void {
+  const snapshot = JSON.stringify(currentProjectState());
+  if (undoHistory.at(-1) === snapshot) return;
+  undoHistory.push(snapshot);
+  if (undoHistory.length > MAX_HISTORY_STEPS + 1) undoHistory.shift();
+  redoHistory.length = 0;
+  updateHistoryButtons();
+}
+
+function flushPendingHistory(): void {
+  if (saveTimer === undefined) return;
+  window.clearTimeout(saveTimer);
+  saveTimer = undefined;
+  const shouldRecordHistory = saveTimerRecordsHistory;
+  saveTimerRecordsHistory = false;
+  if (shouldRecordHistory) captureProjectHistory();
+}
+
+function undoProjectChange(): void {
+  stopAllTickers();
+  stopSliderAnimation();
+  flushPendingHistory();
+  if (undoHistory.length <= 1) return;
+  redoHistory.push(undoHistory.pop()!);
+  if (redoHistory.length > MAX_HISTORY_STEPS) redoHistory.shift();
+  applyProjectState(parseProjectState(undoHistory.at(-1)!), false);
+  updateHistoryButtons();
+}
+
+function redoProjectChange(): void {
+  stopAllTickers();
+  stopSliderAnimation();
+  flushPendingHistory();
+  const next = redoHistory.pop();
+  if (!next) return;
+  undoHistory.push(next);
+  if (undoHistory.length > MAX_HISTORY_STEPS + 1) undoHistory.shift();
+  applyProjectState(parseProjectState(next), false);
+  updateHistoryButtons();
 }
 
 function setProjectStatus(message: string): void {
@@ -3652,20 +4114,27 @@ function saveProjectLocally(): boolean {
 }
 
 let saveTimer: number | undefined;
-function scheduleProjectSave(): void {
-  if (!automaticSavingEnabled || sliderAnimation) return;
+let saveTimerRecordsHistory = false;
+function scheduleProjectSave(recordHistory = true): void {
+  if (sliderAnimations.size > 0 || runningTickers.size > 0) return;
   if (saveTimer !== undefined) window.clearTimeout(saveTimer);
+  saveTimerRecordsHistory = recordHistory;
   saveTimer = window.setTimeout(() => {
     saveTimer = undefined;
-    if (!automaticSavingEnabled || sliderAnimation) return;
+    const shouldRecordHistory = saveTimerRecordsHistory;
+    saveTimerRecordsHistory = false;
+    if (shouldRecordHistory) captureProjectHistory();
+    if (!automaticSavingEnabled || sliderAnimations.size > 0 || runningTickers.size > 0) return;
     if (saveProjectLocally()) setProjectStatus("Saved on this device");
   }, 400);
 }
 
-function applyProjectState(project: ProjectState): void {
+function applyProjectState(project: ProjectState, recordHistory = true): void {
+  stopAllTickers(false);
   stopSliderAnimation();
   expressions = project.expressions.map((expression) => ({ ...expression }));
   textBlocks = (project.texts ?? []).map((textBlock) => ({ ...textBlock }));
+  tickers = (project.tickers ?? []).map((ticker) => ({ ...ticker }));
   workspaceOrder = project.workspaceOrder.map((item) => ({ ...item }));
   tables = project.tables.map((table) => ({
     id: table.id,
@@ -3700,11 +4169,13 @@ function applyProjectState(project: ProjectState): void {
   );
   nextFolderId = folders.reduce((next, folder) => Math.max(next, folder.id + 1), 1);
   nextTextId = textBlocks.reduce((next, textBlock) => Math.max(next, textBlock.id + 1), 1);
+  nextTickerId = tickers.reduce((next, ticker) => Math.max(next, ticker.id + 1), 1);
   renderTextBlocks();
   renderExpressions();
   renderTables();
+  renderTickers();
   draw();
-  scheduleProjectSave();
+  scheduleProjectSave(recordHistory);
 }
 
 function encodeProjectShareLink(): string {
@@ -3722,6 +4193,9 @@ function encodeProjectShareLink(): string {
 
 const saveDialog = document.querySelector<HTMLDialogElement>("#save-dialog")!;
 const autoSaveOption = document.querySelector<HTMLInputElement>("#save-autosave-option")!;
+document.querySelector("#undo-project")!.addEventListener("click", undoProjectChange);
+document.querySelector("#redo-project")!.addEventListener("click", redoProjectChange);
+updateHistoryButtons();
 document.querySelector("#save-project")!.addEventListener("click", () => {
   autoSaveOption.checked = automaticSavingEnabled;
   saveDialog.showModal();
@@ -3729,6 +4203,7 @@ document.querySelector("#save-project")!.addEventListener("click", () => {
 document.querySelector("#cancel-save")!.addEventListener("click", () => saveDialog.close());
 document.querySelector<HTMLFormElement>("#save-dialog-form")!.addEventListener("submit", (event) => {
   event.preventDefault();
+  flushPendingHistory();
   if (!saveProjectLocally()) return;
   const enabled = autoSaveOption.checked;
   let preferenceSaved = false;
@@ -3938,6 +4413,8 @@ workspaceAdd.addEventListener("change", () => {
     addTable();
   } else if (workspaceAdd.value === "text") {
     addTextBlock();
+  } else if (workspaceAdd.value === "ticker") {
+    addTicker();
   } else if (workspaceAdd.value === "folder") {
     createFolder();
   }
@@ -4192,13 +4669,92 @@ implicitSpacingInput.addEventListener("input", () => {
   draw();
 });
 
+function findDraggablePoint(screenX: number, screenY: number): DraggableGraphPoint | undefined {
+  let nearest: DraggableGraphPoint | undefined;
+  let nearestDistance = 13;
+  for (const point of draggableGraphPoints) {
+    if (!point.draggable) continue;
+    const distance = Math.hypot(point.screenX - screenX, point.screenY - screenY);
+    if (distance < nearestDistance) {
+      nearest = point;
+      nearestDistance = distance;
+    }
+  }
+  return nearest;
+}
+
+function updateSliderInputValues(name: string): void {
+  const value = String(sliderValues[name]);
+  for (const input of sliderList.querySelectorAll<HTMLInputElement>("input")) {
+    if (input.getAttribute("aria-label") === `Slider ${name}` ||
+        input.getAttribute("aria-label") === `Slider ${name} value`) {
+      input.value = value;
+    }
+  }
+}
+
+function moveDraggablePoint(
+  point: DraggableGraphPoint,
+  clientX: number,
+  clientY: number,
+  bounds: DOMRect,
+  startSliderValues: Record<string, number>,
+  pointerOffsetX: number,
+  pointerOffsetY: number,
+): void {
+  const graphX = clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS;
+  const graphY = clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS;
+  const requestedX = centerX + (graphX - bounds.width * GRAPH_BUFFER_SCALE / 2) / scale -
+    pointerOffsetX;
+  const requestedY = centerY +
+    (bounds.height * GRAPH_BUFFER_SCALE / 2 - graphY) / verticalScale() - pointerOffsetY;
+  const updateCoordinateSliders = (names: string[], delta: number): void => {
+    for (const name of names) {
+      const options = sliderOptions[name]!;
+      sliderValues[name] = Math.min(
+        options.max,
+        Math.max(options.min, startSliderValues[name]! + delta),
+      );
+      updateSliderInputValues(name);
+    }
+  };
+  updateCoordinateSliders(point.xVariables, requestedX - point.x);
+  updateCoordinateSliders(point.yVariables, requestedY - point.y);
+}
+
 canvas.addEventListener("pointerdown", (event) => {
-  drag = { x: event.clientX, y: event.clientY, centerX, centerY, moved: false };
-  canvas.setPointerCapture(event.pointerId);
   const bounds = canvasWrap.getBoundingClientRect();
+  const screenX = event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS;
+  const screenY = event.clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS;
+  const point = findDraggablePoint(screenX, screenY);
+  const pointerGraphX = centerX +
+    (screenX - bounds.width * GRAPH_BUFFER_SCALE / 2) / scale;
+  const pointerGraphY = centerY +
+    (bounds.height * GRAPH_BUFFER_SCALE / 2 - screenY) / verticalScale();
+  if (point) {
+    for (const name of new Set([...point.xVariables, ...point.yVariables])) {
+      stopSliderAnimation(name);
+    }
+  }
+  drag = {
+    x: event.clientX,
+    y: event.clientY,
+    centerX,
+    centerY,
+    moved: false,
+    point,
+    startSliderValues: point
+      ? Object.fromEntries([...new Set([...point.xVariables, ...point.yVariables])]
+        .map((name) => [name, sliderValues[name]!]))
+      : undefined,
+    pointerOffsetX: point ? pointerGraphX - point.x : undefined,
+    pointerOffsetY: point ? pointerGraphY - point.y : undefined,
+  };
+  canvas.setPointerCapture(event.pointerId);
+  canvas.style.cursor = point ? "grabbing" : "crosshair";
   hoverPosition = {
-    x: event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS,
-    y: event.clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS,
+    x: screenX,
+    y: screenY,
   };
   drawHoverOverlay();
 });
@@ -4207,6 +4763,19 @@ canvas.addEventListener("pointermove", (event) => {
   if (drag) {
     if (drag.moved || Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 4) {
       drag.moved = true;
+      if (drag.point) {
+        moveDraggablePoint(
+          drag.point,
+          event.clientX,
+          event.clientY,
+          bounds,
+          drag.startSliderValues ?? {},
+          drag.pointerOffsetX ?? 0,
+          drag.pointerOffsetY ?? 0,
+        );
+        scheduleDraw();
+        return;
+      }
       const deltaX = event.clientX - drag.x;
       const deltaY = event.clientY - drag.y;
       centerX = drag.centerX - deltaX / scale;
@@ -4214,24 +4783,33 @@ canvas.addEventListener("pointermove", (event) => {
       canvas.style.transform = `translate3d(${deltaX}px, ${deltaY}px, 0)`;
     }
   } else {
+    const screenX = event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS;
+    const screenY = event.clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS;
+    canvas.style.cursor = findDraggablePoint(screenX, screenY) ? "grab" : "crosshair";
     hoverPosition = {
-      x: event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS,
-      y: event.clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS,
+      x: screenX,
+      y: screenY,
     };
     drawHoverOverlay();
   }
 });
 canvas.addEventListener("pointerup", (event) => {
   const bounds = canvasWrap.getBoundingClientRect();
-  if (drag && !drag.moved) {
+  const finishedDrag = drag;
+  if (finishedDrag && !finishedDrag.point && !finishedDrag.moved) {
     const screenX = event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS;
     const screenY = event.clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS;
     hoverPosition = { x: screenX, y: screenY };
     addGraphPointAt(screenX, screenY);
   }
-  const moved = drag?.moved ?? false;
+  const moved = finishedDrag?.moved ?? false;
   drag = undefined;
-  if (moved) {
+  canvas.style.cursor = "crosshair";
+  if (finishedDrag?.point && moved) {
+    hoverPosition = undefined;
+    scheduleDraw();
+    scheduleProjectSave();
+  } else if (moved) {
     hoverPosition = undefined;
     clearDragTransformAfterDraw = true;
     scheduleDraw();
@@ -4241,18 +4819,27 @@ canvas.addEventListener("pointerup", (event) => {
   }
 });
 canvas.addEventListener("pointercancel", () => {
-  if (drag?.moved) {
+  if (drag?.point && drag.moved) {
+    for (const [name, value] of Object.entries(drag.startSliderValues ?? {})) {
+      sliderValues[name] = value;
+      updateSliderInputValues(name);
+    }
+    scheduleDraw();
+    scheduleProjectSave();
+  } else if (drag?.moved) {
     centerX = drag.centerX;
     centerY = drag.centerY;
   }
   drag = undefined;
   clearDragTransformAfterDraw = false;
   canvas.style.transform = "";
+  canvas.style.cursor = "crosshair";
   drawHoverOverlay();
 });
 canvas.addEventListener("pointerleave", () => {
   if (!drag) {
     hoverPosition = undefined;
+    canvas.style.cursor = "crosshair";
     drawHoverOverlay();
   }
 });
@@ -4278,4 +4865,5 @@ setProjectStatus(projectStatus);
 renderTextBlocks();
 renderExpressions();
 renderTables();
+renderTickers();
 draw();

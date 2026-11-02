@@ -45,6 +45,12 @@ export type GraphExpression =
   | { kind: "explicit"; evaluate: ExplicitEvaluation }
   | { kind: "implicit"; evaluate: ImplicitEvaluation }
   | { kind: "inequality"; relation: "<" | "<=" | ">" | ">="; evaluate: ImplicitEvaluation }
+  | {
+      kind: "point";
+      evaluate: () => [number, number];
+      xVariables: string[];
+      yVariables: string[];
+    }
   | { kind: "parametric"; evaluate: (parameter: number) => [number, number]; start: number; end: number }
   | { kind: "list"; evaluate: () => number[] };
 
@@ -78,7 +84,21 @@ export interface TrigonometricRegression {
   offset: number;
 }
 
-const functions = new Set(["sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "ln", "log", "exp", "abs"]);
+const functions = new Set([
+  "sqrt",
+  "sin",
+  "cos",
+  "tan",
+  "asin",
+  "acos",
+  "atan",
+  "ln",
+  "log",
+  "exp",
+  "abs",
+  "floor",
+  "ceil",
+]);
 const MAX_EXPRESSION_LENGTH = 512;
 const MAX_COORDINATE_CACHE_SIZE = 2048;
 const rationalDecimalCache = new WeakMap<Rational, Map<number, Decimal>>();
@@ -375,10 +395,25 @@ function evaluate(node: Node, x: Decimal, y?: Decimal, variables: Record<string,
       if (node.name === "abs" && value.kind === "rational") {
         return rational(value.numerator < 0n ? -value.numerator : value.numerator, value.denominator);
       }
+      if ((node.name === "floor" || node.name === "ceil") && value.kind === "rational") {
+        const quotient = value.numerator / value.denominator;
+        const remainder = value.numerator % value.denominator;
+        if (node.name === "floor" && value.numerator < 0n && remainder !== 0n) {
+          return rational(quotient - 1n);
+        }
+        if (node.name === "ceil" && value.numerator > 0n && remainder !== 0n) {
+          return rational(quotient + 1n);
+        }
+        return rational(quotient);
+      }
       const argument = asDecimal(value);
       switch (node.name) {
         case "abs":
           return approximate(argument.abs());
+        case "floor":
+          return approximate(argument.floor());
+        case "ceil":
+          return approximate(argument.ceil());
         case "sqrt": {
           if (argument.isNegative()) {
             throw new Error("sqrt is only defined here for values greater than or equal to zero");
@@ -504,6 +539,10 @@ function compileFastEvaluator(node: Node, variables: Record<string, number>): Fa
       switch (node.name) {
         case "abs":
           return (x, y) => roundFast(Math.abs(evaluateArgument(x, y)));
+        case "floor":
+          return (x, y) => Math.floor(evaluateArgument(x, y));
+        case "ceil":
+          return (x, y) => Math.ceil(evaluateArgument(x, y));
         case "sqrt":
           return (x, y) => {
             const argument = evaluateArgument(x, y);
@@ -1190,6 +1229,34 @@ export function compileExpression(
   };
 }
 
+export function compileTickerAction(
+  source: string,
+  variables: Record<string, number>,
+): { target: string; evaluate: () => number } {
+  const match = /^\s*([a-z])\s*=\s*(.+)\s*$/i.exec(source);
+  if (!match) {
+    throw new Error("Ticker action must be an assignment such as a = a + 1");
+  }
+  const target = match[1]!.toLowerCase();
+  if (["e", "x", "y", "t"].includes(target)) {
+    throw new Error(`"${target}" cannot be updated by a ticker`);
+  }
+  if (!Object.hasOwn(variables, target)) {
+    throw new Error(`Ticker target "${target}" is not an available slider`);
+  }
+  const evaluateValue = compileExpression(match[2]!, variables);
+  return {
+    target,
+    evaluate: () => {
+      const value = evaluateValue(0).value.toNumber();
+      if (!Number.isFinite(value)) {
+        throw new Error("Ticker action must produce a finite number");
+      }
+      return value;
+    },
+  };
+}
+
 export function compileColorExpression(
   source: string,
   variables: Record<string, number>,
@@ -1441,6 +1508,52 @@ function compileListGraph(
   };
 }
 
+const POINT_NON_SLIDER_VARIABLES = new Set(["e", "x", "y", "t"]);
+
+function compilePointGraph(
+  source: string,
+  variables: Record<string, number>,
+): Extract<GraphExpression, { kind: "point" }> | undefined {
+  const trimmed = source.trim();
+  if (!trimmed.startsWith("(") || !trimmed.endsWith(")")) return undefined;
+  let depth = 0;
+  for (let index = 0; index < trimmed.length; index += 1) {
+    if (trimmed[index] === "(") depth += 1;
+    if (trimmed[index] === ")") depth -= 1;
+    if (depth === 0 && index < trimmed.length - 1) return undefined;
+  }
+  const coordinates = splitCallArguments(trimmed.slice(1, -1));
+  if (coordinates.length !== 2) return undefined;
+  const variablesInCoordinate = (coordinate: string): string[] => {
+    const identifiers = coordinate.match(/[a-z]+/gi)?.map((name) => name.toLowerCase()) ?? [];
+    const sliderVariables = [...new Set(identifiers.filter((name) =>
+      name !== "pi" && name !== "e" && !functions.has(name)))];
+    if (sliderVariables.some((name) => name.length !== 1 || POINT_NON_SLIDER_VARIABLES.has(name))) {
+      throw new Error("Draggable point coordinates must use slider variables and supported math operations");
+    }
+    return sliderVariables;
+  };
+  const xVariables = variablesInCoordinate(coordinates[0]!);
+  const yVariables = variablesInCoordinate(coordinates[1]!);
+  if (xVariables.some((name) => yVariables.includes(name))) {
+    throw new Error("Use different slider variables for the point's x and y coordinates");
+  }
+  if (xVariables.length === 0 && yVariables.length === 0) {
+    throw new Error("A draggable point needs at least one slider variable, for example (1, b)");
+  }
+  const xCoordinate = compileExpression(coordinates[0]!, variables);
+  const yCoordinate = compileExpression(coordinates[1]!, variables);
+  return {
+    kind: "point",
+    xVariables,
+    yVariables,
+    evaluate: () => [
+      xCoordinate(0).value.toNumber(),
+      yCoordinate(0).value.toNumber(),
+    ],
+  };
+}
+
 function compileStatisticsGraph(
   source: string,
   variables: Record<string, number>,
@@ -1501,6 +1614,8 @@ export function compileGraphExpression(
 ):
   GraphExpression {
   const trimmed = source.trim();
+  const point = compilePointGraph(trimmed, variables);
+  if (point) return point;
   if (/^list\s*\(/i.test(trimmed)) {
     return compileListGraph(trimmed, variables);
   }
@@ -1545,6 +1660,8 @@ export function compileFastGraphExpression(
   variables: Record<string, number> = {},
 ): GraphExpression {
   const trimmed = source.trim();
+  const point = compilePointGraph(trimmed, variables);
+  if (point) return point;
   if (/^(?:list|sum|product|min|max|mean|median|variance|stdev|factorial)\s*\(/i.test(trimmed)) {
     return compileGraphExpression(trimmed, variables);
   }

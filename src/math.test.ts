@@ -4,6 +4,7 @@ import {
   hexToHsv,
   hsvToHex,
   compileExpression,
+  compileTickerAction,
   compileFastGraphExpression,
   compileGraphExpression,
   compileImplicitEquation,
@@ -65,6 +66,36 @@ describe("compileExpression", () => {
     expect(result.exact).toBe(false);
     expect(result.value.toNumber()).toBeCloseTo(1, 14);
     expect(compileExpression("log(100)")(0).value.toNumber()).toBeCloseTo(2);
+  });
+
+  it("rounds down and up with floor and ceil, including for negative values", () => {
+    expect(compileExpression("floor(3 / 2)")(0)).toMatchObject({ exact: true });
+    expect(compileExpression("floor(3 / 2)")(0).value.toNumber()).toBe(1);
+    expect(compileExpression("floor(-3 / 2)")(0).value.toNumber()).toBe(-2);
+    expect(compileExpression("ceil(3 / 2)")(0).value.toNumber()).toBe(2);
+    expect(compileExpression("ceil(-3 / 2)")(0).value.toNumber()).toBe(-1);
+    expect(compileExpression("floor(2)")(0).value.toNumber()).toBe(2);
+    expect(compileExpression("ceil(-2)")(0).value.toNumber()).toBe(-2);
+
+    const fastFloor = compileFastGraphExpression("floor(-3 / 2)");
+    const fastCeil = compileFastGraphExpression("ceil(3 / 2)");
+    expect(fastFloor.kind === "explicit" && fastFloor.evaluate(0)).toBe(-2);
+    expect(fastCeil.kind === "explicit" && fastCeil.evaluate(0)).toBe(2);
+  });
+
+  it("compiles safe ticker assignments that update slider values dynamically", () => {
+    const variables = { a: 2, b: 5 };
+    const increment = compileTickerAction("a = a + 1", variables);
+    expect(increment.target).toBe("a");
+    variables.a = increment.evaluate();
+    expect(variables.a).toBe(3);
+
+    const dependent = compileTickerAction("b = floor(a / 2)", variables);
+    variables.b = dependent.evaluate();
+    expect(variables.b).toBe(1);
+    expect(() => compileTickerAction("window.alert(1)", variables)).toThrow(/assignment/);
+    expect(() => compileTickerAction("x = 1", variables)).toThrow(/cannot be updated/);
+    expect(() => compileTickerAction("c = c + 1", variables)).toThrow(/available slider/);
   });
 
   it("allows explicit, bounded math precision settings", () => {
@@ -279,6 +310,60 @@ describe("compileExpression", () => {
     expect(() => compileImplicitEquation("x^2 + y^2 =")).toThrow(/Both sides/);
     expect(() => compileImplicitEquation("x + unknown = y")).toThrow('Unknown name "unknown"');
     expect(compileImplicitEquation("tan(35.6x)=0")(Math.PI / 35.6, 3).toNumber()).toBeCloseTo(0, 14);
+  });
+
+  it("compiles slider-coordinate points whose values update dynamically", () => {
+    const variables = { a: 2, b: -3 };
+    const point = compileGraphExpression("(a, b)", variables);
+    expect(point.kind).toBe("point");
+    if (point.kind === "point") {
+      expect(point.xVariables).toEqual(["a"]);
+      expect(point.yVariables).toEqual(["b"]);
+      expect(point.evaluate()).toEqual([2, -3]);
+      variables.a = 4;
+      variables.b = 5;
+      expect(point.evaluate()).toEqual([4, 5]);
+    }
+
+    const fastPoint = compileFastGraphExpression("(a,b)", variables);
+    expect(fastPoint.kind).toBe("point");
+    const roundedPoint = compileGraphExpression("(floor(a), ceil(b))", { a: 2.4, b: -3.2 });
+    expect(roundedPoint.kind).toBe("point");
+    if (roundedPoint.kind === "point") {
+      expect(roundedPoint.xVariables).toEqual(["a"]);
+      expect(roundedPoint.yVariables).toEqual(["b"]);
+      expect(roundedPoint.evaluate()).toEqual([2, -3]);
+    }
+    expect(compileFastGraphExpression("(floor(a), ceil(b))", { a: 2.4, b: -3.2 }).kind).toBe("point");
+    const operationPoint = compileGraphExpression("(2a + b, c^2 / 2)", { a: 2, b: 3, c: 4 });
+    expect(operationPoint.kind).toBe("point");
+    if (operationPoint.kind === "point") {
+      expect(operationPoint.xVariables).toEqual(["a", "b"]);
+      expect(operationPoint.yVariables).toEqual(["c"]);
+      expect(operationPoint.evaluate()).toEqual([7, 8]);
+    }
+    const verticalPoint = compileGraphExpression("(1, b)", { b: 3 });
+    expect(verticalPoint.kind).toBe("point");
+    if (verticalPoint.kind === "point") {
+      expect(verticalPoint.xVariables).toEqual([]);
+      expect(verticalPoint.yVariables).toEqual(["b"]);
+      expect(verticalPoint.evaluate()).toEqual([1, 3]);
+    }
+    const horizontalPoint = compileGraphExpression("(a, 2)", { a: 4 });
+    expect(horizontalPoint.kind).toBe("point");
+    if (horizontalPoint.kind === "point") {
+      expect(horizontalPoint.xVariables).toEqual(["a"]);
+      expect(horizontalPoint.yVariables).toEqual([]);
+      expect(horizontalPoint.evaluate()).toEqual([4, 2]);
+    }
+    expect(() => compileGraphExpression("(1, 2)", {})).toThrow(/at least one slider variable/);
+    expect(() => compileGraphExpression("(a, a)", variables)).toThrow(/different slider variables/);
+    const constantPoint = compileGraphExpression("(a, e)", variables);
+    expect(constantPoint.kind).toBe("point");
+    if (constantPoint.kind === "point") {
+      expect(constantPoint.evaluate()[1]).toBeCloseTo(Math.E);
+    }
+    expect(() => compileGraphExpression("(x + a, b)", variables)).toThrow(/slider variables/);
   });
 
   it("plots equations linear in y as explicit curves, including factored forms", () => {
