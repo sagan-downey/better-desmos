@@ -97,6 +97,7 @@ button { color: inherit; }
 .expression-row input[aria-invalid="true"] { border-color: var(--error-border); }
 .remove-button { border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted-text); font-size: 20px; cursor: pointer; }
 .expression-error { grid-column: 2 / 5; min-height: 14px; margin: 4px 0 0; color: var(--error); font-size: 11px; }
+.expression-result { grid-column: 2 / 5; min-height: 16px; margin-top: 2px; color: var(--accent-soft); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .visibility-button { padding: 0; border: 0; background: transparent; color: var(--accent-soft); cursor: pointer; }
 .expression-appearance { grid-column: 2 / 5; color: var(--text-secondary); font-size: 10px; }
 .expression-appearance:not([open]) { display: none; }

@@ -15,6 +15,7 @@ import {
   FAST_MODE_PRECISION_DIGITS,
   getPrecisionDigits,
   setPrecisionDigits,
+  type Evaluation,
   type GraphExpression,
   type ImplicitEvaluation,
   type LogarithmicRegression,
@@ -66,6 +67,8 @@ interface Expression {
     display?: string;
     error?: string;
   } | null;
+  scalarText?: string;
+  scalarEvaluator?: () => Evaluation | number;
 }
 
 interface TableRow {
@@ -839,7 +842,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 2.8 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.8</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 2.9 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.9</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -2176,6 +2179,7 @@ function draw(): void {
     .filter((name): name is string => Boolean(name)));
   for (const expression of expressions) {
     if (expression.hidden) continue;
+    if (updateScalarResult(expression)) continue;
     const graph = getCompiled(expression);
     if (!graph) {
       continue;
@@ -2454,6 +2458,79 @@ function scheduleDraw(): void {
   });
 }
 
+function updateScalarResult(expression: Expression): boolean {
+  const resultElement = workspaceList.querySelector<HTMLOutputElement>(
+    `[data-expression-result-id="${expression.id}"]`,
+  );
+  const errorElement = workspaceList.querySelector<HTMLElement>(
+    `[data-expression-error-id="${expression.id}"]`,
+  );
+  const input = errorElement?.parentElement?.querySelector<HTMLInputElement>(
+    `input[aria-label^="Expression "]`,
+  );
+  const updateError = () => {
+    if (errorElement) {
+      errorElement.textContent = expression.compileError ?? expression.evaluationError ?? "";
+    }
+    if (input) {
+      input.setAttribute("aria-invalid", String(Boolean(expression.compileError || expression.evaluationError)));
+    }
+  };
+  const source = expression.text.trim();
+  const tokens = source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [];
+  if (!source || source.includes("=") || /[<>]/.test(source) ||
+      /^(?:list|derivative|integral|parametric|polar)\s*\(/i.test(source) ||
+      tokens.some((name) => ["x", "y", "t"].includes(name.toLowerCase()))) {
+    expression.scalarText = source;
+    expression.scalarEvaluator = undefined;
+    if (resultElement) resultElement.hidden = true;
+    return false;
+  }
+  if (expression.scalarText !== source || !expression.scalarEvaluator) {
+    expression.scalarText = source;
+    expression.scalarEvaluator = undefined;
+    try {
+      const evaluate = compileExpression(source, sliderValues);
+      expression.scalarEvaluator = () => evaluate(0);
+    } catch {
+      try {
+        const graph = compileGraphExpression(source, sliderValues);
+        if (graph.kind !== "explicit") return false;
+        expression.scalarEvaluator = () => graph.evaluate(0);
+      } catch {
+        return false;
+      }
+    }
+  }
+  try {
+    const result = expression.scalarEvaluator();
+    let output: string;
+    let approximate = false;
+    if (typeof result === "number") {
+      if (!Number.isFinite(result)) throw new Error("Result must be finite");
+      output = Number(result.toPrecision(15)).toString();
+      approximate = true;
+    } else {
+      output = result.value.toSignificantDigits(15).toString();
+      approximate = !result.exact || result.value.toString() !== output;
+    }
+    if (resultElement) {
+      resultElement.textContent = `${approximate ? "≈ " : "= "}${output}`;
+      resultElement.title = approximate ? "Numerical approximation" : "Exact result";
+      resultElement.hidden = false;
+    }
+    expression.compileError = undefined;
+    expression.evaluationError = undefined;
+    updateError();
+    return true;
+  } catch (reason) {
+    expression.evaluationError = reason instanceof Error ? reason.message : "Could not evaluate result";
+    if (resultElement) resultElement.hidden = true;
+    updateError();
+    return true;
+  }
+}
+
 function getCompiled(expression: Expression): CompiledGraph | undefined {
   if (expression.parsedText !== expression.text || expression.compiledMode !== graphMode) {
     expression.parsedText = expression.text;
@@ -2601,7 +2678,7 @@ function synchronizeVariableDefinitions(): {
     if (!definition) continue;
     expression.compileError = definition.error;
     expression.compiled = undefined;
-    const error = expressionList.querySelector<HTMLElement>(
+    const error = workspaceList.querySelector<HTMLElement>(
       `[data-expression-error-id="${expression.id}"]`,
     );
     if (error) {
@@ -3467,6 +3544,12 @@ function renderExpressions(): void {
     const error = document.createElement("p");
     error.className = "expression-error";
     error.dataset.expressionErrorId = String(expression.id);
+    const result = document.createElement("output");
+    result.className = "expression-result";
+    result.dataset.expressionResultId = String(expression.id);
+    result.setAttribute("aria-label", `Expression ${index + 1} result`);
+    result.setAttribute("aria-live", "polite");
+    result.hidden = true;
     getCompiled(expression);
     if (!expression.compileError && !expression.evaluationError) {
       error.textContent = "";
@@ -3577,7 +3660,7 @@ function renderExpressions(): void {
       appearanceDetails.append(draggableControl);
     }
     appearanceDetails.append(hsvControls);
-    row.append(marker, input, visibility, remove, error, appearanceDetails);
+    row.append(marker, input, visibility, remove, error, result, appearanceDetails);
     container.append(row);
   };
   for (const [index, expression] of expressions.entries()) {
