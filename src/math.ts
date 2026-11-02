@@ -431,101 +431,129 @@ function evaluate(node: Node, x: Decimal, y?: Decimal, variables: Record<string,
   throw new Error("Could not evaluate expression");
 }
 
-function evaluateFast(node: Node, x: number, y?: number, variables: Record<string, number> = {}): number {
+type FastEvaluator = (x: number, y?: number) => number;
+
+function compileFastEvaluator(node: Node, variables: Record<string, number>): FastEvaluator {
   switch (node.type) {
     case "number": {
       const { numerator, denominator } = node.value;
-      return roundFast(Number(numerator) / Number(denominator));
+      const value = roundFast(Number(numerator) / Number(denominator));
+      return () => value;
     }
     case "variable":
+      if (node.name === "x") return (x) => roundFast(x);
       if (node.name === "y") {
-        if (y === undefined) {
-          throw new Error("y is only available in an implicit equation");
+        return (_x, y) => {
+          if (y === undefined) {
+            throw new Error("y is only available in an implicit equation");
+          }
+          return roundFast(y);
+        };
+      }
+      return () => {
+        const value = variables[node.name];
+        if (value === undefined || !Number.isFinite(value)) {
+          throw new Error(`Set a finite slider value for "${node.name}"`);
         }
-        return roundFast(y);
-      }
-      if (node.name === "x") return roundFast(x);
-      const variableValue = variables[node.name];
-      if (variableValue === undefined || !Number.isFinite(variableValue)) {
-        throw new Error(`Set a finite slider value for "${node.name}"`);
-      }
-      return roundFast(variableValue);
-    case "constant":
-      return roundFast(node.value === "pi" ? Math.PI : Math.E);
+        return roundFast(value);
+      };
+    case "constant": {
+      const value = roundFast(node.value === "pi" ? Math.PI : Math.E);
+      return () => value;
+    }
     case "unary": {
-      const value = evaluateFast(node.operand, x, y, variables);
-      return roundFast(node.operator === "-" ? -value : value);
+      const evaluateOperand = compileFastEvaluator(node.operand, variables);
+      return node.operator === "-"
+        ? (x, y) => roundFast(-evaluateOperand(x, y))
+        : (x, y) => roundFast(evaluateOperand(x, y));
     }
     case "binary": {
-      const left = evaluateFast(node.left, x, y, variables);
-      const right = evaluateFast(node.right, x, y, variables);
+      const evaluateLeft = compileFastEvaluator(node.left, variables);
+      const evaluateRight = compileFastEvaluator(node.right, variables);
       switch (node.operator) {
         case "+":
-          return roundFast(left + right);
+          return (x, y) => roundFast(evaluateLeft(x, y) + evaluateRight(x, y));
         case "-":
-          return roundFast(left - right);
+          return (x, y) => roundFast(evaluateLeft(x, y) - evaluateRight(x, y));
         case "*":
-          return roundFast(left * right);
+          return (x, y) => roundFast(evaluateLeft(x, y) * evaluateRight(x, y));
         case "/":
-          if (right === 0) {
-            throw new Error("Division by zero");
-          }
-          return roundFast(left / right);
+          return (x, y) => {
+            const left = evaluateLeft(x, y);
+            const right = evaluateRight(x, y);
+            if (right === 0) throw new Error("Division by zero");
+            return roundFast(left / right);
+          };
         case "^":
-          if (left < 0 && !Number.isInteger(right)) {
-            throw new Error("A negative base requires an integer exponent");
-          }
-          if (left === 0 && right < 0) {
-            throw new Error("Zero cannot be raised to a negative exponent");
-          }
-          return roundFast(left ** right);
+          return (x, y) => {
+            const left = evaluateLeft(x, y);
+            const right = evaluateRight(x, y);
+            if (left < 0 && !Number.isInteger(right)) {
+              throw new Error("A negative base requires an integer exponent");
+            }
+            if (left === 0 && right < 0) {
+              throw new Error("Zero cannot be raised to a negative exponent");
+            }
+            return roundFast(left ** right);
+          };
       }
       break;
     }
     case "call": {
-      const argument = evaluateFast(node.argument, x, y, variables);
+      const evaluateArgument = compileFastEvaluator(node.argument, variables);
       switch (node.name) {
         case "abs":
-          return roundFast(Math.abs(argument));
+          return (x, y) => roundFast(Math.abs(evaluateArgument(x, y)));
         case "sqrt":
-          if (argument < 0) {
-            throw new Error("sqrt is only defined here for values greater than or equal to zero");
-          }
-          return roundFast(Math.sqrt(argument));
+          return (x, y) => {
+            const argument = evaluateArgument(x, y);
+            if (argument < 0) {
+              throw new Error("sqrt is only defined here for values greater than or equal to zero");
+            }
+            return roundFast(Math.sqrt(argument));
+          };
         case "sin":
-          return roundFast(Math.sin(argument));
+          return (x, y) => roundFast(Math.sin(evaluateArgument(x, y)));
         case "cos":
-          return roundFast(Math.cos(argument));
+          return (x, y) => roundFast(Math.cos(evaluateArgument(x, y)));
         case "tan":
-          return roundFast(Math.tan(argument));
+          return (x, y) => roundFast(Math.tan(evaluateArgument(x, y)));
         case "asin":
-          if (Math.abs(argument) > 1) {
-            throw new Error("asin requires an input between -1 and 1");
-          }
-          return roundFast(Math.asin(argument));
+          return (x, y) => {
+            const argument = evaluateArgument(x, y);
+            if (Math.abs(argument) > 1) {
+              throw new Error("asin requires an input between -1 and 1");
+            }
+            return roundFast(Math.asin(argument));
+          };
         case "acos":
-          if (Math.abs(argument) > 1) {
-            throw new Error("acos requires an input between -1 and 1");
-          }
-          return roundFast(Math.acos(argument));
+          return (x, y) => {
+            const argument = evaluateArgument(x, y);
+            if (Math.abs(argument) > 1) {
+              throw new Error("acos requires an input between -1 and 1");
+            }
+            return roundFast(Math.acos(argument));
+          };
         case "atan":
-          return roundFast(Math.atan(argument));
+          return (x, y) => roundFast(Math.atan(evaluateArgument(x, y)));
         case "ln":
-          if (argument <= 0) {
-            throw new Error("ln requires an input greater than zero");
-          }
-          return roundFast(Math.log(argument));
+          return (x, y) => {
+            const argument = evaluateArgument(x, y);
+            if (argument <= 0) throw new Error("ln requires an input greater than zero");
+            return roundFast(Math.log(argument));
+          };
         case "log":
-          if (argument <= 0) {
-            throw new Error("log requires an input greater than zero");
-          }
-          return roundFast(Math.log10(argument));
+          return (x, y) => {
+            const argument = evaluateArgument(x, y);
+            if (argument <= 0) throw new Error("log requires an input greater than zero");
+            return roundFast(Math.log10(argument));
+          };
         case "exp":
-          return roundFast(Math.exp(argument));
+          return (x, y) => roundFast(Math.exp(evaluateArgument(x, y)));
       }
     }
   }
-  throw new Error("Could not evaluate expression");
+  throw new Error("Could not compile expression");
 }
 
 function roundFast(value: number): number {
@@ -698,14 +726,16 @@ function compileYAffineEquation(
   const solution = binaryNode("/", negateNode(constant), coefficient);
 
   if (fast) {
-    if (evaluateFast(coefficient, 0, undefined, variables) === 0) return undefined;
+    const evaluateCoefficient = compileFastEvaluator(coefficient, variables);
+    if (evaluateCoefficient(0) === 0) return undefined;
+    const evaluateSolution = compileFastEvaluator(solution, variables);
     return {
       kind: "explicit",
       evaluate: (x: number) => {
         if (!Number.isFinite(x)) {
           throw new Error("x must be a finite number");
         }
-        const value = evaluateFast(solution, x, undefined, variables);
+        const value = evaluateSolution(x);
         if (!Number.isFinite(value)) {
           throw new Error("Equation does not define a y-value for this x");
         }
@@ -1166,9 +1196,11 @@ export function compileColorExpression(
   fast = false,
 ): (x: number, y: number) => number {
   const tree = parse(source, true, false, Object.keys(variables));
-  return fast
-    ? (x, y) => assertFiniteFastResult(evaluateFast(tree, x, y, variables))
-    : (x, y) => asDecimal(evaluate(
+  if (fast) {
+    const evaluate = compileFastEvaluator(tree, variables);
+    return (x, y) => assertFiniteFastResult(evaluate(x, y));
+  }
+  return (x, y) => asDecimal(evaluate(
       tree,
       new Decimal(x.toString()),
       new Decimal(y.toString()),
@@ -1281,15 +1313,20 @@ function compileInequality(
   }
   const left = parse(leftSource!, true, false, Object.keys(variables));
   const right = parse(rightSource!, true, false, Object.keys(variables));
+  let evaluateFastDifference: FastEvaluator | undefined;
+  if (fast) {
+    const evaluateLeft = compileFastEvaluator(left, variables);
+    const evaluateRight = compileFastEvaluator(right, variables);
+    evaluateFastDifference = (x, y) => evaluateLeft(x, y) - evaluateRight(x, y);
+  }
   return {
     kind: "inequality",
     relation: relation as "<" | "<=" | ">" | ">=",
-    evaluate: (x, y) => fast
-      ? assertFiniteFastResult(
-        evaluateFast(left, x, y, variables) - evaluateFast(right, x, y, variables),
-      )
-      : asDecimal(evaluate(left, new Decimal(x.toString()), new Decimal(y.toString()), variables))
-        .minus(asDecimal(evaluate(right, new Decimal(x.toString()), new Decimal(y.toString()), variables))),
+    evaluate: (x, y) => {
+      if (evaluateFastDifference) return assertFiniteFastResult(evaluateFastDifference(x, y));
+      return asDecimal(evaluate(left, new Decimal(x.toString()), new Decimal(y.toString()), variables))
+        .minus(asDecimal(evaluate(right, new Decimal(x.toString()), new Decimal(y.toString()), variables)));
+    },
   };
 }
 
@@ -1522,13 +1559,14 @@ export function compileFastGraphExpression(
   }
   if (/^\s*y\s*=/i.test(source) || !source.includes("=")) {
     const tree = parse(source, false, true, Object.keys(variables));
+    const evaluate = compileFastEvaluator(tree, variables);
     return {
       kind: "explicit",
       evaluate: (x: number) => {
         if (!Number.isFinite(x)) {
           throw new Error("x must be a finite number");
         }
-        return assertFiniteFastResult(evaluateFast(tree, x, undefined, variables));
+        return assertFiniteFastResult(evaluate(x));
       },
     };
   }
@@ -1548,6 +1586,8 @@ export function compileFastGraphExpression(
   const right = parse(rightSource, true, false, variableNames);
   const explicit = compileYAffineEquation(left, right, variables, true);
   if (explicit) return explicit;
+  const evaluateLeftFast = compileFastEvaluator(left, variables);
+  const evaluateRightFast = compileFastEvaluator(right, variables);
   return {
     kind: "implicit",
     evaluate: (x: number, y: number) => {
@@ -1555,7 +1595,7 @@ export function compileFastGraphExpression(
         throw new Error("x and y must be finite numbers");
       }
       return assertFiniteFastResult(
-        evaluateFast(left, x, y, variables) - evaluateFast(right, x, y, variables),
+        evaluateLeftFast(x, y) - evaluateRightFast(x, y),
       );
     },
   };

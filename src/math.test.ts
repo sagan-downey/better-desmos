@@ -101,6 +101,29 @@ describe("compileExpression", () => {
     expect(() => invalid.kind === "explicit" && invalid.evaluate(0)).toThrow();
   });
 
+  it("compiles fast expression evaluators while preserving operator, domain, and slider behavior", () => {
+    const power = compileFastGraphExpression("2^3^2");
+    const negativePower = compileFastGraphExpression("-2^2");
+    const logarithm = compileFastGraphExpression("log(100)");
+    expect(power.kind === "explicit" && power.evaluate(0)).toBe(512);
+    expect(negativePower.kind === "explicit" && negativePower.evaluate(0)).toBe(-4);
+    expect(logarithm.kind === "explicit" && logarithm.evaluate(0)).toBe(2);
+
+    const variables = { a: 3 };
+    const slider = compileFastGraphExpression("a*x + a", variables);
+    expect(slider.kind === "explicit" && slider.evaluate(2)).toBe(9);
+    variables.a = 4;
+    expect(slider.kind === "explicit" && slider.evaluate(2)).toBe(12);
+
+    const negativeFractionalPower = compileFastGraphExpression("(-1)^0.5");
+    const divisionByZero = compileFastGraphExpression("1 / (x - 2)");
+    expect(() => negativeFractionalPower.kind === "explicit" && negativeFractionalPower.evaluate(0))
+      .toThrow(/negative base requires an integer exponent/);
+    expect(() => divisionByZero.kind === "explicit" && divisionByZero.evaluate(2))
+      .toThrow(/Division by zero/);
+    expect(() => compileColorExpression("x + y", {}, true)(1, Number.NaN)).toThrow();
+  });
+
   it("reports invalid syntax, unsupported names, and domain errors", () => {
     expect(() => compileExpression("x + unknown")).toThrow('Unknown name "unknown"');
     expect(() => compileExpression("sqrt(-1)")(0)).toThrow(/sqrt is only defined/);
