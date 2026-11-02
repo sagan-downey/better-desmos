@@ -22,4 +22,4 @@ jobs:
       - name: Publish release asset
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/better-desmos.html --title "Better Desmos 2.0" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" dist/better-desmos.html --title "Better Desmos ${GITHUB_REF_NAME#v}" --generate-notes

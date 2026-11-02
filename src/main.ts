@@ -739,7 +739,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 2.3 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.3</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 2.4 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.4</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -772,8 +772,12 @@ app.innerHTML = `
           <button type="button" class="icon-control" id="open-settings" aria-label="Settings" title="Settings" aria-haspopup="dialog">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm9 4.7v-2.4l-2.2-.6a7.3 7.3 0 0 0-.7-1.7l1.2-1.9-1.7-1.7-1.9 1.2a7.3 7.3 0 0 0-1.7-.7L13.4 3h-2.4l-.6 2.2a7.3 7.3 0 0 0-1.7.7L6.8 4.7 5.1 6.4l1.2 1.9a7.3 7.3 0 0 0-.7 1.7l-2.2.6V13l2.2.6a7.3 7.3 0 0 0 .7 1.7l-1.2 1.9 1.7 1.7 1.9-1.2a7.3 7.3 0 0 0 1.7.7l.6 2.2h2.4l.6-2.2a7.3 7.3 0 0 0 1.7-.7l1.9 1.2 1.7-1.7-1.2-1.9a7.3 7.3 0 0 0 .7-1.7Z"/><circle cx="12" cy="12" r="2" fill="var(--sidebar-bg)"/></svg>
           </button>
-          <button type="button" class="icon-control" id="zoom-out" aria-label="Zoom out" title="Zoom out">−</button>
-          <button type="button" class="icon-control" id="zoom-in" aria-label="Zoom in" title="Zoom in">+</button>
+          <button type="button" class="icon-control" id="zoom-out" aria-label="Zoom out" title="Zoom out">
+            <svg class="zoom-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
+          </button>
+          <button type="button" class="icon-control" id="zoom-in" aria-label="Zoom in" title="Zoom in">
+            <svg class="zoom-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5v14"/></svg>
+          </button>
           <button type="button" class="icon-control" id="reset-view" aria-label="Reset view" title="Reset view">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7h-6v7H4a1 1 0 0 1-1-1Z"/></svg>
           </button>

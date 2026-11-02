@@ -4,7 +4,7 @@ A browser-based graphing calculator built with TypeScript and Vite. Its small st
 
 ## Versioning
 
-The current app version is **2.3**. Keep the package version in `package.json` in sync as `2.3.0`.
+The current app version is **2.4**. Keep the package version in `package.json` in sync as `2.4.0`.
 
 ## Run locally
 
