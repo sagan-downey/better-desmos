@@ -17,6 +17,8 @@ npm run build
 
 The generated HTML contains the app's JavaScript and CSS, so it can be copied and opened directly. Keep the project file to rebuild after changing the source.
 
+Prebuilt downloads are available from the GitHub [Releases](https://github.com/sagan-downey/better-desmos/releases) page. Download `better-desmos.html`, then open it in Firefox or another browser.
+
 To run the development version with hot reload:
 
 ```sh
