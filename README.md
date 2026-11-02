@@ -4,7 +4,7 @@ A browser-based graphing calculator built with TypeScript and Vite. Its small st
 
 ## Versioning
 
-The current app version is **2.9**. Keep the package version in `package.json` in sync as `2.9.0`.
+The current app version is **2.10**. Keep the package version in `package.json` in sync as `2.10.0`.
 
 ## Run locally
 
@@ -41,6 +41,8 @@ Each row can plot `y` as a function of `x`, an implicit equation whose contour i
 - Slider variables can include a subscript suffix, such as `a_1`, `x_mean`, or `b_12c`; enter the underscore directly in the expression or ticker action.
 - `sqrt`, `abs`, `floor`, `ceil`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `ln`, `log` (base 10), and `exp`
 - Trigonometric functions use radians
+
+Define a one-argument function with any single-letter name and `x` as its input, such as `f(x) = x^2` or `g(x) = sin(x) + f(x)`. Call it with an expression, for example `f(x)` to graph it or `f(3)` to show a scalar result. Function definitions stay in the workspace but do not draw their own graph. Function bodies and calls use the same safe math parser as other expressions; recursive definitions are rejected.
 
 Click an expression's color circle to open its appearance settings. Set the base color, line size (1–10 px), and opacity (0–100%) there. The panel also supports hue, saturation, and value formulas based on `x`, `y`, and sliders. Entering spatial formulas makes the expression circle show a rainbow indicator, while the formulas determine the graph color. Hue uses degrees and is clamped to 0–360 for color conversion: values above 360 remain above 360 in the formula result but render as the endpoint color instead of restarting the rainbow. Saturation and value use normalized decimals (0–1). Opacity applies to curves, implicit contours, inequality boundaries and fill, and list points.
 

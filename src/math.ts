@@ -38,6 +38,86 @@ export interface Evaluation {
   exact: boolean;
 }
 
+export interface UserFunctionDefinition {
+  name: string;
+  parameter: string;
+  body: string;
+}
+
+export function expandUserFunctions(
+  source: string,
+  definitions: UserFunctionDefinition[],
+): string {
+  const functionsByName = new Map<string, UserFunctionDefinition>();
+  for (const definition of definitions) {
+    const name = definition.name.toLowerCase();
+    if (!/^[a-z]$/.test(name) || definition.parameter.toLowerCase() !== "x") {
+      throw new Error("User functions must have a single-letter name and use x as their input.");
+    }
+    if (functionsByName.has(name)) {
+      throw new Error(`Function "${name}" is defined more than once.`);
+    }
+    functionsByName.set(name, { ...definition, name });
+  }
+
+  const expand = (expression: string, callStack: string[]): string => {
+    let result = "";
+    let offset = 0;
+    while (offset < expression.length) {
+      const identifier = /^[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/.exec(expression.slice(offset));
+      if (!identifier) {
+        result += expression[offset]!;
+        offset += 1;
+        continue;
+      }
+
+      const token = identifier[0];
+      const name = token.toLowerCase();
+      const definition = functionsByName.get(name);
+      let open = offset + token.length;
+      while (/\s/.test(expression[open] ?? "")) open += 1;
+      if (!definition || expression[open] !== "(") {
+        result += token;
+        offset += token.length;
+        continue;
+      }
+      if (callStack.includes(name)) {
+        throw new Error(`Circular function definition involving "${name}".`);
+      }
+
+      let depth = 1;
+      let close = open + 1;
+      let hasMultipleArguments = false;
+      for (; close < expression.length && depth > 0; close += 1) {
+        if (expression[close] === "(") depth += 1;
+        else if (expression[close] === ")") depth -= 1;
+        else if (expression[close] === "," && depth === 1) hasMultipleArguments = true;
+      }
+      if (depth !== 0) throw new Error(`Missing closing parenthesis in call to "${name}".`);
+      if (hasMultipleArguments) {
+        throw new Error(`Function "${name}" accepts one argument.`);
+      }
+
+      const argument = expand(expression.slice(open + 1, close - 1), callStack);
+      if (!argument.trim()) {
+        throw new Error(`Function "${name}" requires one argument.`);
+      }
+      const parameter = definition.parameter.toLowerCase();
+      const body = definition.body.replace(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g, (variable) =>
+        variable.toLowerCase() === parameter ? `(${argument})` : variable
+      );
+      result += `(${expand(body, [...callStack, name])})`;
+      offset = close;
+      if (result.length > MAX_EXPRESSION_LENGTH) {
+        throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
+      }
+    }
+    return result;
+  };
+
+  return expand(source, []);
+}
+
 export type ImplicitEvaluation = (x: number, y: number) => Decimal | number;
 type PreciseImplicitEvaluation = (x: number, y: number) => Decimal;
 export type ExplicitEvaluation = (x: number) => Evaluation | number;

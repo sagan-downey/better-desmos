@@ -15,9 +15,11 @@ import {
   FAST_MODE_PRECISION_DIGITS,
   getPrecisionDigits,
   setPrecisionDigits,
+  expandUserFunctions,
   type Evaluation,
   type GraphExpression,
   type ImplicitEvaluation,
+  type UserFunctionDefinition,
   type LogarithmicRegression,
   type ExponentialRegression,
   type PowerRegression,
@@ -55,6 +57,7 @@ interface Expression {
   compiledHsvKey?: string;
   colorError?: string;
   parsedText?: string;
+  parsedFunctionSignature?: string;
   compiledMode?: "precise" | "desmos";
   compiled?: CompiledGraph;
   compileError?: string;
@@ -842,7 +845,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 2.9 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.9</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 2.10 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.10</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -1129,7 +1132,7 @@ function drawGrid(width: number, height: number): void {
 function compileSpatialColor(expression: Expression): ((x: number, y: number) => string) | undefined {
   const hsv = expression.hsv;
   if (hsv) {
-    const key = `${graphMode}:${hsv.hue}\u0000${hsv.saturation}\u0000${hsv.value}`;
+    const key = `${graphMode}:${userFunctionSignature()}:${hsv.hue}\u0000${hsv.saturation}\u0000${hsv.value}`;
     if (expression.compiledHsvKey !== key) {
       expression.compiledHsvKey = key;
       expression.compiledHsv = undefined;
@@ -1137,13 +1140,13 @@ function compileSpatialColor(expression: Expression): ((x: number, y: number) =>
       try {
         expression.compiledHsv = [
           hsv.hue.trim()
-            ? compileColorExpression(hsv.hue, sliderValues, graphMode === "desmos")
+            ? compileColorExpression(expandFunctions(hsv.hue), sliderValues, graphMode === "desmos")
             : undefined,
           hsv.saturation.trim()
-            ? compileColorExpression(hsv.saturation, sliderValues, graphMode === "desmos")
+            ? compileColorExpression(expandFunctions(hsv.saturation), sliderValues, graphMode === "desmos")
             : undefined,
           hsv.value.trim()
-            ? compileColorExpression(hsv.value, sliderValues, graphMode === "desmos")
+            ? compileColorExpression(expandFunctions(hsv.value), sliderValues, graphMode === "desmos")
             : undefined,
         ];
       } catch (reason) {
@@ -2477,24 +2480,26 @@ function updateScalarResult(expression: Expression): boolean {
     }
   };
   const source = expression.text.trim();
+  const scalarKey = `${source}\u0000${userFunctionSignature()}`;
   const tokens = source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [];
   if (!source || source.includes("=") || /[<>]/.test(source) ||
       /^(?:list|derivative|integral|parametric|polar)\s*\(/i.test(source) ||
       tokens.some((name) => ["x", "y", "t"].includes(name.toLowerCase()))) {
-    expression.scalarText = source;
+    expression.scalarText = scalarKey;
     expression.scalarEvaluator = undefined;
     if (resultElement) resultElement.hidden = true;
     return false;
   }
-  if (expression.scalarText !== source || !expression.scalarEvaluator) {
-    expression.scalarText = source;
+  if (expression.scalarText !== scalarKey || !expression.scalarEvaluator) {
+    expression.scalarText = scalarKey;
     expression.scalarEvaluator = undefined;
     try {
-      const evaluate = compileExpression(source, sliderValues);
+      const expandedSource = expandFunctions(source);
+      const evaluate = compileExpression(expandedSource, sliderValues);
       expression.scalarEvaluator = () => evaluate(0);
     } catch {
       try {
-        const graph = compileGraphExpression(source, sliderValues);
+        const graph = compileGraphExpression(expandFunctions(source), sliderValues);
         if (graph.kind !== "explicit") return false;
         expression.scalarEvaluator = () => graph.evaluate(0);
       } catch {
@@ -2532,26 +2537,129 @@ function updateScalarResult(expression: Expression): boolean {
 }
 
 function getCompiled(expression: Expression): CompiledGraph | undefined {
-  if (expression.parsedText !== expression.text || expression.compiledMode !== graphMode) {
+  const functionStates = getUserFunctionDefinitions();
+  const functionSignature = userFunctionSignature(functionStates);
+  if (expression.parsedText !== expression.text ||
+      expression.parsedFunctionSignature !== functionSignature ||
+      expression.compiledMode !== graphMode) {
     expression.parsedText = expression.text;
+    expression.parsedFunctionSignature = functionSignature;
     expression.compiledMode = graphMode;
     expression.compiled = undefined;
     expression.compileError = undefined;
     expression.evaluationError = undefined;
+    const functionDefinition = functionStates.find(({ expression: owner }) => owner === expression);
+    if (functionDefinition) {
+      expression.compileError = functionDefinition.error;
+      if (!expression.compileError) {
+        try {
+          const expandedSource = expandFunctions(
+            `${functionDefinition.definition.name}(0)`,
+          );
+          compileExpression(expandedSource, sliderValues);
+        } catch (reason) {
+          expression.compileError = reason instanceof Error ? reason.message : "Invalid function";
+        }
+      }
+      updateExpressionErrorDisplay(expression);
+      return undefined;
+    }
     const definition = getVariableDefinition(expression);
     if (definition) {
       expression.compileError = definition.error;
+      updateExpressionErrorDisplay(expression);
       return undefined;
     }
     try {
+      const source = expandFunctions(expression.text);
       expression.compiled = graphMode === "desmos"
-        ? compileFastGraphExpression(expression.text, sliderValues)
-        : compileGraphExpression(expression.text, sliderValues);
+        ? compileFastGraphExpression(source, sliderValues)
+        : compileGraphExpression(source, sliderValues);
     } catch (reason) {
       expression.compileError = reason instanceof Error ? reason.message : "Invalid expression";
     }
+    updateExpressionErrorDisplay(expression);
   }
   return expression.compiled;
+}
+
+function updateExpressionErrorDisplay(expression: Expression): void {
+  const error = workspaceList.querySelector<HTMLElement>(
+    `[data-expression-error-id="${expression.id}"]`,
+  );
+  if (error) {
+    error.textContent = expression.compileError ?? expression.evaluationError ?? "";
+    error.parentElement?.querySelector<HTMLInputElement>(
+      `input[aria-label^="Expression "]`,
+    )?.setAttribute(
+      "aria-invalid",
+      String(Boolean(expression.compileError || expression.evaluationError)),
+    );
+  }
+}
+
+function getUserFunctionDefinitions(): Array<{
+  expression: Expression;
+  definition: UserFunctionDefinition;
+  error?: string;
+}> {
+  const found: Array<{
+    expression: Expression;
+    definition: UserFunctionDefinition;
+    error?: string;
+  }> = [];
+  for (const expression of expressions) {
+    const match = /^\s*([a-z])\s*\(([^)]*)\)\s*=\s*(.*)\s*$/i.exec(expression.text);
+    if (!match) continue;
+    const name = match[1]!.toLowerCase();
+    const parameter = match[2]!.trim().toLowerCase();
+    const definition: UserFunctionDefinition = {
+      name,
+      parameter,
+      body: match[3]!.trim(),
+    };
+    const state: (typeof found)[number] = { expression, definition };
+    if (parameter !== "x") {
+      state.error = "A function must use x as its input, such as f(x).";
+    } else if (!definition.body) {
+      state.error = "Enter a function body after the equals sign.";
+    } else if ([
+      "x", "y", "t", "pi", "e", "sqrt", "sin", "cos", "tan", "asin", "acos",
+      "atan", "ln", "log", "exp", "abs", "floor", "ceil", "parametric", "polar",
+      "derivative", "integral", "list", "sum", "product", "min", "max", "mean",
+      "median", "variance", "stdev", "factorial",
+    ].includes(name)) {
+      state.error = `"${name}" is reserved and cannot be defined as a function.`;
+    }
+    found.push(state);
+  }
+  const counts = new Map<string, number>();
+  for (const { definition } of found) {
+    counts.set(definition.name, (counts.get(definition.name) ?? 0) + 1);
+  }
+  for (const state of found) {
+    if (counts.get(state.definition.name)! > 1) {
+      state.error = `Function "${state.definition.name}" is defined more than once.`;
+    }
+  }
+  return found;
+}
+
+function userFunctionSignature(
+  states = getUserFunctionDefinitions(),
+): string {
+  return JSON.stringify(states.map(({ definition, error }) => ({ ...definition, error })));
+}
+
+function expandFunctions(source: string): string {
+  const states = getUserFunctionDefinitions();
+  const invalidDefinition = states.find(({ definition, error }) =>
+    error && new RegExp(`\\b${definition.name}\\s*\\(`, "i").test(source));
+  if (invalidDefinition) throw new Error(invalidDefinition.error);
+  return expandUserFunctions(
+    source,
+    states.filter(({ error }) => !error).map(({ definition }) => definition),
+  );
 }
 
 function getVariableDefinition(
@@ -2574,11 +2682,13 @@ function synchronizeVariableDefinitions(): {
   definitions: NonNullable<Expression["definition"]>[];
   sliders: string[];
 } {
+  const functionStates = getUserFunctionDefinitions();
   const reserved = new Set([
     "x", "y", "t", "pi", "e", "sqrt", "sin", "cos", "tan", "asin", "acos",
     "atan", "ln", "log", "exp", "abs", "floor", "ceil", "parametric", "polar",
     "derivative", "integral", "list", "sum", "product", "min", "max", "mean",
     "median", "variance", "stdev", "factorial",
+    ...functionStates.map(({ definition }) => definition.name),
   ]);
   const definitions = expressions
     .map((expression) => getVariableDefinition(expression))
@@ -2594,12 +2704,24 @@ function synchronizeVariableDefinitions(): {
       : undefined;
   }
 
-  const sources = expressions.flatMap((expression) => [
-    expression.text,
-    expression.hsv?.hue ?? "",
-    expression.hsv?.saturation ?? "",
-    expression.hsv?.value ?? "",
-  ]).concat(tickers.map((ticker) => ticker.action));
+  const functionByExpression = new Map(
+    functionStates.map((state) => [state.expression, state.definition]),
+  );
+  const sources = expressions.flatMap((expression) => {
+    const functionDefinition = functionByExpression.get(expression);
+    const expressionSource = functionDefinition
+      ? functionDefinition.body.replace(
+        new RegExp(`\\b${functionDefinition.parameter}\\b`, "gi"),
+        "",
+      )
+      : expression.text;
+    return [
+      expressionSource,
+      expression.hsv?.hue ?? "",
+      expression.hsv?.saturation ?? "",
+      expression.hsv?.value ?? "",
+    ];
+  }).concat(tickers.map((ticker) => ticker.action));
   const sliders = [...new Set(sources.flatMap((source) =>
     source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? []
   ).map((name) => name.toLowerCase()).filter((name) =>
@@ -2656,7 +2778,7 @@ function synchronizeVariableDefinitions(): {
         name,
         sliderValues[name] ?? 0,
       ]));
-      const result = compileExpression(definition.source, variables)(0);
+      const result = compileExpression(expandFunctions(definition.source), variables)(0);
       const value = result.value.toNumber();
       if (!Number.isFinite(value)) throw new Error("Definition must produce a finite number.");
       definition.value = value;
@@ -3086,7 +3208,7 @@ function startTicker(ticker: Ticker): void {
   renderSliders();
   let action: ReturnType<typeof compileTickerAction>;
   try {
-    action = compileTickerAction(ticker.action, sliderValues);
+    action = compileTickerAction(expandFunctions(ticker.action), sliderValues);
     if (expressions.some((expression) =>
       getVariableDefinition(expression)?.target === action.target)) {
       throw new Error(`"${action.target}" is defined by an expression and cannot be changed by a ticker.`);

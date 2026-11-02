@@ -17,6 +17,7 @@ import {
   FAST_MODE_PRECISION_DIGITS,
   getPrecisionDigits,
   setPrecisionDigits,
+  expandUserFunctions,
 } from "./math";
 
 describe("compileExpression", () => {
@@ -59,6 +60,42 @@ describe("compileExpression", () => {
     expect(compileExpression("35.6x")(2).value.toString()).toBe("71.2");
     expect(compileExpression("2(x + 1)")(2).value.toString()).toBe("6");
     expect(compileExpression("2sin(pi / 2)")(0).value.toNumber()).toBeCloseTo(2);
+  });
+
+  it("expands single-argument user functions through the safe math parser", () => {
+    const definitions = [
+      { name: "f", parameter: "x", body: "x^2 + 1" },
+      { name: "g", parameter: "x", body: "sin(x) + f(x)" },
+    ];
+    const scalar = compileExpression(expandUserFunctions("f(3)", definitions))(0);
+    expect(scalar.value.toString()).toBe("10");
+
+    const nested = compileExpression(expandUserFunctions("g(x)", definitions))(2);
+    expect(nested.value.toNumber()).toBeCloseTo(Math.sin(2) + 5);
+
+    const fast = compileFastGraphExpression(expandUserFunctions("f(x)", definitions));
+    expect(fast.kind).toBe("explicit");
+    if (fast.kind === "explicit") expect(fast.evaluate(2)).toBe(5);
+    const precise = compileGraphExpression(expandUserFunctions("f(x)", definitions));
+    expect(precise.kind).toBe("explicit");
+    if (precise.kind === "explicit") {
+      const result = precise.evaluate(2);
+      expect(typeof result).not.toBe("number");
+      if (typeof result !== "number") expect(result.value.toString()).toBe("5");
+    }
+
+    expect(() => expandUserFunctions("f(1)", [
+      { name: "f", parameter: "x", body: "f(x) + 1" },
+    ])).toThrow(/Circular function definition/);
+    expect(() => expandUserFunctions("f()", definitions)).toThrow(/requires one argument/);
+    expect(() => expandUserFunctions("f(1, 2)", definitions)).toThrow(/accepts one argument/);
+    expect(() => expandUserFunctions("f(1)", [
+      ...definitions,
+      { name: "F", parameter: "x", body: "x" },
+    ])).toThrow(/defined more than once/);
+    expect(() => expandUserFunctions("g(1)", [
+      { name: "g", parameter: "t", body: "t^2" },
+    ])).toThrow(/use x as their input/);
   });
 
   it("supports letter-and-number subscripted slider variables", () => {
