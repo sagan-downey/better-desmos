@@ -176,6 +176,146 @@ const colors = ["#55d6be", "#ff8c69", "#8da7ff", "#f0c75e", "#d18cff"];
 let projectStatus = "";
 const PROJECT_STORAGE_KEY = "better-desmos-project-v1";
 const AUTO_SAVE_STORAGE_KEY = "better-desmos-autosave-v1";
+const THEME_STORAGE_KEY = "better-desmos-themes-v1";
+
+interface ThemeColors {
+  appBg: string;
+  sidebarBg: string;
+  panelBg: string;
+  inputBg: string;
+  raisedBg: string;
+  text: string;
+  strongText: string;
+  mutedText: string;
+  accent: string;
+  accentContrast: string;
+  border: string;
+}
+
+interface ColorScheme {
+  id: string;
+  name: string;
+  colors: ThemeColors;
+}
+
+const builtInColorSchemes: ColorScheme[] = [
+  { id: "dark", name: "Dark", colors: {
+    appBg: "#0c1119", sidebarBg: "#111823", panelBg: "#151f2b", inputBg: "#101722",
+    raisedBg: "#17212d", text: "#e6edf5", strongText: "#f3f6fa", mutedText: "#97a5b7",
+    accent: "#55d6be", accentContrast: "#071411", border: "#263445",
+  } },
+  { id: "light", name: "Light", colors: {
+    appBg: "#f3f6fa", sidebarBg: "#e6ebf2", panelBg: "#ffffff", inputBg: "#ffffff",
+    raisedBg: "#e9eef5", text: "#243244", strongText: "#111827", mutedText: "#627186",
+    accent: "#087f74", accentContrast: "#ffffff", border: "#c5cfdb",
+  } },
+  { id: "ocean", name: "Ocean", colors: {
+    appBg: "#081923", sidebarBg: "#0d2430", panelBg: "#12303d", inputBg: "#0b202b",
+    raisedBg: "#193947", text: "#e0f2f5", strongText: "#f3fcff", mutedText: "#91b1bc",
+    accent: "#4dd0c3", accentContrast: "#06201e", border: "#28505d",
+  } },
+  { id: "forest", name: "Forest", colors: {
+    appBg: "#111a15", sidebarBg: "#18231c", panelBg: "#202e24", inputBg: "#151f19",
+    raisedBg: "#26372b", text: "#e4eee5", strongText: "#f5fff5", mutedText: "#a1b4a2",
+    accent: "#91d18b", accentContrast: "#142018", border: "#3b5140",
+  } },
+  { id: "sunset", name: "Sunset", colors: {
+    appBg: "#211514", sidebarBg: "#2a1b1a", panelBg: "#392321", inputBg: "#261a19",
+    raisedBg: "#432a27", text: "#f4e8e4", strongText: "#fff8f4", mutedText: "#c0a39c",
+    accent: "#ff9b72", accentContrast: "#301610", border: "#60403a",
+  } },
+  { id: "rose", name: "Rose", colors: {
+    appBg: "#1d141c", sidebarBg: "#271a26", panelBg: "#332331", inputBg: "#211821",
+    raisedBg: "#3c2938", text: "#f1e7f0", strongText: "#fff7ff", mutedText: "#bba5b8",
+    accent: "#ed91c2", accentContrast: "#2b1221", border: "#563d52",
+  } },
+  { id: "lavender", name: "Lavender", colors: {
+    appBg: "#171625", sidebarBg: "#201f32", panelBg: "#2a2940", inputBg: "#1b1a2c",
+    raisedBg: "#32314a", text: "#ebe9f8", strongText: "#fbfaff", mutedText: "#aaa8c5",
+    accent: "#b4a0ff", accentContrast: "#211742", border: "#45435f",
+  } },
+  { id: "high-contrast", name: "High contrast", colors: {
+    appBg: "#000000", sidebarBg: "#080808", panelBg: "#141414", inputBg: "#050505",
+    raisedBg: "#1e1e1e", text: "#ffffff", strongText: "#ffffff", mutedText: "#c8c8c8",
+    accent: "#00f5d4", accentContrast: "#001b17", border: "#777777",
+  } },
+];
+
+const themeColorFields: Array<[keyof ThemeColors, string, string]> = [
+  ["appBg", "Graph background", "theme-app-bg"],
+  ["sidebarBg", "Sidebar background", "theme-sidebar-bg"],
+  ["panelBg", "Panel background", "theme-panel-bg"],
+  ["inputBg", "Input background", "theme-input-bg"],
+  ["raisedBg", "Raised controls", "theme-raised-bg"],
+  ["text", "Main text", "theme-text"],
+  ["strongText", "Bright text", "theme-strong-text"],
+  ["mutedText", "Secondary text", "theme-muted-text"],
+  ["accent", "Accent color", "theme-accent"],
+  ["accentContrast", "Text on accent", "theme-accent-contrast"],
+  ["border", "Borders", "theme-border"],
+];
+
+function isThemeColors(value: unknown): value is ThemeColors {
+  return isRecord(value) && themeColorFields.every(([key]) => {
+    const color: unknown = value[key];
+    return typeof color === "string" && /^#[\da-f]{6}$/i.test(color);
+  });
+}
+
+function applyColorScheme(colorsToApply: ThemeColors): void {
+  const root = document.documentElement;
+  for (const [key, , cssName] of themeColorFields) {
+    root.style.setProperty(`--${cssName.replace("theme-", "")}`, colorsToApply[key]);
+  }
+  const red = Number.parseInt(colorsToApply.appBg.slice(1, 3), 16);
+  const green = Number.parseInt(colorsToApply.appBg.slice(3, 5), 16);
+  const blue = Number.parseInt(colorsToApply.appBg.slice(5, 7), 16);
+  const colorScheme = (red * 0.299 + green * 0.587 + blue * 0.114) > 150 ? "light" : "dark";
+  root.dataset.colorScheme = colorScheme;
+  root.style.setProperty("--native-color-scheme", colorScheme);
+  root.style.setProperty("--error", colorScheme === "light" ? "#a11232" : "#ff9a9e");
+  root.style.setProperty("--error-border", colorScheme === "light" ? "#9f1239" : "#a95258");
+}
+
+function loadColorSchemes(): { selectedId: string; custom: ColorScheme[] } {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    if (!stored) return { selectedId: "dark", custom: [] };
+    const value: unknown = JSON.parse(stored);
+    if (!isRecord(value) || typeof value.selectedId !== "string" ||
+        !Array.isArray(value.custom) || value.custom.length > 30) {
+      throw new Error("Saved color scheme settings are invalid.");
+    }
+    const custom = value.custom.map((item): ColorScheme => {
+      if (!isRecord(item) || typeof item.id !== "string" || typeof item.name !== "string" ||
+          !/^custom-[\w-]{1,60}$/.test(item.id) || item.name.trim().length === 0 ||
+          item.name.length > 40 || !isThemeColors(item.colors)) {
+        throw new Error("A saved custom color scheme is invalid.");
+      }
+      return { id: item.id, name: item.name, colors: item.colors };
+    });
+    if (new Set(custom.map((scheme) => scheme.id)).size !== custom.length) {
+      throw new Error("Saved custom color scheme identifiers must be unique.");
+    }
+    const available = [...builtInColorSchemes, ...custom];
+    if (!available.some((scheme) => scheme.id === value.selectedId)) {
+      throw new Error("The selected saved color scheme could not be found.");
+    }
+    return { selectedId: value.selectedId, custom };
+  } catch (reason) {
+    projectStatus = reason instanceof Error
+      ? `Could not load color schemes: ${reason.message}`
+      : "Could not load color schemes.";
+    return { selectedId: "dark", custom: [] };
+  }
+}
+
+let colorSchemeSettings = loadColorSchemes();
+function selectedColorScheme(): ColorScheme {
+  return [...builtInColorSchemes, ...colorSchemeSettings.custom]
+    .find((scheme) => scheme.id === colorSchemeSettings.selectedId) ?? builtInColorSchemes[0]!;
+}
+applyColorScheme(selectedColorScheme().colors);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -598,7 +738,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 2.0 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.0</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 2.1 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.1</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -629,7 +769,7 @@ app.innerHTML = `
       <div class="graph-toolbar">
         <div class="view-controls">
           <button type="button" class="icon-control" id="open-settings" aria-label="Settings" title="Settings" aria-haspopup="dialog">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm9 4.7v-2.4l-2.2-.6a7.3 7.3 0 0 0-.7-1.7l1.2-1.9-1.7-1.7-1.9 1.2a7.3 7.3 0 0 0-1.7-.7L13.4 3h-2.4l-.6 2.2a7.3 7.3 0 0 0-1.7.7L6.8 4.7 5.1 6.4l1.2 1.9a7.3 7.3 0 0 0-.7 1.7l-2.2.6V13l2.2.6a7.3 7.3 0 0 0 .7 1.7l-1.2 1.9 1.7 1.7 1.9-1.2a7.3 7.3 0 0 0 1.7.7l.6 2.2h2.4l.6-2.2a7.3 7.3 0 0 0 1.7-.7l1.9 1.2 1.7-1.7-1.2-1.9a7.3 7.3 0 0 0 .7-1.7Z"/><circle cx="12" cy="12" r="2" fill="#17212d"/></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm9 4.7v-2.4l-2.2-.6a7.3 7.3 0 0 0-.7-1.7l1.2-1.9-1.7-1.7-1.9 1.2a7.3 7.3 0 0 0-1.7-.7L13.4 3h-2.4l-.6 2.2a7.3 7.3 0 0 0-1.7.7L6.8 4.7 5.1 6.4l1.2 1.9a7.3 7.3 0 0 0-.7 1.7l-2.2.6V13l2.2.6a7.3 7.3 0 0 0 .7 1.7l-1.2 1.9 1.7 1.7 1.9-1.2a7.3 7.3 0 0 0 1.7.7l.6 2.2h2.4l.6-2.2a7.3 7.3 0 0 0 1.7-.7l1.9 1.2 1.7-1.7-1.2-1.9a7.3 7.3 0 0 0 .7-1.7Z"/><circle cx="12" cy="12" r="2" fill="var(--sidebar-bg)"/></svg>
           </button>
           <button type="button" class="icon-control" id="zoom-out" aria-label="Zoom out" title="Zoom out">−</button>
           <button type="button" class="icon-control" id="zoom-in" aria-label="Zoom in" title="Zoom in">+</button>
@@ -646,6 +786,32 @@ app.innerHTML = `
       <h2 id="settings-title">Settings</h2>
       <button type="button" id="close-settings" aria-label="Close settings">×</button>
     </div>
+    <section class="settings-section theme-settings" aria-labelledby="color-scheme-heading">
+      <h3 id="color-scheme-heading">Color scheme</h3>
+      <div class="setting-control">
+        <label for="color-scheme-setting">Choose a scheme</label>
+        <select id="color-scheme-setting"></select>
+      </div>
+      <div class="theme-actions">
+        <button type="button" id="new-color-scheme">Create custom scheme</button>
+        <button type="button" id="delete-color-scheme" hidden>Delete custom scheme</button>
+      </div>
+      <form class="custom-theme-form" id="custom-theme-form" hidden>
+        <label class="theme-name-control" for="custom-theme-name">
+          <span>Scheme name</span>
+          <input id="custom-theme-name" maxlength="40" required />
+        </label>
+        <div class="theme-color-fields">
+          ${themeColorFields.map(([key, label, id]) => `
+            <label for="${id}"><span>${label}</span><input id="${id}" type="color" value="${builtInColorSchemes[0]!.colors[key]}" /></label>
+          `).join("")}
+        </div>
+        <div class="theme-actions">
+          <button type="button" id="cancel-color-scheme">Cancel</button>
+          <button type="submit" id="save-color-scheme">Save scheme</button>
+        </div>
+      </form>
+    </section>
     <section class="settings-section" aria-labelledby="graph-options-heading">
       <h3 id="graph-options-heading">Graph</h3>
       <label class="setting-check" for="show-grid-setting"><span>Show grid</span><input id="show-grid-setting" type="checkbox" /></label>
@@ -751,6 +917,18 @@ function verticalScale(): number {
   return scale / graphOptions.aspectRatio;
 }
 
+function currentThemeColor(name: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(`--${name}`).trim();
+}
+
+function themeColorWithAlpha(name: string, alpha: number): string {
+  const color = currentThemeColor(name);
+  const match = /^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(color);
+  if (!match) throw new Error(`Invalid theme color for --${name}.`);
+  const [red, green, blue] = match.slice(1).map((channel) => Number.parseInt(channel, 16));
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
 function drawGrid(width: number, height: number): void {
   const yScale = verticalScale();
   const originX = width / 2 - centerX * scale;
@@ -782,7 +960,7 @@ function drawGrid(width: number, height: number): void {
       context.moveTo(0, Math.round(y) + 0.5);
       context.lineTo(width, Math.round(y) + 0.5);
     }
-    context.strokeStyle = "rgba(255, 255, 255, 0.22)";
+    context.strokeStyle = themeColorWithAlpha("text", 0.22);
     context.stroke();
   }
 
@@ -797,7 +975,7 @@ function drawGrid(width: number, height: number): void {
     context.moveTo(0, Math.round(zeroY) + 0.5);
     context.lineTo(width, Math.round(zeroY) + 0.5);
   }
-  context.strokeStyle = "rgba(255, 255, 255, 0.72)";
+  context.strokeStyle = themeColorWithAlpha("text", 0.72);
   context.stroke();
 
   if (graphOptions.showLabels && graphOptions.showXAxis) {
@@ -807,7 +985,7 @@ function drawGrid(width: number, height: number): void {
         continue;
       }
       const x = originX + xValue * scale;
-      context.fillStyle = "#ffffff";
+      context.fillStyle = currentThemeColor("text-strong");
       context.fillText(formatTick(xValue), x + 5, Math.min(Math.max(originY + 16, 16), height - 8));
     }
   }
@@ -817,7 +995,7 @@ function drawGrid(width: number, height: number): void {
       yValue <= centerY + height / (2 * yScale); yValue += yStep) {
       const y = originY - yValue * yScale;
       if (Math.abs(yValue) >= yStep / 1000) {
-        context.fillStyle = "#ffffff";
+        context.fillStyle = currentThemeColor("text-strong");
         context.fillText(formatTick(yValue), Math.min(Math.max(originX + 6, 6), width - 36), y - 5);
       }
     }
@@ -1676,7 +1854,7 @@ function drawHoverOverlay(): void {
     pointContext.fillStyle = candidate.color;
     pointContext.fill();
     pointContext.lineWidth = 2;
-    pointContext.strokeStyle = "#ffffff";
+    pointContext.strokeStyle = currentThemeColor("text-strong");
     pointContext.stroke();
   }
 
@@ -1690,7 +1868,7 @@ function drawHoverOverlay(): void {
   let pointX: number | undefined;
   let pointY: number | undefined;
   let label: string | undefined;
-  let color = "#ffffff";
+  let color = currentThemeColor("text-strong");
   if (selected) {
     pointX = selected.screenX - bufferX;
     pointY = selected.screenY - bufferY;
@@ -1723,7 +1901,7 @@ function drawHoverOverlay(): void {
   pointContext.fillStyle = color;
   pointContext.fill();
   pointContext.lineWidth = 2;
-  pointContext.strokeStyle = "#ffffff";
+  pointContext.strokeStyle = currentThemeColor("text-strong");
   pointContext.stroke();
   pointContext.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
   const maxLabelWidth = Math.max(50, bounds.width - 24);
@@ -1734,11 +1912,11 @@ function drawHoverOverlay(): void {
   const boxWidth = Math.min(textWidth + 16, bounds.width - 8);
   const boxX = Math.min(Math.max(pointX + 10, 4), bounds.width - boxWidth - 4);
   const boxY = Math.max(4, pointY - 30);
-  pointContext.fillStyle = "rgba(12, 17, 25, 0.96)";
+  pointContext.fillStyle = themeColorWithAlpha("panel-bg", 0.96);
   pointContext.fillRect(boxX, boxY, boxWidth, 24);
-  pointContext.strokeStyle = "#526276";
+  pointContext.strokeStyle = currentThemeColor("border");
   pointContext.strokeRect(boxX, boxY, boxWidth, 24);
-  pointContext.fillStyle = "#f3f6fa";
+  pointContext.fillStyle = currentThemeColor("text-strong");
   pointContext.fillText(label, boxX + 8, boxY + 16);
 }
 
@@ -1858,7 +2036,7 @@ function draw(): void {
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
   context.clearRect(0, 0, width, height);
-  context.fillStyle = "#101722";
+  context.fillStyle = currentThemeColor("app-bg");
   context.fillRect(0, 0, width, height);
   const candidates: PointCandidate[] = [];
   const explicitCurves: ExplicitCurveData[] = [];
@@ -2001,14 +2179,14 @@ function draw(): void {
     context.arc(screenX, screenY, 4, 0, Math.PI * 2);
     context.fillStyle = point.color;
     context.fill();
-    context.strokeStyle = "#ffffff";
+    context.strokeStyle = currentThemeColor("text-strong");
     context.lineWidth = 1.5;
     context.stroke();
     context.restore();
   }
   for (const { table, values } of tableData) {
     context.fillStyle = table.color;
-    context.strokeStyle = "#ffffff";
+    context.strokeStyle = currentThemeColor("text-strong");
     context.lineWidth = 1.5;
     for (let index = 0; index < values.x.length; index += 1) {
       const screenX = width / 2 + (values.x[index]! - centerX) * scale;
@@ -3775,6 +3953,139 @@ document.querySelector("#open-settings")!.addEventListener("click", () => settin
 document.querySelector("#close-settings")!.addEventListener("click", () => settingsDialog.close());
 settingsDialog.addEventListener("keydown", (event) => {
   if (event.key === "Escape") settingsDialog.close();
+});
+
+const colorSchemeSelect = document.querySelector<HTMLSelectElement>("#color-scheme-setting")!;
+const customThemeForm = document.querySelector<HTMLFormElement>("#custom-theme-form")!;
+const customThemeName = document.querySelector<HTMLInputElement>("#custom-theme-name")!;
+let editingColorSchemeId: string | undefined;
+
+function getCustomThemeColors(): ThemeColors {
+  const colorsToRead = { ...selectedColorScheme().colors };
+  for (const [key, , id] of themeColorFields) {
+    colorsToRead[key] = document.querySelector<HTMLInputElement>(`#${id}`)!.value;
+  }
+  return colorsToRead;
+}
+
+function fillCustomThemeForm(scheme: ColorScheme): void {
+  customThemeName.value = scheme.name;
+  for (const [key, , id] of themeColorFields) {
+    document.querySelector<HTMLInputElement>(`#${id}`)!.value = scheme.colors[key];
+  }
+}
+
+function persistColorSchemes(): void {
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify(colorSchemeSettings));
+  } catch (reason) {
+    setProjectStatus(reason instanceof Error
+      ? `Could not save color schemes: ${reason.message}`
+      : "Could not save color schemes.");
+  }
+}
+
+function updateColorSchemeControls(): void {
+  colorSchemeSelect.replaceChildren();
+  const presets = document.createElement("optgroup");
+  presets.label = "Built-in schemes";
+  for (const scheme of builtInColorSchemes) {
+    const option = new Option(scheme.name, scheme.id);
+    presets.append(option);
+  }
+  colorSchemeSelect.append(presets);
+  if (colorSchemeSettings.custom.length > 0) {
+    const custom = document.createElement("optgroup");
+    custom.label = "Your schemes";
+    for (const scheme of colorSchemeSettings.custom) {
+      custom.append(new Option(scheme.name, scheme.id));
+    }
+    colorSchemeSelect.append(custom);
+  }
+  colorSchemeSelect.value = colorSchemeSettings.selectedId;
+  const isCustom = colorSchemeSettings.custom.some(
+    (scheme) => scheme.id === colorSchemeSettings.selectedId,
+  );
+  document.querySelector<HTMLButtonElement>("#delete-color-scheme")!.hidden = !isCustom;
+  document.querySelector<HTMLButtonElement>("#new-color-scheme")!.textContent =
+    isCustom ? "Edit selected custom scheme" : "Create custom scheme";
+}
+
+updateColorSchemeControls();
+colorSchemeSelect.addEventListener("change", () => {
+  colorSchemeSettings.selectedId = colorSchemeSelect.value;
+  applyColorScheme(selectedColorScheme().colors);
+  draw();
+  updateColorSchemeControls();
+  persistColorSchemes();
+});
+document.querySelector("#new-color-scheme")!.addEventListener("click", () => {
+  const current = selectedColorScheme();
+  editingColorSchemeId = colorSchemeSettings.custom.some((scheme) => scheme.id === current.id)
+    ? current.id
+    : undefined;
+  fillCustomThemeForm(editingColorSchemeId ? current : {
+    id: "",
+    name: "My color scheme",
+    colors: current.colors,
+  });
+  customThemeForm.hidden = false;
+  customThemeName.focus();
+});
+document.querySelector("#cancel-color-scheme")!.addEventListener("click", () => {
+  customThemeForm.hidden = true;
+  editingColorSchemeId = undefined;
+  applyColorScheme(selectedColorScheme().colors);
+  draw();
+});
+for (const [, , id] of themeColorFields) {
+  document.querySelector<HTMLInputElement>(`#${id}`)!.addEventListener("input", () => {
+    applyColorScheme(getCustomThemeColors());
+    draw();
+  });
+}
+customThemeForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const name = customThemeName.value.trim();
+  if (!name) {
+    customThemeName.setCustomValidity("Enter a name for this color scheme.");
+    customThemeName.reportValidity();
+    return;
+  }
+  customThemeName.setCustomValidity("");
+  const colorsToSave = getCustomThemeColors();
+  let id = editingColorSchemeId ?? `custom-${Date.now()}`;
+  while (!editingColorSchemeId &&
+      [...builtInColorSchemes, ...colorSchemeSettings.custom].some((scheme) => scheme.id === id)) {
+    id = `custom-${Number(id.slice("custom-".length)) + 1}`;
+  }
+  const scheme = { id, name, colors: colorsToSave };
+  const index = colorSchemeSettings.custom.findIndex((custom) => custom.id === id);
+  if (index >= 0) colorSchemeSettings.custom[index] = scheme;
+  else if (colorSchemeSettings.custom.length < 30) colorSchemeSettings.custom.push(scheme);
+  else {
+    setProjectStatus("You can save up to 30 custom color schemes.");
+    return;
+  }
+  colorSchemeSettings.selectedId = scheme.id;
+  editingColorSchemeId = undefined;
+  customThemeForm.hidden = true;
+  applyColorScheme(scheme.colors);
+  draw();
+  updateColorSchemeControls();
+  persistColorSchemes();
+});
+document.querySelector("#delete-color-scheme")!.addEventListener("click", () => {
+  const selected = selectedColorScheme();
+  if (!colorSchemeSettings.custom.some((scheme) => scheme.id === selected.id) ||
+      !window.confirm(`Delete the "${selected.name}" color scheme?`)) return;
+  colorSchemeSettings.custom = colorSchemeSettings.custom.filter((scheme) => scheme.id !== selected.id);
+  colorSchemeSettings.selectedId = "dark";
+  customThemeForm.hidden = true;
+  applyColorScheme(selectedColorScheme().colors);
+  draw();
+  updateColorSchemeControls();
+  persistColorSchemes();
 });
 
 function updateGraphOptionControls(): void {

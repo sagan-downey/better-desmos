@@ -4,7 +4,7 @@ A browser-based graphing calculator built with TypeScript and Vite. Its small st
 
 ## Versioning
 
-The current app version is **2.0**. Keep the package version in `package.json` in sync as `2.0.0`.
+The current app version is **2.1**. Keep the package version in `package.json` in sync as `2.1.0`.
 
 ## Run locally
 
@@ -78,6 +78,8 @@ Operations involving `pi`, `e`, variables, or transcendental functions use `deci
 Expressions are parsed once and reused until edited. Open the gear-shaped **Settings** control over the graph to show or hide the grid, x- and y-axes, and axis numbers, or change the ratio of the axes' screen scales. Equal units (1:1) is the default; changing the ratio changes how graph shapes are displayed. These graph display preferences are saved with projects. The same menu contains the accuracy and performance controls. The vertical icon stack provides Settings, zoom out, zoom in, and reset view (home) in that order. Drag the graph to pan.
 
 ## Accuracy and performance controls
+
+Open **Settings** to choose a color scheme. Dark is the default, with Light, Ocean, Forest, Sunset, Rose, Lavender, and High contrast also included. Create and save custom schemes by choosing colors for the graph background, workspace surfaces, text, accent, and borders. The selected scheme and custom schemes are saved in this browser, separately from project files.
 
 Open **Settings** and expand **Accuracy & performance** to adjust:
 
