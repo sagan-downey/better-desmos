@@ -742,6 +742,8 @@ let nextTickerId = Math.max(0, ...tickers.map((ticker) => ticker.id)) + 1;
 let centerX = initialProject?.centerX ?? 0;
 let centerY = initialProject?.centerY ?? 0;
 let scale = initialProject?.scale ?? 48;
+let renderedView = { centerX, centerY, scale };
+let zoomRedrawTimer: number | undefined;
 const tableValuesCache = new WeakMap<DataTable, { x: number[]; y: number[]; error?: string }>();
 const tableRevisions = new WeakMap<DataTable, number>();
 const explicitEvaluationCaches = new WeakMap<
@@ -837,7 +839,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 2.7 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.7</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 2.8 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.8</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -2404,6 +2406,40 @@ function draw(): void {
       performanceProfile.drawTimes.shift();
     }
   }
+  canvas.style.transform = "";
+  renderedView = { centerX, centerY, scale };
+  if (zoomRedrawTimer !== undefined) {
+    window.clearTimeout(zoomRedrawTimer);
+    zoomRedrawTimer = undefined;
+  }
+}
+
+function previewZoom(factor: number, anchorX: number, anchorY: number): void {
+  const bounds = canvasWrap.getBoundingClientRect();
+  const graphWidth = bounds.width * GRAPH_BUFFER_SCALE;
+  const graphHeight = bounds.height * GRAPH_BUFFER_SCALE;
+  const previousScale = scale;
+  const graphX = (anchorX - graphWidth / 2) / previousScale + centerX;
+  const graphY = (graphHeight / 2 - anchorY) / verticalScale() + centerY;
+  scale = Math.min(100_000, Math.max(0.001, scale * factor));
+  centerX = graphX - (anchorX - graphWidth / 2) / scale;
+  centerY = graphY - (graphHeight / 2 - anchorY) / verticalScale();
+
+  const visualScale = scale / renderedView.scale;
+  const translateX = graphWidth / 2 * (1 - visualScale) +
+    (renderedView.centerX - centerX) * scale;
+  const translateY = graphHeight / 2 * (1 - visualScale) +
+    (centerY - renderedView.centerY) * verticalScale();
+  canvas.style.transformOrigin = "0 0";
+  canvas.style.transform =
+    `matrix(${visualScale}, 0, 0, ${visualScale}, ${translateX}, ${translateY})`;
+  pointContext.clearRect(0, 0, bounds.width, bounds.height);
+
+  if (zoomRedrawTimer !== undefined) window.clearTimeout(zoomRedrawTimer);
+  zoomRedrawTimer = window.setTimeout(() => {
+    zoomRedrawTimer = undefined;
+    draw();
+  }, 90);
 }
 
 function scheduleDraw(): void {
@@ -4694,12 +4730,12 @@ workspaceAdd.addEventListener("change", () => {
   workspaceAdd.value = "";
 });
 document.querySelector("#zoom-in")!.addEventListener("click", () => {
-  scale = Math.min(scale * 1.25, 100_000);
-  draw();
+  const bounds = canvasWrap.getBoundingClientRect();
+  previewZoom(1.25, bounds.width * GRAPH_BUFFER_SCALE / 2, bounds.height * GRAPH_BUFFER_SCALE / 2);
 });
 document.querySelector("#zoom-out")!.addEventListener("click", () => {
-  scale = Math.max(scale / 1.25, 0.001);
-  draw();
+  const bounds = canvasWrap.getBoundingClientRect();
+  previewZoom(1 / 1.25, bounds.width * GRAPH_BUFFER_SCALE / 2, bounds.height * GRAPH_BUFFER_SCALE / 2);
 });
 document.querySelector("#reset-view")!.addEventListener("click", () => {
   centerX = 0;
@@ -5119,16 +5155,9 @@ canvas.addEventListener("pointerleave", () => {
 canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
   const bounds = canvasWrap.getBoundingClientRect();
-  const graphWidth = bounds.width * GRAPH_BUFFER_SCALE;
-  const graphHeight = bounds.height * GRAPH_BUFFER_SCALE;
   const mouseX = event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS;
   const mouseY = event.clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS;
-  const beforeX = (mouseX - graphWidth / 2) / scale + centerX;
-  const beforeY = (graphHeight / 2 - mouseY) / verticalScale() + centerY;
-  scale = Math.min(100_000, Math.max(0.001, scale * (event.deltaY < 0 ? 1.12 : 1 / 1.12)));
-  centerX = beforeX - (mouseX - graphWidth / 2) / scale;
-  centerY = beforeY - (graphHeight / 2 - mouseY) / verticalScale();
-  scheduleDraw();
+  previewZoom(event.deltaY < 0 ? 1.12 : 1 / 1.12, mouseX, mouseY);
 }, { passive: false });
 
 window.addEventListener("resize", draw);
