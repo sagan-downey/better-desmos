@@ -217,6 +217,7 @@ interface HoverState {
 
 const CONTOUR_EDGES = [[0, 1], [1, 2], [2, 3], [3, 0]] as const;
 const MAX_AXIS_INTERCEPTS_PER_CURVE = 10;
+const ZOOM_REDRAW_DELAY_MS = 200;
 const colors = ["#55d6be", "#ff8c69", "#8da7ff", "#f0c75e", "#d18cff"];
 let projectStatus = "";
 const PROJECT_STORAGE_KEY = "better-desmos-project-v1";
@@ -845,7 +846,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 2.10 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.10</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 2.11 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.11</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -2422,6 +2423,10 @@ function draw(): void {
 }
 
 function previewZoom(factor: number, anchorX: number, anchorY: number): void {
+  if (drawFrame !== undefined) {
+    window.cancelAnimationFrame(drawFrame);
+    drawFrame = undefined;
+  }
   const bounds = canvasWrap.getBoundingClientRect();
   const graphWidth = bounds.width * GRAPH_BUFFER_SCALE;
   const graphHeight = bounds.height * GRAPH_BUFFER_SCALE;
@@ -2446,7 +2451,7 @@ function previewZoom(factor: number, anchorX: number, anchorY: number): void {
   zoomRedrawTimer = window.setTimeout(() => {
     zoomRedrawTimer = undefined;
     draw();
-  }, 90);
+  }, ZOOM_REDRAW_DELAY_MS);
 }
 
 function scheduleDraw(): void {
