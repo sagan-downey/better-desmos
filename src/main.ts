@@ -1,4 +1,5 @@
 import {
+  compileExpression,
   compileFastGraphExpression,
   compileGraphExpression,
   compileTickerAction,
@@ -57,6 +58,14 @@ interface Expression {
   compiled?: CompiledGraph;
   compileError?: string;
   evaluationError?: string;
+  definitionText?: string;
+  definition?: {
+    target: string;
+    source: string;
+    value?: number;
+    display?: string;
+    error?: string;
+  } | null;
 }
 
 interface TableRow {
@@ -828,7 +837,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 2.6 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.6</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 2.7 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.7</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -2133,6 +2142,7 @@ function drawInequality(
 }
 
 function draw(): void {
+  synchronizeVariableDefinitions();
   const profileStart = performanceProfile.enabled ? performance.now() : 0;
   const bounds = canvasWrap.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
@@ -2159,6 +2169,9 @@ function draw(): void {
     graphId: string;
     opacity: number;
   }> = [];
+  const fixedVariables = new Set(expressions
+    .map((entry) => getVariableDefinition(entry)?.target)
+    .filter((name): name is string => Boolean(name)));
   for (const expression of expressions) {
     if (expression.hidden) continue;
     const graph = getCompiled(expression);
@@ -2188,11 +2201,14 @@ function draw(): void {
           dpr,
           1,
         );
+        const xVariables = graph.xVariables.filter((name) => !fixedVariables.has(name));
+        const yVariables = graph.yVariables.filter((name) => !fixedVariables.has(name));
         nextDraggableGraphPoints.push({
           expressionId: expression.id,
-          draggable: expression.draggable !== false,
-          xVariables: graph.xVariables,
-          yVariables: graph.yVariables,
+          draggable: expression.draggable !== false &&
+            (xVariables.length > 0 || yVariables.length > 0),
+          xVariables,
+          yVariables,
           x,
           y,
           screenX,
@@ -2409,6 +2425,11 @@ function getCompiled(expression: Expression): CompiledGraph | undefined {
     expression.compiled = undefined;
     expression.compileError = undefined;
     expression.evaluationError = undefined;
+    const definition = getVariableDefinition(expression);
+    if (definition) {
+      expression.compileError = definition.error;
+      return undefined;
+    }
     try {
       expression.compiled = graphMode === "desmos"
         ? compileFastGraphExpression(expression.text, sliderValues)
@@ -2418,6 +2439,158 @@ function getCompiled(expression: Expression): CompiledGraph | undefined {
     }
   }
   return expression.compiled;
+}
+
+function getVariableDefinition(
+  expression: Expression,
+): NonNullable<Expression["definition"]> | undefined {
+  if (expression.definitionText !== expression.text) {
+    expression.definitionText = expression.text;
+    expression.definition = null;
+  }
+  if (expression.definition) return expression.definition;
+  const match = /^\s*([a-z](?:_[a-z0-9]+)?)\s*=\s*(.+)\s*$/i.exec(expression.text);
+  if (!match) return undefined;
+  const target = match[1]!.toLowerCase();
+  if (["e", "x", "y", "t"].includes(target)) return undefined;
+  expression.definition = { target, source: match[2]! };
+  return expression.definition;
+}
+
+function synchronizeVariableDefinitions(): {
+  definitions: NonNullable<Expression["definition"]>[];
+  sliders: string[];
+} {
+  const reserved = new Set([
+    "x", "y", "t", "pi", "e", "sqrt", "sin", "cos", "tan", "asin", "acos",
+    "atan", "ln", "log", "exp", "abs", "floor", "ceil", "parametric", "polar",
+    "derivative", "integral", "list", "sum", "product", "min", "max", "mean",
+    "median", "variance", "stdev", "factorial",
+  ]);
+  const definitions = expressions
+    .map((expression) => getVariableDefinition(expression))
+    .filter((definition): definition is NonNullable<Expression["definition"]> => Boolean(definition));
+  const definitionNames = new Set(definitions.map(({ target }) => target));
+  const counts = new Map<string, number>();
+  for (const { target } of definitions) counts.set(target, (counts.get(target) ?? 0) + 1);
+  for (const definition of definitions) {
+    definition.value = undefined;
+    definition.display = undefined;
+    definition.error = counts.get(definition.target)! > 1
+      ? `"${definition.target}" is defined more than once.`
+      : undefined;
+  }
+
+  const sources = expressions.flatMap((expression) => [
+    expression.text,
+    expression.hsv?.hue ?? "",
+    expression.hsv?.saturation ?? "",
+    expression.hsv?.value ?? "",
+  ]).concat(tickers.map((ticker) => ticker.action));
+  const sliders = [...new Set(sources.flatMap((source) =>
+    source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? []
+  ).map((name) => name.toLowerCase()).filter((name) =>
+    /^[a-z](?:_[a-z0-9]+)?$/.test(name) && !reserved.has(name) &&
+    !definitionNames.has(name)))].sort();
+  for (const name of sliders) {
+    sliderValues[name] ??= 1;
+    sliderOptions[name] ??= { min: -10, max: 10, speed: 1 };
+  }
+  const byName = new Map(definitions.map((definition) => [definition.target, definition]));
+  const state = new Map<string, "resolving" | "resolved" | "failed">();
+  const availableNames = [...new Set([...sliders, ...definitionNames])];
+  const evaluateDefinition = (definition: NonNullable<Expression["definition"]>): void => {
+    const currentState = state.get(definition.target);
+    if (currentState === "resolved" || currentState === "failed") return;
+    if (currentState === "resolving") {
+      definition.error = `Circular definition involving "${definition.target}".`;
+      state.set(definition.target, "failed");
+      return;
+    }
+    if (definition.error) {
+      state.set(definition.target, "failed");
+      return;
+    }
+    state.set(definition.target, "resolving");
+    const references = (definition.source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [])
+      .map((name) => name.toLowerCase());
+    if (references.some((name) => ["x", "y", "t"].includes(name))) {
+      definition.error = "Variable definitions must not depend on x, y, or t.";
+      state.set(definition.target, "failed");
+      return;
+    }
+    const unknown = references.find((name) => !reserved.has(name) && !availableNames.includes(name));
+    if (unknown) {
+      definition.error = `Unknown variable "${unknown}" in definition of "${definition.target}".`;
+      state.set(definition.target, "failed");
+      return;
+    }
+    for (const name of references) {
+      const dependency = byName.get(name);
+      if (dependency) {
+        evaluateDefinition(dependency);
+        if (dependency.error) {
+          definition.error = dependency.error.startsWith("Circular definition")
+            ? dependency.error
+            : `Cannot evaluate "${definition.target}" because ${dependency.error}`;
+          state.set(definition.target, "failed");
+          return;
+        }
+      }
+    }
+    try {
+      const variables = Object.fromEntries(availableNames.map((name) => [
+        name,
+        sliderValues[name] ?? 0,
+      ]));
+      const result = compileExpression(definition.source, variables)(0);
+      const value = result.value.toNumber();
+      if (!Number.isFinite(value)) throw new Error("Definition must produce a finite number.");
+      definition.value = value;
+      definition.display = result.value.toString();
+      sliderValues[definition.target] = value;
+      state.set(definition.target, "resolved");
+    } catch (reason) {
+      definition.error = reason instanceof Error ? reason.message : "Could not evaluate definition.";
+      state.set(definition.target, "failed");
+    }
+  };
+  for (const definition of definitions) evaluateDefinition(definition);
+  for (const definition of definitions) {
+    if (definition.error) sliderValues[definition.target] = Number.NaN;
+  }
+
+  for (const expression of expressions) {
+    const definition = getVariableDefinition(expression);
+    if (!definition) continue;
+    expression.compileError = definition.error;
+    expression.compiled = undefined;
+    const error = expressionList.querySelector<HTMLElement>(
+      `[data-expression-error-id="${expression.id}"]`,
+    );
+    if (error) {
+      error.textContent = definition.error ?? "";
+      const input = error.parentElement?.querySelector<HTMLInputElement>(
+        `input[aria-label^="Expression "]`,
+      );
+      if (input) input.setAttribute("aria-invalid", String(Boolean(definition.error)));
+    }
+  }
+  for (const element of sliderList.querySelectorAll<HTMLElement>("[data-slider-definition]")) {
+    const definition = byName.get(element.dataset.sliderDefinition ?? "");
+    if (definition) {
+      element.textContent = definition.error
+        ? `${definition.target} = invalid`
+        : `${definition.target} = ${definition.display}`;
+      element.title = definition.error ?? "";
+      if (definition.error) {
+        element.setAttribute("aria-label", `${definition.target} definition error: ${definition.error}`);
+      } else {
+        element.removeAttribute("aria-label");
+      }
+    }
+  }
+  return { definitions, sliders };
 }
 
 function cachedExplicitEvaluator(
@@ -2554,28 +2727,16 @@ if (import.meta.env.DEV) {
 }
 
 function sliderNames(): string[] {
-  const reserved = new Set([
-    "x", "y", "t", "pi", "e", "sqrt", "sin", "cos", "tan", "asin", "acos",
-    "atan", "ln", "log", "exp", "abs", "floor", "ceil", "parametric", "polar", "derivative", "integral",
-    "list", "sum", "product", "min", "max", "mean", "median", "variance", "stdev", "factorial",
-  ]);
-  return [...new Set(expressions.flatMap((expression) =>
-    [expression.text, expression.hsv?.hue ?? "",
-      expression.hsv?.saturation ?? "", expression.hsv?.value ?? ""]
-      .flatMap((source) => source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [])
-  ).concat(tickers.flatMap((ticker) =>
-    ticker.action.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? []
-  )).map((name) => name.toLowerCase()).filter((name) =>
-    /^[a-z](?:_[a-z0-9]+)?$/.test(name) && !reserved.has(name)))].sort();
+  return synchronizeVariableDefinitions().sliders;
 }
 
 function renderSliders(): void {
   sliderList.replaceChildren();
-  const names = sliderNames();
+  const { definitions, sliders: names } = synchronizeVariableDefinitions();
   for (const name of sliderAnimations.keys()) {
     if (!names.includes(name)) stopSliderAnimation(name);
   }
-  if (names.length === 0) {
+  if (names.length === 0 && definitions.length === 0) {
     sliderList.hidden = true;
     return;
   }
@@ -2584,8 +2745,23 @@ function renderSliders(): void {
   heading.textContent = "Sliders";
   const help = document.createElement("p");
   help.className = "slider-help";
-  help.textContent = "Play animates this parameter back and forth. Fast mode favors smoother playback; higher detail may update more slowly.";
+  help.textContent = names.length > 0
+    ? "Play animates this parameter back and forth. Fast mode favors smoother playback; higher detail may update more slowly."
+    : "These parameter values are defined by expressions.";
   sliderList.append(heading, help);
+  for (const definition of definitions) {
+    const fixedValue = document.createElement("div");
+    fixedValue.className = "slider-definition";
+    fixedValue.dataset.sliderDefinition = definition.target;
+    fixedValue.textContent = definition.error
+      ? `${definition.target} = invalid`
+      : `${definition.target} = ${definition.display}`;
+    if (definition.error) {
+      fixedValue.title = definition.error;
+      fixedValue.setAttribute("aria-label", `${definition.target} definition error: ${definition.error}`);
+    }
+    sliderList.append(fixedValue);
+  }
   for (const name of names) {
     sliderValues[name] ??= 1;
     sliderOptions[name] ??= { min: -10, max: 10, speed: 1 };
@@ -2798,6 +2974,10 @@ function startTicker(ticker: Ticker): void {
   let action: ReturnType<typeof compileTickerAction>;
   try {
     action = compileTickerAction(ticker.action, sliderValues);
+    if (expressions.some((expression) =>
+      getVariableDefinition(expression)?.target === action.target)) {
+      throw new Error(`"${action.target}" is defined by an expression and cannot be changed by a ticker.`);
+    }
   } catch (reason) {
     ticker.error = reason instanceof Error ? reason.message : "Could not start ticker.";
     renderTickers();
@@ -3250,6 +3430,7 @@ function renderExpressions(): void {
     input.setAttribute("aria-label", `Expression ${index + 1}`);
     const error = document.createElement("p");
     error.className = "expression-error";
+    error.dataset.expressionErrorId = String(expression.id);
     getCompiled(expression);
     if (!expression.compileError && !expression.evaluationError) {
       error.textContent = "";

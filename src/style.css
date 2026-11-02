@@ -149,6 +149,7 @@ button { color: inherit; }
 .sliders-panel[hidden] { display: none; }
 .sliders-panel h2 { margin: 0 0 4px; color: var(--text-secondary); font-size: 12px; }
 .slider-help { margin: 0 0 8px; color: var(--muted-text); font-size: 9px; line-height: 1.4; }
+.slider-definition { margin: 4px 0; color: var(--text-secondary); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .slider-row { display: grid; grid-template-columns: minmax(0, 7ch) 42px minmax(0, 1fr) 58px; align-items: center; gap: 5px; margin: 4px 0; color: var(--accent-soft); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .slider-name { min-width: 0; overflow: hidden; white-space: nowrap; }
 .slider-name-text { display: inline-block; }
