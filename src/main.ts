@@ -26,6 +26,7 @@ import {
   type PolynomialRegression,
   type TrigonometricRegression,
 } from "./math";
+import { BoundedCache, referencedVariableSignature, SegmentIndex, selectHoverPoint, tangentBranchRange, tangentPixelCoverage } from "./performance";
 import "./style.css";
 
 type CompiledGraph = GraphExpression;
@@ -69,6 +70,8 @@ interface Expression {
     value?: number;
     display?: string;
     error?: string;
+    evaluatorKey?: string;
+    evaluator?: (x: number) => Evaluation;
   } | null;
   scalarText?: string;
   scalarEvaluator?: () => Evaluation | number;
@@ -205,6 +208,7 @@ interface CurveGeometry {
   segments: number[];
   colorAt?: (x: number, y: number) => string;
   sideways?: boolean;
+  hoverPoint?: (x: number, y: number) => { x: number; y: number };
 }
 
 interface ExplicitCurveData extends CurveGeometry {
@@ -758,11 +762,15 @@ const explicitEvaluationCaches = new WeakMap<
   Expression,
   {
     key: string;
-    values: Map<number, { value: number } | { error: string }>;
-    cacheable: boolean;
+    values: BoundedCache<number, { value: number } | { error: string }>;
   }
 >();
-const MAX_EXPRESSION_SAMPLE_CACHE_SIZE = 4_096;
+const MAX_EXPRESSION_SAMPLE_CACHE_SIZE = 32_768;
+const expressionCurveCaches = new WeakMap<Expression, {
+  key: string;
+  curve: ExplicitCurveData;
+  path: Path2D;
+}>();
 interface PerformanceProfile {
   enabled: boolean;
   cacheEnabled: boolean;
@@ -840,6 +848,7 @@ let drag: {
 let hoverPosition: HoverState | undefined;
 let hoverCandidates: PointCandidate[] = [];
 let hoverCurves: CurveGeometry[] = [];
+let hoverSegmentIndex: SegmentIndex<CurveGeometry> | undefined;
 let draggableGraphPoints: DraggableGraphPoint[] = [];
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -847,7 +856,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 2.12 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.12</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 2.13 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.13</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -1449,7 +1458,36 @@ function drawExplicitCurve(
   lineWidth = 2,
   opacity = 1,
   sideways = false,
+  expression?: Expression,
+  tangent?: () => { slope: number; offset: number },
 ): ExplicitCurveData {
+  const source = expression ? expandFunctions(expression.text) : "";
+  const cacheKey = expression ? `${graphMode}:${getPrecisionDigits()}:${source}:${
+    referencedVariableSignature(source, sliderValues)
+  }:${centerX}:${centerY}:${scale}:${graphOptions.aspectRatio}:${width}:${height}:${
+    graphSettings.explicitSampleSpacing
+  }:${sideways}` : "";
+  const cached = expression && performanceProfile.cacheEnabled
+    ? expressionCurveCaches.get(expression)
+    : undefined;
+  if (cached?.key === cacheKey) {
+    const curve = cached.curve;
+    curve.id = id;
+    curve.color = color;
+    curve.colorAt = colorAt;
+    if (colorAt) {
+      strokeColoredSegments(curve, colorAt, width, height, lineWidth, opacity);
+    } else {
+      context.save();
+      context.globalAlpha = opacity;
+      context.strokeStyle = color;
+      context.lineWidth = lineWidth;
+      context.stroke(cached.path);
+      context.restore();
+    }
+    return curve;
+  }
+  const path = new Path2D();
   const samples: GraphSample[] = [];
   const geometry: ExplicitCurveData = { id, color, samples, segments: [], colorAt, sideways };
   const yScale = verticalScale();
@@ -1459,12 +1497,138 @@ function drawExplicitCurve(
   const coordinateAt = (screenParameter: number) => sideways
     ? (height / 2 - screenParameter) / yScale + centerY
     : (screenParameter - width / 2) / scale + centerX;
+  if (tangent) {
+    const { slope, offset } = tangent();
+    if (slope !== 0) {
+      if (!Number.isFinite(slope) || !Number.isFinite(offset)) {
+        throw new Error("Tangent phase must have finite coefficients.");
+      }
+      const outputAt = (pixel: number) => sideways
+        ? (pixel - width / 2) / scale + centerX
+        : (height / 2 - pixel) / yScale + centerY;
+      const pointAt = (pixel: number, branch: number) => {
+        const output = outputAt(pixel);
+        const parameter = (Math.atan(output) + branch * Math.PI - offset) / slope;
+        return sideways
+          ? { x: pixel, y: height / 2 - (parameter - centerY) * yScale }
+          : { x: width / 2 + (parameter - centerX) * scale, y: pixel };
+      };
+      const period = Math.PI / Math.abs(slope) * (sideways ? yScale : scale);
+      if (period <= Math.min(lineWidth, 0.5)) {
+        // Every cross-section is covered by overlapping strokes; opacity is applied once per path.
+        const alpha = tangentPixelCoverage(period, lineWidth, opacity);
+        geometry.hoverPoint = (x, y) => {
+          const pixel = sideways ? x : y;
+          const parameter = coordinateAt(sideways ? y : x);
+          const branch = Math.round((slope * parameter + offset - Math.atan(outputAt(pixel))) / Math.PI);
+          if (!Number.isSafeInteger(branch)) return { x, y };
+          return pointAt(pixel, branch);
+        };
+        context.save();
+        try {
+          if (!colorAt) {
+            context.globalAlpha = alpha;
+            context.fillStyle = color;
+            context.fillRect(0, 0, width, height);
+          } else {
+            const dpr = window.devicePixelRatio || 1;
+            const raster = document.createElement("canvas");
+            raster.width = Math.max(1, Math.round(width * dpr));
+            raster.height = Math.max(1, Math.round(height * dpr));
+            const rasterContext = raster.getContext("2d");
+            if (!rasterContext) throw new Error("Could not create dense tangent coverage canvas.");
+            const pixels = rasterContext.createImageData(raster.width, raster.height);
+            for (let row = 0;row < raster.height;row += 1) {
+              const worldY = (height / 2 - (row + 0.5) / dpr) / yScale + centerY;
+              for (let column = 0;column < raster.width;column += 1) {
+                const worldX = ((column + 0.5) / dpr - width / 2) / scale + centerX;
+                const hex = colorAt(worldX, worldY);
+                const value = Number.parseInt(hex.slice(1), 16);
+                const index = (row * raster.width + column) * 4;
+                pixels.data[index] = value >> 16;
+                pixels.data[index + 1] = (value >> 8) & 255;
+                pixels.data[index + 2] = value & 255;
+                pixels.data[index + 3] = Math.round(alpha * 255);
+              }
+            }
+            rasterContext.putImageData(pixels, 0, 0);
+            context.drawImage(raster, 0, 0, width, height);
+          }
+        } finally {
+          context.restore();
+        }
+        return geometry;
+      }
+      const range = tangentBranchRange(slope, offset, coordinateAt(0), coordinateAt(parameterLength));
+      const appendInterval = (
+        first: { x: number; y: number }, second: { x: number; y: number },
+        from: number, to: number, branch: number, depth: number,
+      ): void => {
+        const midpoint = pointAt((from + to) / 2, branch);
+        const error = sideways
+          ? Math.abs(midpoint.y - (first.y + second.y) / 2)
+          : Math.abs(midpoint.x - (first.x + second.x) / 2);
+        if (depth < 16 && (error > 0.25 || (depth < 2))) {
+          appendInterval(first, midpoint, from, (from + to) / 2, branch, depth + 1);
+          appendInterval(midpoint, second, (from + to) / 2, to, branch, depth + 1);
+        } else {
+          path.lineTo(second.x, second.y);
+          geometry.segments.push(first.x, first.y, second.x, second.y);
+        }
+      };
+      for (let branch = range.first; branch <= range.last; branch += 1) {
+        const first = pointAt(0, branch);
+        const second = pointAt(outputLength, branch);
+        if (sideways
+          ? Math.max(first.y, second.y) < 0 || Math.min(first.y, second.y) > height
+          : Math.max(first.x, second.x) < 0 || Math.min(first.x, second.x) > width) continue;
+        path.moveTo(first.x, first.y);
+        // Split at output zero so the symmetric tangent midpoint cannot conceal curvature.
+        const zeroPixel = sideways ? width / 2 - centerX * scale : height / 2 + centerY * yScale;
+        if (zeroPixel > 0 && zeroPixel < outputLength) {
+          const zero = pointAt(zeroPixel, branch);
+          appendInterval(first, zero, 0, zeroPixel, branch, 0);
+          appendInterval(zero, second, zeroPixel, outputLength, branch, 0);
+        } else {
+          appendInterval(first, second, 0, outputLength, branch, 0);
+        }
+      }
+      let previousBranch: number | undefined;
+      for (let pixel = 0; pixel <= parameterLength; pixel += graphSettings.explicitSampleSpacing) {
+        const parameter = coordinateAt(pixel);
+        const branch = Math.floor((slope * parameter + offset + Math.PI / 2) / Math.PI);
+        const output = evaluate(parameter);
+        const screenX = sideways ? width / 2 + (output - centerX) * scale : pixel;
+        const screenY = sideways ? pixel : height / 2 - (output - centerY) * yScale;
+        samples.push({
+          x: sideways ? output : parameter,
+          y: sideways ? parameter : output,
+          screenX,
+          screenY,
+          connected: branch === previousBranch && Number.isFinite(screenX) && Number.isFinite(screenY),
+        });
+        previousBranch = branch;
+      }
+      context.save();
+      if (colorAt) strokeColoredSegments(geometry, colorAt, width, height, lineWidth, opacity);
+      else {
+        context.globalAlpha = opacity;
+        context.strokeStyle = color;
+        context.lineWidth = lineWidth;
+        context.stroke(path);
+      }
+      context.restore();
+      if (expression && performanceProfile.cacheEnabled) {
+        expressionCurveCaches.set(expression, { key: cacheKey, curve: geometry, path });
+      }
+      return geometry;
+    }
+  }
   context.save();
   context.globalAlpha = opacity;
   if (!colorAt) {
     context.strokeStyle = color;
     context.lineWidth = lineWidth;
-    context.beginPath();
   }
   const sampleAt = (parameter: number, screenParameter: number): GraphSample => {
     try {
@@ -1490,9 +1654,11 @@ function drawExplicitCurve(
     first: GraphSample,
     second: GraphSample,
     depth: number,
-  ): GraphSample[] => {
+    output: GraphSample[],
+  ): void => {
     if (depth >= 10) {
-      return [second];
+      output.push(second);
+      return;
     }
 
     const firstOutput = sideways ? first.screenX : first.screenY;
@@ -1511,7 +1677,8 @@ function drawExplicitCurve(
     const midpointValid = Number.isFinite(midpointOutput) &&
       midpointOutput >= -outputLength * 2 && midpointOutput <= outputLength * 3;
     if (![firstOutput, secondOutput, midpointOutput].some(Number.isFinite)) {
-      return [second];
+      output.push(second);
+      return;
     }
     const linearMidpoint = (firstOutput + secondOutput) / 2;
     const curvature = Math.abs(midpointOutput - linearMidpoint);
@@ -1521,15 +1688,15 @@ function drawExplicitCurve(
         Math.sign(firstOutput - outputLength / 2) === Math.sign(secondOutput - outputLength / 2) &&
         Math.sign(secondOutput - outputLength / 2) === Math.sign(midpointOutput - outputLength / 2) &&
         screenDelta <= 24 && curvature <= 0.5) {
-      return [second];
+      output.push(second);
+      return;
     }
     if (!refine) {
-      return [second];
+      output.push(second);
+      return;
     }
-    return [
-      ...refineInterval(first, midpoint, depth + 1),
-      ...refineInterval(midpoint, second, depth + 1),
-    ];
+    refineInterval(first, midpoint, depth + 1, output);
+    refineInterval(midpoint, second, depth + 1, output);
   };
   let previousOutput: number | undefined;
   let drawing = false;
@@ -1539,7 +1706,7 @@ function drawExplicitCurve(
     firstOutput >= -outputLength * 2 && firstOutput <= outputLength * 3;
   if (firstIsValid) {
     drawing = true;
-    if (!colorAt) context.moveTo(first.screenX, first.screenY);
+    path.moveTo(first.screenX, first.screenY);
     samples.push(first);
     previousOutput = firstOutput;
   }
@@ -1564,10 +1731,10 @@ function drawExplicitCurve(
       return;
     }
     if (!drawing) {
-      if (!colorAt) context.moveTo(sample.screenX, sample.screenY);
+      path.moveTo(sample.screenX, sample.screenY);
       drawing = true;
-    } else if (!colorAt) {
-      context.lineTo(sample.screenX, sample.screenY);
+    } else {
+      path.lineTo(sample.screenX, sample.screenY);
     }
     if (connected && samples.length > 0) {
       const previous = samples[samples.length - 1]!;
@@ -1579,11 +1746,14 @@ function drawExplicitCurve(
     samples.push(sample);
     previousOutput = outputPixel;
   };
+  const refinedSamples: GraphSample[] = [];
   for (let screenParameter = graphSettings.explicitSampleSpacing;
     screenParameter <= parameterLength;
     screenParameter += graphSettings.explicitSampleSpacing) {
     const second = sampleAt(coordinateAt(screenParameter), screenParameter);
-    for (const refinedSample of refineInterval(first, second, 0)) {
+    refinedSamples.length = 0;
+    refineInterval(first, second, 0, refinedSamples);
+    for (const refinedSample of refinedSamples) {
       drawSample(refinedSample);
     }
     first = second;
@@ -1591,9 +1761,12 @@ function drawExplicitCurve(
   if (colorAt) {
     strokeColoredSegments(geometry, colorAt, width, height, lineWidth, opacity);
   } else {
-    context.stroke();
+    context.stroke(path);
   }
   context.restore();
+  if (expression && performanceProfile.cacheEnabled) {
+    expressionCurveCaches.set(expression, { key: cacheKey, curve: geometry, path });
+  }
   return geometry;
 }
 
@@ -1877,46 +2050,28 @@ function detectImplicitAxisIntercepts(
   appendLimitedIntercepts(intercepts, candidates, width, height);
 }
 
-function closestPointOnSegment(
-  x: number,
-  y: number,
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
-): { x: number; y: number; distance: number } {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const lengthSquared = dx * dx + dy * dy;
-  const fraction = lengthSquared === 0
-    ? 0
-    : Math.max(0, Math.min(1, ((x - x1) * dx + (y - y1) * dy) / lengthSquared));
-  const nearestX = x1 + fraction * dx;
-  const nearestY = y1 + fraction * dy;
-  return { x: nearestX, y: nearestY, distance: Math.hypot(x - nearestX, y - nearestY) };
+function hoverCurvePriorities(): Map<string, number> {
+  const priorities = new Map<string, number>();
+  for (const [rank, item] of workspaceBlocks().flatMap((block) => block.items).entries()) {
+    if (item.type === "expression") {
+      priorities.set(`expression-${item.id}`, rank);
+      priorities.set(`implicit-${item.id}`, rank);
+    } else if (item.type === "table") {
+      priorities.set(`table-regression-${item.id}`, rank);
+    }
+  }
+  return priorities;
 }
 
 function addGraphPointAt(screenX: number, screenY: number): void {
-  let nearest: { curve: CurveGeometry; x: number; y: number; distance: number } | undefined;
-  for (const curve of hoverCurves) {
-    if (!curve.id.startsWith("expression-")) {
-      continue;
-    }
-    for (let index = 0; index < curve.segments.length; index += 4) {
-      const point = closestPointOnSegment(
-        screenX,
-        screenY,
-        curve.segments[index]!,
-        curve.segments[index + 1]!,
-        curve.segments[index + 2]!,
-        curve.segments[index + 3]!,
-      );
-      if (!nearest || point.distance < nearest.distance) {
-        nearest = { curve, x: point.x, y: point.y, distance: point.distance };
-      }
-    }
-  }
-  if (!nearest || nearest.distance > 10) {
+  hoverSegmentIndex ??= new SegmentIndex(hoverCurves);
+  const priorities = hoverCurvePriorities();
+  const nearest = selectHoverPoint(
+    hoverSegmentIndex.nearby(screenX, screenY, 10), screenX, screenY,
+    (curve) => curve.id.startsWith("expression-")
+      ? priorities.get(curve.id) ?? Infinity : Infinity,
+  );
+  if (!nearest) {
     return;
   }
 
@@ -1988,7 +2143,21 @@ function addGraphPointAt(screenX: number, screenY: number): void {
   draw();
 }
 
-function drawHoverOverlay(): void {
+function* hoverSegmentsNear(x: number, y: number, buildIndex: boolean) {
+  if (buildIndex) hoverSegmentIndex ??= new SegmentIndex(hoverCurves);
+  if (hoverSegmentIndex) {
+    yield* hoverSegmentIndex.nearby(x, y, 10);
+    return;
+  }
+  for (const curve of hoverCurves) {
+    if (curve.hoverPoint) yield { curve, offset: -1 };
+    for (let offset = 0; offset < curve.segments.length; offset += 4) {
+      yield { curve, offset };
+    }
+  }
+}
+
+function drawHoverOverlay(buildIndex = true): void {
   const bounds = canvasWrap.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   const width = Math.max(1, Math.round(bounds.width * dpr));
@@ -2007,22 +2176,11 @@ function drawHoverOverlay(): void {
     return;
   }
 
-  let nearest: { curve: CurveGeometry; x: number; y: number; distance: number } | undefined;
-  for (const curve of hoverCurves) {
-    for (let index = 0; index < curve.segments.length; index += 4) {
-      const point = closestPointOnSegment(
-        hoverPosition.x, hoverPosition.y,
-        curve.segments[index]!, curve.segments[index + 1]!,
-        curve.segments[index + 2]!, curve.segments[index + 3]!,
-      );
-      if (!nearest || point.distance < nearest.distance) {
-        nearest = { curve, ...point };
-      }
-    }
-  }
-  if (nearest && nearest.distance > 10) {
-    nearest = undefined;
-  }
+  const priorities = hoverCurvePriorities();
+  const nearest = selectHoverPoint(
+    hoverSegmentsNear(hoverPosition.x, hoverPosition.y, buildIndex),
+    hoverPosition.x, hoverPosition.y, (curve) => priorities.get(curve.id) ?? Infinity,
+  );
 
   const activeIds = new Set(nearest ? [nearest.curve.id] : []);
   const visibleCandidates = hoverCandidates.filter((candidate) =>
@@ -2065,11 +2223,10 @@ function drawHoverOverlay(): void {
     )[0]!;
     label = `${type} · (${formatTick(selected.x)}, ${formatTick(selected.y)})`;
     color = selected.color;
-  } else if (nearest &&
-      (nearest.curve.id.startsWith("implicit-") || nearest.curve.sideways)) {
+  } else if (nearest) {
     pointX = nearest.x - bufferX;
     pointY = nearest.y - bufferY;
-    label = `${nearest.curve.sideways ? "curve" : "implicit curve"} · (${formatTick(
+    label = `${nearest.curve.id.startsWith("implicit-") ? "implicit curve" : "curve"} · (${formatTick(
       (nearest.x - graphWidth / 2) / scale + centerX,
     )}, ${formatTick(
       (graphHeight / 2 - nearest.y) / verticalScale() + centerY,
@@ -2239,175 +2396,245 @@ function draw(): void {
   const fixedVariables = new Set(expressions
     .map((entry) => getVariableDefinition(entry)?.target)
     .filter((name): name is string => Boolean(name)));
-  for (const expression of expressions) {
-    if (expression.hidden) continue;
-    if (updateScalarResult(expression)) continue;
-    const graph = getCompiled(expression);
-    if (!graph) {
-      continue;
-    }
-    const graphId = graph.kind === "implicit"
-      ? `implicit-${expression.id}`
-      : `expression-${expression.id}`;
-    const colorAt = compileSpatialColor(expression);
-    const lineWidth = expression.lineWidth ?? 2;
-    const opacity = expression.opacity ?? 1;
-    if (graph.kind === "point") {
-      try {
-        const [x, y] = graph.evaluate();
-        if (!Number.isFinite(x) || !Number.isFinite(y)) {
-          throw new Error("Point coordinates must be finite numbers");
-        }
-        const pointColor = colorAt?.(x, y) ?? expression.color;
-        const screenX = alignCanvasStrokeCenter(
-          width / 2 + (x - centerX) * scale,
-          dpr,
-          1,
-        );
-        const screenY = alignCanvasStrokeCenter(
-          height / 2 - (y - centerY) * verticalScale(),
-          dpr,
-          1,
-        );
-        const xVariables = graph.xVariables.filter((name) => !fixedVariables.has(name));
-        const yVariables = graph.yVariables.filter((name) => !fixedVariables.has(name));
-        nextDraggableGraphPoints.push({
-          expressionId: expression.id,
-          draggable: expression.draggable !== false &&
-            (xVariables.length > 0 || yVariables.length > 0),
-          xVariables,
-          yVariables,
-          x,
-          y,
-          screenX,
-          screenY,
-          color: pointColor,
-          opacity,
-        });
-        addPointCandidate(
-          candidates, x, y, "draggable point", [graphId], pointColor, width, height,
-        );
-        expression.evaluationError = undefined;
-      } catch (reason) {
-        expression.evaluationError = reason instanceof Error
-          ? reason.message
-          : "Could not evaluate point";
-      }
-      continue;
-    }
-    if (graph.kind === "sideways") {
-      const evaluate = (y: number) => {
-        const result = graph.evaluate(y);
-        return typeof result === "number" ? result : result.value.toNumber();
-      };
-      const curve = drawExplicitCurve(
-        graphId, expression.color, evaluate, width, height, colorAt, lineWidth, opacity, true,
-      );
-      implicitCurves.push(curve);
-      detectExplicitPoints(curve, evaluate, candidates, width, height, true);
-      continue;
-    }
-    if (graph.kind === "implicit") {
-      const curve = drawImplicit(
-        graph.evaluate, width, height, graphId, expression.color, colorAt, lineWidth, opacity,
-      );
-      implicitCurves.push(curve);
-      detectImplicitAxisIntercepts(curve, graph.evaluate, candidates, width, height);
-      continue;
-    }
-    if (graph.kind === "inequality") {
-      const curve = drawInequality(
-        graph.evaluate, graph.relation, graphId, expression.color, width, height, colorAt,
-        lineWidth, opacity,
-      );
-      implicitCurves.push(curve);
-      continue;
-    }
-    if (graph.kind === "parametric") {
-      const curve = drawParametricCurve(
-        graphId, expression.color, graph.evaluate, graph.start, graph.end, width, height,
-        colorAt,
-        lineWidth, opacity,
-      );
-      explicitCurves.push(curve);
-      continue;
-    }
-    if (graph.kind === "list") {
-      try {
-        expression.evaluationError = undefined;
-        const values = graph.evaluate();
-        if (values.some((value) => !Number.isFinite(value))) {
-          throw new Error("List values must be finite numbers");
-        }
-        const expressionError = workspaceList.querySelector<HTMLParagraphElement>(
-          `[data-expression-id="${expression.id}"] .expression-error`,
-        );
-        if (expressionError) expressionError.textContent = "";
-        workspaceList.querySelector<HTMLInputElement>(
-          `[data-expression-id="${expression.id}"] input[type="text"]`,
-        )?.removeAttribute("aria-invalid");
-        values.forEach((y, index) => {
-          const x = index + 1;
-          const screenX = width / 2 + (x - centerX) * scale;
-          const screenY = height / 2 - (y - centerY) * verticalScale();
-          const pointColor = colorAt?.(x, y) ?? expression.color;
-          listPoints.push({ x, y, color: pointColor, graphId, opacity });
-          if (screenX >= 0 && screenX <= width && screenY >= 0 && screenY <= height) {
-            addPointCandidate(
-              candidates, x, y, "list point", [graphId], pointColor, width, height,
-            );
-          }
-        });
-      } catch (reason) {
-        expression.evaluationError = reason instanceof Error ? reason.message : "Could not evaluate list";
-        const error = workspaceList.querySelector<HTMLParagraphElement>(
-          `[data-expression-id="${expression.id}"] .expression-error`,
-        );
-        if (error) error.textContent = expression.evaluationError;
-        workspaceList.querySelector<HTMLInputElement>(
-          `[data-expression-id="${expression.id}"] input[type="text"]`,
-        )?.setAttribute("aria-invalid", "true");
-      }
-      continue;
-    }
-    const evaluate = cachedExplicitEvaluator(expression, (x: number) => {
-      const result = graph.evaluate(x);
-      return typeof result === "number" ? result : result.value.toNumber();
-    });
-    const curve = drawExplicitCurve(
-      graphId, expression.color, evaluate, width, height, colorAt, lineWidth, opacity,
-    );
-    explicitCurves.push(curve);
-    detectExplicitPoints(curve, evaluate, candidates, width, height);
-  }
-
-  const tableData = tables.map((table) => ({ table, values: tableValues(table) }));
-  for (const { table, values } of tableData) {
-    for (let index = 0; index < values.x.length; index += 1) {
-      const x = values.x[index]!;
-      const y = values.y[index]!;
-      const screenX = width / 2 + (x - centerX) * scale;
-      const screenY = height / 2 - (y - centerY) * verticalScale();
-      if (screenX < 0 || screenX > width || screenY < 0 || screenY > height) {
+  const expressionById = new Map(expressions.map((expression) => [expression.id, expression]));
+  const tableById = new Map(tables.map((table) => [table.id, table]));
+  const drawWorkspaceItem=(item: WorkspaceItem): void => {
+    listPoints.length=0;
+    nextDraggableGraphPoints.length=0;
+    const entry = item.type === "expression" ? expressionById.get(item.id) : undefined;
+    for (const expression of entry ? [entry] : []) {
+      if(expression.hidden) continue;
+      if(updateScalarResult(expression)) continue;
+      const graph=getCompiled(expression);
+      if(!graph) {
         continue;
       }
-      addPointCandidate(candidates, x, y, "table point", [`table-${table.id}`],
-        table.color, width, height);
+      const graphId=graph.kind==="implicit"
+        ? `implicit-${expression.id}`
+        :`expression-${expression.id}`;
+      const colorAt=compileSpatialColor(expression);
+      const lineWidth=expression.lineWidth??2;
+      const opacity=expression.opacity??1;
+      if(graph.kind==="point") {
+        try {
+          const [x,y]=graph.evaluate();
+          if(!Number.isFinite(x)||!Number.isFinite(y)) {
+            throw new Error("Point coordinates must be finite numbers");
+          }
+          const pointColor=colorAt?.(x,y)??expression.color;
+          const screenX=alignCanvasStrokeCenter(
+            width/2+(x-centerX)*scale,
+            dpr,
+            1,
+          );
+          const screenY=alignCanvasStrokeCenter(
+            height/2-(y-centerY)*verticalScale(),
+            dpr,
+            1,
+          );
+          const xVariables=graph.xVariables.filter((name) => !fixedVariables.has(name));
+          const yVariables=graph.yVariables.filter((name) => !fixedVariables.has(name));
+          nextDraggableGraphPoints.push({
+            expressionId: expression.id,
+            draggable: expression.draggable!==false&&
+              (xVariables.length>0||yVariables.length>0),
+            xVariables,
+            yVariables,
+            x,
+            y,
+            screenX,
+            screenY,
+            color: pointColor,
+            opacity,
+          });
+          addPointCandidate(
+            candidates,x,y,"draggable point",[graphId],pointColor,width,height,
+          );
+          expression.evaluationError=undefined;
+        } catch(reason) {
+          expression.evaluationError=reason instanceof Error
+            ? reason.message
+            :"Could not evaluate point";
+        }
+        continue;
+      }
+      if(graph.kind==="sideways") {
+        const evaluate=cachedExplicitEvaluator(expression,(y: number) => {
+          const result=graph.evaluate(y);
+          return typeof result==="number"? result:result.value.toNumber();
+        });
+        try {
+          const curve=drawExplicitCurve(
+            graphId,expression.color,evaluate,width,height,colorAt,lineWidth,opacity,true,expression,graph.tangent,
+          );
+          implicitCurves.push(curve);
+          detectExplicitPoints(curve,evaluate,candidates,width,height,true);
+          expression.evaluationError = undefined;
+        } catch (reason) {
+          expression.evaluationError = reason instanceof Error ? reason.message : "Could not render curve.";
+        }
+        updateExpressionErrorDisplay(expression);
+        continue;
+      }
+      if(graph.kind==="implicit") {
+        const curve=drawImplicit(
+          graph.evaluate,width,height,graphId,expression.color,colorAt,lineWidth,opacity,
+        );
+        implicitCurves.push(curve);
+        detectImplicitAxisIntercepts(curve,graph.evaluate,candidates,width,height);
+        continue;
+      }
+      if(graph.kind==="inequality") {
+        const curve=drawInequality(
+          graph.evaluate,graph.relation,graphId,expression.color,width,height,colorAt,
+          lineWidth,opacity,
+        );
+        implicitCurves.push(curve);
+        continue;
+      }
+      if(graph.kind==="parametric") {
+        const curve=drawParametricCurve(
+          graphId,expression.color,graph.evaluate,graph.start,graph.end,width,height,
+          colorAt,
+          lineWidth,opacity,
+        );
+        explicitCurves.push(curve);
+        continue;
+      }
+      if(graph.kind==="list") {
+        try {
+          expression.evaluationError=undefined;
+          const values=graph.evaluate();
+          if(values.some((value) => !Number.isFinite(value))) {
+            throw new Error("List values must be finite numbers");
+          }
+          const expressionError=workspaceList.querySelector<HTMLParagraphElement>(
+            `[data-expression-id="${expression.id}"] .expression-error`,
+          );
+          if(expressionError) expressionError.textContent="";
+          workspaceList.querySelector<HTMLInputElement>(
+            `[data-expression-id="${expression.id}"] input[type="text"]`,
+          )?.removeAttribute("aria-invalid");
+          values.forEach((y,index) => {
+            const x=index+1;
+            const screenX=width/2+(x-centerX)*scale;
+            const screenY=height/2-(y-centerY)*verticalScale();
+            const pointColor=colorAt?.(x,y)??expression.color;
+            listPoints.push({ x,y,color: pointColor,graphId,opacity });
+            if(screenX>=0&&screenX<=width&&screenY>=0&&screenY<=height) {
+              addPointCandidate(
+                candidates,x,y,"list point",[graphId],pointColor,width,height,
+              );
+            }
+          });
+        } catch(reason) {
+          expression.evaluationError=reason instanceof Error? reason.message:"Could not evaluate list";
+          const error=workspaceList.querySelector<HTMLParagraphElement>(
+            `[data-expression-id="${expression.id}"] .expression-error`,
+          );
+          if(error) error.textContent=expression.evaluationError;
+          workspaceList.querySelector<HTMLInputElement>(
+            `[data-expression-id="${expression.id}"] input[type="text"]`,
+          )?.setAttribute("aria-invalid","true");
+        }
+        continue;
+      }
+      const evaluate=cachedExplicitEvaluator(expression,(x: number) => {
+        const result=graph.evaluate(x);
+        return typeof result==="number"? result:result.value.toNumber();
+      });
+      try {
+        const curve=drawExplicitCurve(
+          graphId,expression.color,evaluate,width,height,colorAt,lineWidth,opacity,false,expression,graph.tangent,
+        );
+        explicitCurves.push(curve);
+        detectExplicitPoints(curve,evaluate,candidates,width,height);
+        expression.evaluationError = undefined;
+      } catch (reason) {
+        expression.evaluationError = reason instanceof Error ? reason.message : "Could not render curve.";
+      }
+      updateExpressionErrorDisplay(expression);
     }
 
-    updateTableRegression(table);
-    if (table.regression) {
-      const evaluate = (x: number) => evaluateRegression(table.regression!, x);
-      context.setLineDash([6, 4]);
-      const curve = drawExplicitCurve(
-        `table-regression-${table.id}`, table.color, evaluate, width, height,
-      );
-      context.setLineDash([]);
-      explicitCurves.push(curve);
-      detectExplicitPoints(curve, evaluate, candidates, width, height);
+    const table=item.type==="table"? tableById.get(item.id):undefined;
+    const tableData=table? [{ table,values: tableValues(table) }]:[];
+    for(const { table,values } of tableData) {
+      for(let index=0;index<values.x.length;index+=1) {
+        const x=values.x[index]!;
+        const y=values.y[index]!;
+        const screenX=width/2+(x-centerX)*scale;
+        const screenY=height/2-(y-centerY)*verticalScale();
+        if(screenX<0||screenX>width||screenY<0||screenY>height) {
+          continue;
+        }
+        addPointCandidate(candidates,x,y,"table point",[`table-${table.id}`],
+          table.color,width,height);
+      }
+
+      updateTableRegression(table);
+      if(table.regression) {
+        const evaluate=(x: number) => evaluateRegression(table.regression!,x);
+        context.setLineDash([6,4]);
+        const curve=drawExplicitCurve(
+          `table-regression-${table.id}`,table.color,evaluate,width,height,
+        );
+        context.setLineDash([]);
+        explicitCurves.push(curve);
+        detectExplicitPoints(curve,evaluate,candidates,width,height);
+      }
     }
+
+    for(const point of listPoints) {
+      const screenX=width/2+(point.x-centerX)*scale;
+      const screenY=height/2-(point.y-centerY)*verticalScale();
+      if(screenX<-6||screenX>width+6||screenY<-6||screenY>height+6) continue;
+      context.save();
+      context.globalAlpha=point.opacity;
+      context.beginPath();
+      context.arc(screenX,screenY,4,0,Math.PI*2);
+      context.fillStyle=point.color;
+      context.fill();
+      context.strokeStyle=currentThemeColor("text-strong");
+      context.lineWidth=1.5;
+      context.stroke();
+      context.restore();
+    }
+    for(const point of nextDraggableGraphPoints) {
+      if(point.screenX<-8||point.screenX>width+8||
+        point.screenY<-8||point.screenY>height+8) continue;
+      context.save();
+      context.globalAlpha=point.opacity;
+      context.beginPath();
+      context.arc(point.screenX,point.screenY,6,0,Math.PI*2);
+      context.fillStyle=point.color;
+      context.fill();
+      context.strokeStyle=currentThemeColor("text-strong");
+      context.lineWidth=2;
+      context.stroke();
+      context.restore();
+    }
+    for(const { table,values } of tableData) {
+      context.fillStyle=table.color;
+      context.strokeStyle=currentThemeColor("text-strong");
+      context.lineWidth=1.5;
+      for(let index=0;index<values.x.length;index+=1) {
+        const screenX=width/2+(values.x[index]!-centerX)*scale;
+        const screenY=height/2-(values.y[index]!-centerY)*verticalScale();
+        if(screenX<-6||screenX>width+6||screenY<-6||screenY>height+6) {
+          continue;
+        }
+        context.beginPath();
+        context.arc(screenX,screenY,4,0,Math.PI*2);
+        context.fill();
+        context.stroke();
+      }
+    }
+    allDraggableGraphPoints.push(...nextDraggableGraphPoints);
+  };
+  const allDraggableGraphPoints: DraggableGraphPoint[] = [];
+  for (const item of workspaceBlocks().flatMap((block) => block.items).reverse()) {
+    drawWorkspaceItem(item);
   }
-
   for (let first = 0; first < explicitCurves.length; first += 1) {
     for (let second = first + 1; second < explicitCurves.length; second += 1) {
       detectExplicitIntersections(
@@ -2416,54 +2643,14 @@ function draw(): void {
     }
   }
   drawGrid();
-  for (const point of listPoints) {
-    const screenX = width / 2 + (point.x - centerX) * scale;
-    const screenY = height / 2 - (point.y - centerY) * verticalScale();
-    if (screenX < -6 || screenX > width + 6 || screenY < -6 || screenY > height + 6) continue;
-    context.save();
-    context.globalAlpha = point.opacity;
-    context.beginPath();
-    context.arc(screenX, screenY, 4, 0, Math.PI * 2);
-    context.fillStyle = point.color;
-    context.fill();
-    context.strokeStyle = currentThemeColor("text-strong");
-    context.lineWidth = 1.5;
-    context.stroke();
-    context.restore();
-  }
-  for (const point of nextDraggableGraphPoints) {
-    if (point.screenX < -8 || point.screenX > width + 8 ||
-        point.screenY < -8 || point.screenY > height + 8) continue;
-    context.save();
-    context.globalAlpha = point.opacity;
-    context.beginPath();
-    context.arc(point.screenX, point.screenY, 6, 0, Math.PI * 2);
-    context.fillStyle = point.color;
-    context.fill();
-    context.strokeStyle = currentThemeColor("text-strong");
-    context.lineWidth = 2;
-    context.stroke();
-    context.restore();
-  }
-  for (const { table, values } of tableData) {
-    context.fillStyle = table.color;
-    context.strokeStyle = currentThemeColor("text-strong");
-    context.lineWidth = 1.5;
-    for (let index = 0; index < values.x.length; index += 1) {
-      const screenX = width / 2 + (values.x[index]! - centerX) * scale;
-      const screenY = height / 2 - (values.y[index]! - centerY) * verticalScale();
-      if (screenX < -6 || screenX > width + 6 || screenY < -6 || screenY > height + 6) {
-        continue;
-      }
-      context.beginPath();
-      context.arc(screenX, screenY, 4, 0, Math.PI * 2);
-      context.fill();
-      context.stroke();
-    }
-  }
   hoverCandidates = candidates;
-  hoverCurves = [...explicitCurves, ...implicitCurves];
-  draggableGraphPoints = nextDraggableGraphPoints;
+  const nextHoverCurves = [...explicitCurves, ...implicitCurves];
+  if (nextHoverCurves.length !== hoverCurves.length ||
+      nextHoverCurves.some((curve, index) => curve !== hoverCurves[index])) {
+    hoverSegmentIndex = undefined;
+  }
+  hoverCurves = nextHoverCurves;
+  draggableGraphPoints = allDraggableGraphPoints.reverse();
   for (const expression of expressions) {
     const colorError = workspaceList.querySelector<HTMLParagraphElement>(
       `[data-expression-id="${expression.id}"] .color-formula-error`,
@@ -2475,7 +2662,8 @@ function draw(): void {
       channelInput.setAttribute("aria-invalid", String(Boolean(expression.colorError)));
     }
   }
-  drawHoverOverlay();
+  // Rebuilding the index here delays zoom redraws; pointer interactions build it on demand.
+  drawHoverOverlay(false);
   scheduleProjectSave(!drag?.point);
   if (performanceProfile.enabled) {
     performanceProfile.drawCount += 1;
@@ -2674,16 +2862,28 @@ function updateExpressionErrorDisplay(expression: Expression): void {
   }
 }
 
-function getUserFunctionDefinitions(): Array<{
+type FunctionState = {
   expression: Expression;
   definition: UserFunctionDefinition;
   error?: string;
-}> {
-  const found: Array<{
-    expression: Expression;
-    definition: UserFunctionDefinition;
-    error?: string;
-  }> = [];
+};
+
+let functionAnalysis: {
+  inputs: Array<{ expression: Expression; text: string }>;
+  states: FunctionState[];
+  signature: string;
+} | undefined;
+let expansionSignature = "";
+let expandedSources = new BoundedCache<string, string>(1024);
+let sliderAnalysis: { key: string; names: string[] } | undefined;
+
+function getUserFunctionDefinitions(): FunctionState[] {
+  if (functionAnalysis && functionAnalysis.inputs.length === expressions.length &&
+      functionAnalysis.inputs.every(({ expression, text }, index) =>
+        expression === expressions[index] && text === expression.text)) {
+    return functionAnalysis.states;
+  }
+  const found: FunctionState[] = [];
   for (const expression of expressions) {
     const match = /^\s*([a-z])\s*\(([^)]*)\)\s*=\s*(.*)\s*$/i.exec(expression.text);
     if (!match) continue;
@@ -2718,24 +2918,40 @@ function getUserFunctionDefinitions(): Array<{
       state.error = `Function "${state.definition.name}" is defined more than once.`;
     }
   }
+  functionAnalysis = {
+    inputs: expressions.map((expression) => ({ expression, text: expression.text })),
+    states: found,
+    signature: JSON.stringify(found.map(({ definition, error }) => ({ ...definition, error }))),
+  };
   return found;
 }
 
 function userFunctionSignature(
   states = getUserFunctionDefinitions(),
 ): string {
-  return JSON.stringify(states.map(({ definition, error }) => ({ ...definition, error })));
+  return functionAnalysis?.states === states
+    ? functionAnalysis.signature
+    : JSON.stringify(states.map(({ definition, error }) => ({ ...definition, error })));
 }
 
 function expandFunctions(source: string): string {
   const states = getUserFunctionDefinitions();
+  const signature = userFunctionSignature(states);
+  if (expansionSignature !== signature) {
+    expansionSignature = signature;
+    expandedSources = new BoundedCache(1024);
+  }
+  const cached = expandedSources.get(source);
+  if (cached !== undefined) return cached;
   const invalidDefinition = states.find(({ definition, error }) =>
     error && new RegExp(`\\b${definition.name}\\s*\\(`, "i").test(source));
   if (invalidDefinition) throw new Error(invalidDefinition.error);
-  return expandUserFunctions(
+  const expanded = expandUserFunctions(
     source,
     states.filter(({ error }) => !error).map(({ definition }) => definition),
   );
+  expandedSources.set(source, expanded);
+  return expanded;
 }
 
 function getVariableDefinition(
@@ -2798,11 +3014,18 @@ function synchronizeVariableDefinitions(): {
       expression.hsv?.value ?? "",
     ];
   }).concat(tickers.map((ticker) => ticker.action));
-  const sliders = [...new Set(sources.flatMap((source) =>
-    source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? []
-  ).map((name) => name.toLowerCase()).filter((name) =>
-    /^[a-z](?:_[a-z0-9]+)?$/.test(name) && !reserved.has(name) &&
-    !definitionNames.has(name)))].sort();
+  const sliderAnalysisKey = JSON.stringify([sources, [...definitionNames], [...reserved]]);
+  if (sliderAnalysis?.key !== sliderAnalysisKey) {
+    sliderAnalysis = {
+      key: sliderAnalysisKey,
+      names: [...new Set(sources.flatMap((source) =>
+        source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? []
+      ).map((name) => name.toLowerCase()).filter((name) =>
+        /^[a-z](?:_[a-z0-9]+)?$/.test(name) && !reserved.has(name) &&
+        !definitionNames.has(name)))].sort(),
+    };
+  }
+  const sliders = sliderAnalysis.names;
   for (const name of sliders) {
     sliderValues[name] ??= 1;
     sliderOptions[name] ??= { min: -10, max: 10, speed: 1 };
@@ -2823,7 +3046,15 @@ function synchronizeVariableDefinitions(): {
       return;
     }
     state.set(definition.target, "resolving");
-    const references = (definition.source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [])
+    let expanded: string;
+    try {
+      expanded = expandFunctions(definition.source);
+    } catch (reason) {
+      definition.error = reason instanceof Error ? reason.message : "Could not expand definition.";
+      state.set(definition.target, "failed");
+      return;
+    }
+    const references = (expanded.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [])
       .map((name) => name.toLowerCase());
     if (references.some((name) => ["x", "y", "t"].includes(name))) {
       definition.error = "Variable definitions must not depend on x, y, or t.";
@@ -2850,11 +3081,12 @@ function synchronizeVariableDefinitions(): {
       }
     }
     try {
-      const variables = Object.fromEntries(availableNames.map((name) => [
-        name,
-        sliderValues[name] ?? 0,
-      ]));
-      const result = compileExpression(expandFunctions(definition.source), variables)(0);
+      const evaluatorKey = `${expanded}\u0000${availableNames.join(",")}`;
+      if (definition.evaluatorKey !== evaluatorKey || !definition.evaluator) {
+        definition.evaluatorKey = evaluatorKey;
+        definition.evaluator = compileExpression(expanded, sliderValues);
+      }
+      const result = definition.evaluator(0);
       const value = result.value.toNumber();
       if (!Number.isFinite(value)) throw new Error("Definition must produce a finite number.");
       definition.value = value;
@@ -2908,24 +3140,29 @@ function cachedExplicitEvaluator(
   expression: Expression,
   evaluate: (x: number) => number,
 ): (x: number) => number {
-  const sliderSignature = JSON.stringify(
-    Object.entries(sliderValues).sort(([left], [right]) => left.localeCompare(right)),
-  );
-  const key = `${graphMode}:${graphSettings.precisionDigits}\u0000${expression.text}\u0000${sliderSignature}`;
+  // Native fast-mode samples cost less than cache maintenance on dense changing views.
+  if (graphMode === "desmos") {
+    if (!performanceProfile.enabled) return evaluate;
+    return (x) => {
+      performanceProfile.evaluationCount += 1;
+      performanceProfile.cacheBypasses += 1;
+      return evaluate(x);
+    };
+  }
+  const source = expandFunctions(expression.text);
+  const sliderSignature = referencedVariableSignature(source, sliderValues);
+  const key = `${graphMode}:${graphSettings.precisionDigits}\u0000${source}\u0000${sliderSignature}`;
   let cache = explicitEvaluationCaches.get(expression);
   if (!cache || cache.key !== key) {
-    cache = { key, values: new Map(), cacheable: true };
+    cache = { key, values: new BoundedCache(MAX_EXPRESSION_SAMPLE_CACHE_SIZE) };
     explicitEvaluationCaches.set(expression, cache);
   }
   const values = cache.values;
   return (x: number) => {
-    if (!performanceProfile.cacheEnabled || !cache.cacheable) {
+    if (!performanceProfile.cacheEnabled) {
       if (performanceProfile.enabled) {
         performanceProfile.cacheMisses += 1;
         performanceProfile.evaluationCount += 1;
-        if (performanceProfile.cacheEnabled && !cache.cacheable) {
-          performanceProfile.cacheBypasses += 1;
-        }
       }
       return evaluate(x);
     }
@@ -2943,23 +3180,11 @@ function cachedExplicitEvaluator(
     }
     try {
       const value = evaluate(x);
-      if (values.size >= MAX_EXPRESSION_SAMPLE_CACHE_SIZE) {
-        values.clear();
-        cache.cacheable = false;
-        if (performanceProfile.enabled) performanceProfile.cacheBypasses += 1;
-      } else {
-        values.set(x, { value });
-      }
+      values.set(x, { value });
       return value;
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : "Could not evaluate expression";
-      if (values.size >= MAX_EXPRESSION_SAMPLE_CACHE_SIZE) {
-        values.clear();
-        cache.cacheable = false;
-        if (performanceProfile.enabled) performanceProfile.cacheBypasses += 1;
-      } else {
-        values.set(x, { error: message });
-      }
+      values.set(x, { error: message });
       throw reason;
     }
   };
@@ -3539,6 +3764,7 @@ function reorderWorkspaceBlock(
     blocks.splice(Math.max(0, targetBlockIndex), 0, sourceBlock);
     workspaceOrder = workspaceOrderFromBlocks(blocks);
     renderWorkspaceItems();
+    scheduleDraw();
     scheduleProjectSave();
     return;
   }
@@ -3589,6 +3815,7 @@ function reorderWorkspaceBlock(
   workspaceOrder = workspaceOrderFromBlocks(blocks);
   renderExpressions();
   renderTables();
+  scheduleDraw();
   scheduleProjectSave();
 }
 

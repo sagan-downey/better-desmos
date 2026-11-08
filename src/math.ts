@@ -123,8 +123,8 @@ type PreciseImplicitEvaluation = (x: number, y: number) => Decimal;
 export type ExplicitEvaluation = (x: number) => Evaluation | number;
 
 export type GraphExpression =
-  | { kind: "explicit"; evaluate: ExplicitEvaluation }
-  | { kind: "sideways"; evaluate: ExplicitEvaluation }
+  | { kind: "explicit"; evaluate: ExplicitEvaluation; tangent?: () => { slope: number; offset: number } }
+  | { kind: "sideways"; evaluate: ExplicitEvaluation; tangent?: () => { slope: number; offset: number } }
   | { kind: "implicit"; evaluate: ImplicitEvaluation }
   | { kind: "inequality"; relation: "<" | "<=" | ">" | ">="; evaluate: ImplicitEvaluation }
   | {
@@ -390,7 +390,31 @@ function parse(
   return result;
 }
 
+const constantNodes = new WeakMap<Node, boolean>();
+const constantValues = new WeakMap<Node, { precision: number; value: Value }>();
+
+function isConstantExpression(node: Node): boolean {
+  const cached = constantNodes.get(node);
+  if (cached !== undefined) return cached;
+  const constant = node.type === "variable" ? false
+    : node.type === "unary" ? isConstantExpression(node.operand)
+      : node.type === "binary" ? isConstantExpression(node.left) && isConstantExpression(node.right)
+        : node.type === "call" ? isConstantExpression(node.argument)
+          : true;
+  constantNodes.set(node, constant);
+  return constant;
+}
+
 function evaluate(node: Node, x: Decimal, y?: Decimal, variables: Record<string, number> = {}): Value {
+  if (!isConstantExpression(node)) return evaluateNode(node, x, y, variables);
+  const cached = constantValues.get(node);
+  if (cached?.precision === Decimal.precision) return cached.value;
+  const value = evaluateNode(node, x, y, variables);
+  constantValues.set(node, { precision: Decimal.precision, value });
+  return value;
+}
+
+function evaluateNode(node: Node, x: Decimal, y: Decimal | undefined, variables: Record<string, number>): Value {
   switch (node.type) {
     case "number":
       return node.value;
@@ -551,6 +575,16 @@ function evaluate(node: Node, x: Decimal, y?: Decimal, variables: Record<string,
 type FastEvaluator = (x: number, y?: number) => number;
 
 function compileFastEvaluator(node: Node, variables: Record<string, number>): FastEvaluator {
+  const evaluator = compileFastEvaluatorNode(node, variables);
+  if (!isConstantExpression(node)) return evaluator;
+  let cached: number | undefined;
+  return (x, y) => {
+    if (cached === undefined) cached = evaluator(x, y);
+    return cached;
+  };
+}
+
+function compileFastEvaluatorNode(node: Node, variables: Record<string, number>): FastEvaluator {
   switch (node.type) {
     case "number": {
       const { numerator, denominator } = node.value;
@@ -813,6 +847,21 @@ function containsVariable(node: Node, variable: "x" | "y"): boolean {
   }
 }
 
+function tangentParameters(
+  tree: Node,
+  parameter: "x" | "y",
+  variables: Record<string, number>,
+): (() => { slope: number; offset: number }) | undefined {
+  if (tree.type !== "call" || tree.name !== "tan") return undefined;
+  const affine = affineInVariable(tree.argument, parameter);
+  if (!affine || containsVariable(affine.coefficient, parameter) ||
+      containsVariable(affine.constant, parameter)) return undefined;
+  return () => ({
+    slope: asDecimal(evaluate(affine.coefficient, new Decimal(0), new Decimal(0), variables)).toNumber(),
+    offset: asDecimal(evaluate(affine.constant, new Decimal(0), new Decimal(0), variables)).toNumber(),
+  });
+}
+
 function compileAffineEquation(
   left: Node,
   right: Node,
@@ -832,6 +881,7 @@ function compileAffineEquation(
   }
   const solution = binaryNode("/", negateNode(constant), coefficient);
   const kind = solveFor === "x" ? "sideways" : "explicit";
+  const tangent = tangentParameters(solution, parameter, variables);
 
   if (fast) {
     const evaluateCoefficient = compileFastEvaluator(coefficient, variables);
@@ -839,6 +889,7 @@ function compileAffineEquation(
     const evaluateSolution = compileFastEvaluator(solution, variables);
     return {
       kind,
+      tangent,
       evaluate: (value: number) => {
         if (!Number.isFinite(value)) {
           throw new Error(`${parameter} must be a finite number`);
@@ -865,6 +916,7 @@ function compileAffineEquation(
   }
   return {
     kind,
+    tangent,
     evaluate: (value: number) => {
       if (!Number.isFinite(value)) {
         throw new Error(`${parameter} must be a finite number`);
@@ -1721,7 +1773,10 @@ export function compileGraphExpression(
     return compileInequality(trimmed, variables, false);
   }
   if (/^\s*y\s*=/i.test(source)) {
-    return { kind: "explicit", evaluate: compileExpression(source, variables) };
+    return {
+      kind: "explicit", evaluate: compileExpression(source, variables),
+      tangent: tangentParameters(parse(source, false, true, Object.keys(variables)), "x", variables),
+    };
   }
   if (source.includes("=")) {
     const equals = [...source.matchAll(/=/g)];
@@ -1736,7 +1791,10 @@ export function compileGraphExpression(
     }
     return { kind: "implicit", evaluate: compileImplicitEquation(source, variables) };
   }
-  return { kind: "explicit", evaluate: compileExpression(source, variables) };
+  return {
+    kind: "explicit", evaluate: compileExpression(source, variables),
+    tangent: tangentParameters(parse(source, false, true, Object.keys(variables)), "x", variables),
+  };
 }
 
 export function compileFastGraphExpression(
@@ -1763,6 +1821,7 @@ export function compileFastGraphExpression(
     const evaluate = compileFastEvaluator(tree, variables);
     return {
       kind: "explicit",
+      tangent: tangentParameters(tree, "x", variables),
       evaluate: (x: number) => {
         if (!Number.isFinite(x)) {
           throw new Error("x must be a finite number");

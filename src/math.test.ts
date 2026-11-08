@@ -21,6 +21,51 @@ import {
 } from "./math";
 
 describe("compileExpression", () => {
+  it("provides live affine tangent branches in both graph orientations and modes", () => {
+    for (const compile of [compileGraphExpression, compileFastGraphExpression]) {
+      const variables = { a: 36, b: 1 };
+      for (const source of ["x=tan(a*y+b)", "y=tan(a*x+b)", "tan(a*x+b)"]) {
+        const graph = compile(source, variables);
+        if (graph.kind !== "explicit" && graph.kind !== "sideways") {
+          throw new Error("Expected a tangent curve.");
+        }
+        expect(graph.tangent?.()).toEqual({ slope: 36, offset: 1 });
+        variables.a = -18;
+        expect(graph.tangent?.()).toEqual({ slope: -18, offset: 1 });
+        variables.a = 36;
+      }
+    }
+  });
+  it("reuses constant math without freezing precision, variables, or domain errors", () => {
+    const variables = { a: 2 };
+    const expression = compileExpression("sin(pi/4)*x + sqrt(9) + a", variables);
+    expect(expression(2).value.toNumber()).toBeCloseTo(Math.SQRT2 + 5, 12);
+    variables.a = 4;
+    expect(expression(2).value.toNumber()).toBeCloseTo(Math.SQRT2 + 7, 12);
+    const invalid = compileExpression("x + sqrt(-1)");
+    expect(() => invalid(1)).toThrow(/sqrt/);
+    expect(() => invalid(2)).toThrow(/sqrt/);
+    const originalPrecision = getPrecisionDigits();
+    const constant = compileExpression("pi/7");
+    try {
+      setPrecisionDigits(20);
+      const lowPrecision = constant(0).value.toString();
+      setPrecisionDigits(60);
+      const highPrecision = constant(0).value.toString();
+      expect(highPrecision.length).toBeGreaterThan(lowPrecision.length);
+      expect(highPrecision).toBe(compileExpression("pi/7")(0).value.toString());
+    } finally {
+      setPrecisionDigits(originalPrecision);
+    }
+    const fast = compileFastGraphExpression("x + sin(pi/4)");
+    const constantFast = compileFastGraphExpression("1 + sin(pi/4)");
+    expect(fast.kind).toBe("explicit");
+    expect(constantFast.kind).toBe("explicit");
+    if (fast.kind !== "explicit" || constantFast.kind !== "explicit") {
+      throw new Error("Expected explicit graphs for the constant-cache regression.");
+    }
+    expect(fast.evaluate(1)).toBe(constantFast.evaluate(0));
+  });
   it("converts HSV colors to hex and extracts base-color HSV values", () => {
     expect(hsvToHex(0, 1, 1)).toBe("#ff0000");
     expect(hsvToHex(120, 1, 1)).toBe("#00ff00");

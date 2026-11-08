@@ -27,7 +27,34 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$GITHUB_REF_NAME" = "v2.12.0" ]; then
+          if [ "$GITHUB_REF_NAME" = "v2.13.0" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
+              --title "Better Desmos 2.13 — Faster redraws and consistent graph layering" \
+              --notes-file - <<'NOTES'
+          ## What's new
+
+          - **Faster unchanged-curve redraws:** Explicit and sideways curves reuse geometry and drawing paths when their inputs and view are unchanged. Precise-mode sample caches remain bounded; fast mode avoids sample-cache overhead during zoom.
+          - **Cached math and workspace analysis:** Constant math, function expansion, and slider analysis are reused without freezing live parameters or precision settings.
+          - **Consistent graph layering:** Higher workspace rows draw on top of lower rows, including folders, tables, shaded regions, and points. Reordering immediately updates the graph.
+          - **Better point inspection:** Arbitrary points can be inspected on explicit curves. Overlapping curves follow workspace priority; table and list points retain snapping priority.
+          - **Tangent branch rendering:** Direct affine-phase tangent curves such as `x = tan(36y)` draw separate branches without connecting across poles. Extremely dense views render pixel-level coverage without a branch-count cutoff, preserving opacity and spatial HSV.
+          - **Actual calculator version:** The visible badge, accessible brand name, page title, and package metadata show 2.13 / 2.13.0.
+
+          ## Download and run
+
+          Download **better-desmos.html** below and open it in your browser. It contains the JavaScript and CSS and needs no installation or server. Replace the older HTML file and reload it.
+
+          ## Validation
+
+          - All 37 tests passed; TypeScript, production build, and whitespace checks passed.
+          - Browser checks covered zoom performance, curve layering and reordering, hover, live sliders, playback, tables, undo/redo, opacity, HSV, and export.
+          - Both tangent orientations were checked in fast and precise modes; tested branch segments did not cross poles.
+
+          ## Known limitations
+
+          Graphs remain numerical approximations. Dense tangent coverage may look solid because branches overlap at the selected line width. Transformed or nonlinear-phase tangent expressions and general implicit equations still use the general numerical samplers and can miss features. Rendering remains synchronous; an already-running draw cannot yet be interrupted. These are staged performance improvements, not a completed background-rendering rewrite.
+          NOTES
+          elif [ "$GITHUB_REF_NAME" = "v2.12.0" ]; then
             gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
               --title "Better Desmos 2.12 — Live grid overlay and sideways graphs" \
               --notes-file - <<'NOTES'

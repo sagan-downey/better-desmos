@@ -4,7 +4,7 @@ A browser-based graphing calculator built with TypeScript and Vite. Its small st
 
 ## Versioning
 
-The current app version is **2.12**. Keep the package version in `package.json` in sync as `2.12.0`.
+The current app version is **2.13**. Keep the package version in `package.json` in sync as `2.13.0`.
 
 ## Run locally
 
@@ -46,7 +46,7 @@ Define a one-argument function with any single-letter name and `x` as its input,
 
 Click an expression's color circle to open its appearance settings. Set the base color, line size (1–10 px), and opacity (0–100%) there. The panel also supports hue, saturation, and value formulas based on `x`, `y`, and sliders. Entering spatial formulas makes the expression circle show a rainbow indicator, while the formulas determine the graph color. Hue uses degrees and is clamped to 0–360 for color conversion: values above 360 remain above 360 in the formula result but render as the endpoint color instead of restarting the rainbow. Saturation and value use normalized decimals (0–1). Opacity applies to curves, implicit contours, inequality boundaries and fill, and list points.
 
-Equations use one equals sign and may contain both `x` and `y`. Equations linear in `y` or `x` with a coordinate-independent, nonzero coefficient are plotted as explicit curves in the corresponding direction; for example, `x = tan(36y)` is sampled along `y`, with gaps between its tangent branches. Other equations use the implicit contour renderer, which can miss narrow features or confuse discontinuities with contour crossings. Invalid syntax is reported beside its expression. Domain errors at individual sample points leave gaps in the graph.
+Equations use one equals sign and may contain both `x` and `y`. Equations linear in `y` or `x` with a coordinate-independent, nonzero coefficient are plotted as explicit curves in the corresponding direction. Direct affine-phase tangent curves, such as `x = tan(36y)` or `y = tan(a*x+b)`, are drawn branch by branch using the inverse tangent, so no stroke connects across a pole. When branches are at most half a screen pixel apart and their strokes cover every cross-section, the renderer draws their pixel-level coverage instead of enumerating branches. This keeps the curve visible at extreme zoom levels with no branch-count cutoff; opacity still applies once, and spatial HSV is sampled at device-pixel centers. Dense views may look solid; zoom in to distinguish branches. Hover projects onto a nearby branch numerically; at coordinates beyond representable branch-index precision it reports the pixel-level position. Other transformed or nonlinear-phase tangent expressions still use the general numerical sampler. Other equations use the implicit contour renderer, which can miss narrow features or confuse discontinuities with contour crossings. Invalid syntax is reported beside its expression. Domain errors at individual sample points leave gaps in the graph.
 
 Expressions that do not depend on graph coordinates, such as `sin(pi / 2)` or `2^10`, display their numeric result in the workspace instead of drawing a horizontal line. Results that require numerical evaluation or display rounding are marked with `≈`; results depending on sliders update as those sliders change.
 
@@ -102,6 +102,14 @@ These are different tradeoffs: Desmos mode uses 10-digit standard floating-point
 
 ### Measuring graph performance during development
 
+Precise-mode sample caches are bounded and evict their least recently used entries without scanning the cache. Fast-mode sampling bypasses this cache because maintaining it can cost more than native math when zooming dense curves. Explicit and sideways expression curves reuse their sampled geometry and drawing paths while the viewport, sampling settings, precision, expanded function source, and referenced parameter values are unchanged. Changing an unrelated slider does not invalidate those curves; appearance and spatial HSV colors are still applied on every redraw. Other graph types continue to use their existing renderers. Function/slider analysis and constant math are also cached; precision changes invalidate approximate constant results, and parameter values remain live.
+
+Hover uses a conservative segment index. Arbitrary points can be inspected on explicit, sideways, implicit, parametric, polar, and regression curves; coordinates come from the nearest sampled line segment and are numerical approximations. Nearby special points, such as intercepts and vertices, still snap to their detected coordinates. When multiple curves are within 10 screen pixels of the crosshair, the curve higher in the workspace list takes priority, including folder order and table regressions; its closest segment supplies the point. Reordering the workspace updates that priority. Adding a graph point to a table uses the same priority among eligible expression curves. The index is built on demand for pointer interactions, not during graph redraws; until then, the hover overlay scans the segments using the same selection rule. These optimizations do not reduce precision or sampling density.
+
+Graph items are drawn from the bottom of the workspace list upward, so higher rows appear on top of lower rows. This applies across expressions and tables, including folder order, regression lines, shaded regions, and plotted points. Reordering rows changes both graph layering and hover priority.
+
+Graph rendering still runs synchronously on the main thread. Zoom previews remain responsive between draws, but an already-running draw cannot yet be interrupted.
+
 When running `npm run dev`, use the browser developer console:
 
 ```js
@@ -109,7 +117,7 @@ window.betterDesmosProfiler.benchmark(30)
 window.betterDesmosProfiler.snapshot()
 ```
 
-The benchmark compares repeated redraws of the current graph with the explicit-expression evaluation cache bypassed and enabled. It warms up each mode, then reports median and 95th-percentile draw time, expression evaluations, cache hits, and cache bypasses. Use the same browser, viewport, graph, and settings when comparing changes. The benchmark runs synchronously and may briefly pause the page; the profiler is development-only and is not included in production builds. `snapshot()` reports recent draw activity; if its draw count does not increase while the app is idle, the graph is not redrawing in the background.
+The benchmark compares repeated redraws of the current graph with expression sample and geometry caches bypassed and enabled. It warms up each mode, then reports median and 95th-percentile draw time, expression evaluations, cache hits, and cache bypasses. Fast-mode samples always bypass the sample cache; geometry reuse still applies. Use the same browser, viewport, graph, and settings when comparing changes. Also measure actual pan/zoom redraws: an unchanged-view benchmark does not measure resampling or eviction costs. The benchmark runs synchronously and may briefly pause the page; the profiler is development-only and is not included in production builds. `snapshot()` reports recent draw activity; if its draw count does not increase while the app is idle, the graph is not redrawing in the background.
 
 This is a numerical graphing prototype, not a proof system or a guarantee of correctly rendered features at every scale. Expressions are parsed by the app's own bounded parser and are never executed as JavaScript.
 
