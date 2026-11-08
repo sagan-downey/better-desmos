@@ -26,7 +26,37 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/better-desmos.html --title "Better Desmos ${GITHUB_REF_NAME#v}" --generate-notes
+        run: |
+          if [ "$GITHUB_REF_NAME" = "v2.12.0" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
+              --title "Better Desmos 2.12 — Live grid overlay and sideways graphs" \
+              --notes-file - <<'NOTES'
+          ## What's new
+
+          - **Live grid overlay:** Grid lines, axes, and numbers redraw immediately during zoom and pan previews. Only the curve snapshot scales, so axis numbers keep their normal size while the graph reloads.
+          - **Sideways graphs:** Equations such as `x = tan(36y)` and `x = y^2` are sampled along `y` instead of using the coarse implicit contour grid. Tangent branches remain visible with gaps at their asymptotes.
+          - **Point inspection:** Sideways curves support hover coordinates, axis intercepts, and adding graph points to tables.
+          - **Consistent version labels:** The calculator badge, page title, and package metadata show 2.12 / 2.12.0.
+
+          ## Download and run
+
+          Download **better-desmos.html** from the assets below, then open it in your browser. It is a self-contained calculator; no installation or local server is required. Replace your older HTML file and reload the page to use this version.
+
+          ## Validation
+
+          - All 25 tests passed.
+          - TypeScript checks, production build, and whitespace checks passed.
+          - Browser checks confirmed visible tangent branches and gaps at poles in precise and fast modes.
+          - Rapid-zoom checks confirmed the grid updates immediately without scaling its 12 px labels.
+
+          ## Known limitations
+
+          Graphs are sampled numerical approximations. Very dense curves can overlap at low zoom levels. General implicit equations still use a finite contour grid, which can miss narrow features or mistake discontinuities for crossings.
+          NOTES
+          else
+            gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
+              --title "Better Desmos ${GITHUB_REF_NAME#v}" --generate-notes
+          fi
       - name: Refresh Better Desmos 2.4.0 asset
         if: github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'Refresh Better Desmos 2.4.0 release asset')
         env:
