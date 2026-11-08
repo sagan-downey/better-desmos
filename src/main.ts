@@ -204,6 +204,7 @@ interface CurveGeometry {
   color: string;
   segments: number[];
   colorAt?: (x: number, y: number) => string;
+  sideways?: boolean;
 }
 
 interface ExplicitCurveData extends CurveGeometry {
@@ -846,7 +847,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 2.11 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.11</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 2.12 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.12</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -893,7 +894,7 @@ app.innerHTML = `
           </button>
         </div>
       </div>
-      <div class="canvas-wrap"><canvas id="graph" aria-label="Graph of the entered expressions"></canvas><canvas id="graph-points" aria-hidden="true"></canvas></div>
+      <div class="canvas-wrap"><canvas id="graph" aria-label="Graph of the entered expressions"></canvas><canvas id="graph-grid" aria-hidden="true"></canvas><canvas id="graph-points" aria-hidden="true"></canvas></div>
     </section>
   </main>
   <dialog class="settings-dialog" id="settings-dialog" aria-labelledby="settings-title">
@@ -1003,6 +1004,8 @@ const workspaceAdd = document.querySelector<HTMLSelectElement>("#workspace-add")
 const canvas = document.querySelector<HTMLCanvasElement>("#graph")!;
 const context = canvas.getContext("2d")!;
 const canvasWrap = canvas.parentElement as HTMLDivElement;
+const gridCanvas = document.querySelector<HTMLCanvasElement>("#graph-grid")!;
+const gridContext = gridCanvas.getContext("2d")!;
 const pointCanvas = document.querySelector<HTMLCanvasElement>("#graph-points")!;
 const pointContext = pointCanvas.getContext("2d")!;
 const GRAPH_BUFFER_VIEWPORTS = 1;
@@ -1052,9 +1055,21 @@ function alignCanvasStrokeCenter(coordinate: number, dpr: number, lineWidth: num
   return (Math.round(coordinate * dpr) + halfPixel) / dpr;
 }
 
-function drawGrid(width: number, height: number): void {
-  const yScale = verticalScale();
+function drawGrid(): void {
+  const bounds = canvasWrap.getBoundingClientRect();
+  const width = Math.max(1, bounds.width);
+  const height = Math.max(1, bounds.height);
   const dpr = window.devicePixelRatio || 1;
+  const pixelWidth = Math.max(1, Math.round(width * dpr));
+  const pixelHeight = Math.max(1, Math.round(height * dpr));
+  if (gridCanvas.width !== pixelWidth || gridCanvas.height !== pixelHeight) {
+    gridCanvas.width = pixelWidth;
+    gridCanvas.height = pixelHeight;
+  }
+  const context = gridContext;
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.clearRect(0, 0, width, height);
+  const yScale = verticalScale();
   const originX = width / 2 - centerX * scale;
   const originY = height / 2 + centerY * yScale;
   const xStep = tickStep();
@@ -1427,17 +1442,23 @@ function addPointCandidate(
 function drawExplicitCurve(
   id: string,
   color: string,
-  evaluate: (x: number) => number,
+  evaluate: (parameter: number) => number,
   width: number,
   height: number,
   colorAt?: (x: number, y: number) => string,
   lineWidth = 2,
   opacity = 1,
+  sideways = false,
 ): ExplicitCurveData {
   const samples: GraphSample[] = [];
-  const geometry: ExplicitCurveData = { id, color, samples, segments: [], colorAt };
+  const geometry: ExplicitCurveData = { id, color, samples, segments: [], colorAt, sideways };
   const yScale = verticalScale();
   const originY = height / 2 + centerY * yScale;
+  const parameterLength = sideways ? height : width;
+  const outputLength = sideways ? width : height;
+  const coordinateAt = (screenParameter: number) => sideways
+    ? (height / 2 - screenParameter) / yScale + centerY
+    : (screenParameter - width / 2) / scale + centerX;
   context.save();
   context.globalAlpha = opacity;
   if (!colorAt) {
@@ -1445,10 +1466,13 @@ function drawExplicitCurve(
     context.lineWidth = lineWidth;
     context.beginPath();
   }
-  const sampleAt = (x: number, screenX: number): GraphSample => {
+  const sampleAt = (parameter: number, screenParameter: number): GraphSample => {
     try {
-      const y = evaluate(x);
-      const screenY = originY - y * yScale;
+      const value = evaluate(parameter);
+      const x = sideways ? value : parameter;
+      const y = sideways ? parameter : value;
+      const screenX = sideways ? width / 2 + (value - centerX) * scale : screenParameter;
+      const screenY = sideways ? screenParameter : originY - value * yScale;
       return {
         x,
         y,
@@ -1457,7 +1481,9 @@ function drawExplicitCurve(
         connected: false,
       };
     } catch {
-      return { x, y: Number.NaN, screenX, screenY: Number.NaN, connected: false };
+      return sideways
+        ? { x: Number.NaN, y: parameter, screenX: Number.NaN, screenY: screenParameter, connected: false }
+        : { x: parameter, y: Number.NaN, screenX: screenParameter, screenY: Number.NaN, connected: false };
     }
   };
   const refineInterval = (
@@ -1469,26 +1495,31 @@ function drawExplicitCurve(
       return [second];
     }
 
-    const firstValid = Number.isFinite(first.screenY) &&
-      first.screenY >= -height * 2 && first.screenY <= height * 3;
-    const secondValid = Number.isFinite(second.screenY) &&
-      second.screenY >= -height * 2 && second.screenY <= height * 3;
-    const screenDelta = Math.abs(second.screenY - first.screenY);
-    const midpointX = (first.x + second.x) / 2;
-    const midpointScreenX = (first.screenX + second.screenX) / 2;
-    const midpoint = sampleAt(midpointX, midpointScreenX);
-    const midpointValid = Number.isFinite(midpoint.screenY) &&
-      midpoint.screenY >= -height * 2 && midpoint.screenY <= height * 3;
-    if (![first, second, midpoint].some((sample) => Number.isFinite(sample.screenY))) {
+    const firstOutput = sideways ? first.screenX : first.screenY;
+    const secondOutput = sideways ? second.screenX : second.screenY;
+    const firstValid = Number.isFinite(firstOutput) &&
+      firstOutput >= -outputLength * 2 && firstOutput <= outputLength * 3;
+    const secondValid = Number.isFinite(secondOutput) &&
+      secondOutput >= -outputLength * 2 && secondOutput <= outputLength * 3;
+    const screenDelta = Math.abs(secondOutput - firstOutput);
+    const midpointParameter = (sideways ? first.y + second.y : first.x + second.x) / 2;
+    const firstScreenParameter = sideways ? first.screenY : first.screenX;
+    const secondScreenParameter = sideways ? second.screenY : second.screenX;
+    const midpointScreenParameter = (firstScreenParameter + secondScreenParameter) / 2;
+    const midpoint = sampleAt(midpointParameter, midpointScreenParameter);
+    const midpointOutput = sideways ? midpoint.screenX : midpoint.screenY;
+    const midpointValid = Number.isFinite(midpointOutput) &&
+      midpointOutput >= -outputLength * 2 && midpointOutput <= outputLength * 3;
+    if (![firstOutput, secondOutput, midpointOutput].some(Number.isFinite)) {
       return [second];
     }
-    const linearMidpoint = (first.screenY + second.screenY) / 2;
-    const curvature = Math.abs(midpoint.screenY - linearMidpoint);
+    const linearMidpoint = (firstOutput + secondOutput) / 2;
+    const curvature = Math.abs(midpointOutput - linearMidpoint);
     const refine = !firstValid || !secondValid || !midpointValid ||
       screenDelta > 24 || curvature > 0.5;
     if (!firstValid && !secondValid && !midpointValid &&
-        Math.sign(first.screenY - height / 2) === Math.sign(second.screenY - height / 2) &&
-        Math.sign(second.screenY - height / 2) === Math.sign(midpoint.screenY - height / 2) &&
+        Math.sign(firstOutput - outputLength / 2) === Math.sign(secondOutput - outputLength / 2) &&
+        Math.sign(secondOutput - outputLength / 2) === Math.sign(midpointOutput - outputLength / 2) &&
         screenDelta <= 24 && curvature <= 0.5) {
       return [second];
     }
@@ -1500,52 +1531,58 @@ function drawExplicitCurve(
       ...refineInterval(midpoint, second, depth + 1),
     ];
   };
-  let previousY: number | undefined;
+  let previousOutput: number | undefined;
   let drawing = false;
-  let first = sampleAt((0 - width / 2) / scale + centerX, 0);
-  const firstIsValid = Number.isFinite(first.screenY) &&
-    first.screenY >= -height * 2 && first.screenY <= height * 3;
+  let first = sampleAt(coordinateAt(0), 0);
+  const firstOutput = sideways ? first.screenX : first.screenY;
+  const firstIsValid = Number.isFinite(firstOutput) &&
+    firstOutput >= -outputLength * 2 && firstOutput <= outputLength * 3;
   if (firstIsValid) {
     drawing = true;
     if (!colorAt) context.moveTo(first.screenX, first.screenY);
     samples.push(first);
-    previousY = first.screenY;
+    previousOutput = firstOutput;
   }
   const drawSample = (sample: GraphSample): void => {
-    const { y, screenX, screenY } = sample;
-    if (!Number.isFinite(y)) {
+    const output = sideways ? sample.x : sample.y;
+    const outputPixel = sideways ? sample.screenX : sample.screenY;
+    if (!Number.isFinite(output)) {
       drawing = false;
-      previousY = undefined;
+      previousOutput = undefined;
       samples.push(sample);
       return;
     }
-    const valid = Number.isFinite(screenY) && screenY >= -height * 2 && screenY <= height * 3;
-    const jumpTooLarge = previousY !== undefined && Math.abs(screenY - previousY) > height;
-    const connected = valid && drawing && previousY !== undefined && !jumpTooLarge;
+    const valid = Number.isFinite(outputPixel) &&
+      outputPixel >= -outputLength * 2 && outputPixel <= outputLength * 3;
+    const jumpTooLarge = previousOutput !== undefined &&
+      Math.abs(outputPixel - previousOutput) > outputLength;
+    const connected = valid && drawing && previousOutput !== undefined && !jumpTooLarge;
     if (!valid || jumpTooLarge) {
       drawing = false;
-      previousY = Number.isFinite(screenY) ? screenY : undefined;
+      previousOutput = Number.isFinite(outputPixel) ? outputPixel : undefined;
       samples.push(sample);
       return;
     }
     if (!drawing) {
-      if (!colorAt) context.moveTo(screenX, screenY);
+      if (!colorAt) context.moveTo(sample.screenX, sample.screenY);
       drawing = true;
     } else if (!colorAt) {
-      context.lineTo(screenX, screenY);
+      context.lineTo(sample.screenX, sample.screenY);
     }
     if (connected && samples.length > 0) {
       const previous = samples[samples.length - 1]!;
-      geometry.segments.push(previous.screenX, previous.screenY, screenX, screenY);
+      geometry.segments.push(
+        previous.screenX, previous.screenY, sample.screenX, sample.screenY,
+      );
     }
     sample.connected = connected;
     samples.push(sample);
-    previousY = screenY;
+    previousOutput = outputPixel;
   };
-  for (let screenX = graphSettings.explicitSampleSpacing;
-    screenX <= width; screenX += graphSettings.explicitSampleSpacing) {
-    const x = (screenX - width / 2) / scale + centerX;
-    const second = sampleAt(x, screenX);
+  for (let screenParameter = graphSettings.explicitSampleSpacing;
+    screenParameter <= parameterLength;
+    screenParameter += graphSettings.explicitSampleSpacing) {
+    const second = sampleAt(coordinateAt(screenParameter), screenParameter);
     for (const refinedSample of refineInterval(first, second, 0)) {
       drawSample(refinedSample);
     }
@@ -1566,6 +1603,7 @@ function detectExplicitPoints(
   candidates: PointCandidate[],
   width: number,
   height: number,
+  sideways = false,
 ): void {
   const { samples, id, color, colorAt } = curve;
   const axisIntercepts: PointCandidate[] = [];
@@ -1575,27 +1613,36 @@ function detectExplicitPoints(
     if (!current.connected) {
       continue;
     }
-    if ((previous.y < 0 && current.y > 0) || (previous.y > 0 && current.y < 0) ||
-        previous.y === 0 || current.y === 0) {
-      if (previous.y !== 0 || current.y !== 0) {
-        const fraction = previous.y === 0 ? 0
-          : current.y === 0 ? 1
-            : previous.y / (previous.y - current.y);
+    const previousValue = sideways ? previous.x : previous.y;
+    const currentValue = sideways ? current.x : current.y;
+    if ((previousValue < 0 && currentValue > 0) || (previousValue > 0 && currentValue < 0) ||
+        previousValue === 0 || currentValue === 0) {
+      if (previousValue !== 0 || currentValue !== 0) {
+        const fraction = previousValue === 0 ? 0
+          : currentValue === 0 ? 1
+            : previousValue / (previousValue - currentValue);
+        const x = sideways ? 0 : previous.x + (current.x - previous.x) * fraction;
+        const y = sideways ? previous.y + (current.y - previous.y) * fraction : 0;
         addPointCandidate(
-          axisIntercepts, previous.x + (current.x - previous.x) * fraction, 0,
-          "x-intercept", [id],
-          colorAt?.(previous.x + (current.x - previous.x) * fraction, 0) ?? color,
+          axisIntercepts, x, y,
+          sideways ? "y-intercept" : "x-intercept", [id],
+          colorAt?.(x, y) ?? color,
           width, height,
         );
       }
     }
   }
 
-  if (Math.abs(centerX) <= width / (2 * scale)) {
+  if (sideways
+    ? Math.abs(centerY) <= height / (2 * verticalScale())
+    : Math.abs(centerX) <= width / (2 * scale)) {
     try {
-      const y = evaluate(0);
+      const value = evaluate(0);
+      const x = sideways ? value : 0;
+      const y = sideways ? 0 : value;
       addPointCandidate(
-        axisIntercepts, 0, y, "y-intercept", [id], colorAt?.(0, y) ?? color, width, height,
+        axisIntercepts, x, y, sideways ? "x-intercept" : "y-intercept",
+        [id], colorAt?.(x, y) ?? color, width, height,
       );
     } catch {
       // The function may be undefined on the y-axis.
@@ -1603,6 +1650,7 @@ function detectExplicitPoints(
   }
 
   appendLimitedIntercepts(axisIntercepts, candidates, width, height);
+  if (sideways) return;
 
   for (let index = 1; index < samples.length - 1; index += 1) {
     const previous = samples[index - 1]!;
@@ -1878,13 +1926,14 @@ function addGraphPointAt(screenX: number, screenY: number): void {
     return;
   }
   const graph = getCompiled(expression);
-  if (!graph || (graph.kind !== "explicit" && graph.kind !== "parametric")) {
+  if (!graph || (graph.kind !== "explicit" && graph.kind !== "sideways" &&
+      graph.kind !== "parametric")) {
     return;
   }
 
   const width = canvasWrap.clientWidth * GRAPH_BUFFER_SCALE;
   const height = canvasWrap.clientHeight * GRAPH_BUFFER_SCALE;
-  const pointCandidate = graph.kind === "explicit"
+  const pointCandidate = graph.kind === "explicit" || graph.kind === "sideways"
     ? hoverCandidates
       .filter((candidate) =>
         candidate.graphIds.includes(nearest!.curve.id) &&
@@ -1893,12 +1942,20 @@ function addGraphPointAt(screenX: number, screenY: number): void {
         Math.hypot(left.screenX - screenX, left.screenY - screenY) -
         Math.hypot(right.screenX - screenX, right.screenY - screenY))[0]
     : undefined;
-  const x = pointCandidate?.x ?? (nearest.x - width / 2) / scale + centerX;
+  let x = pointCandidate?.x ?? (nearest.x - width / 2) / scale + centerX;
   let y: number;
   if (graph.kind === "explicit") {
     try {
       const result = graph.evaluate(x);
       y = typeof result === "number" ? result : result.value.toNumber();
+    } catch {
+      return;
+    }
+  } else if (graph.kind === "sideways") {
+    y = pointCandidate?.y ?? (height / 2 - nearest.y) / verticalScale() + centerY;
+    try {
+      const result = graph.evaluate(y);
+      x = typeof result === "number" ? result : result.value.toNumber();
     } catch {
       return;
     }
@@ -2008,10 +2065,11 @@ function drawHoverOverlay(): void {
     )[0]!;
     label = `${type} · (${formatTick(selected.x)}, ${formatTick(selected.y)})`;
     color = selected.color;
-  } else if (nearest && nearest.curve.id.startsWith("implicit-")) {
+  } else if (nearest &&
+      (nearest.curve.id.startsWith("implicit-") || nearest.curve.sideways)) {
     pointX = nearest.x - bufferX;
     pointY = nearest.y - bufferY;
-    label = `implicit curve · (${formatTick(
+    label = `${nearest.curve.sideways ? "curve" : "implicit curve"} · (${formatTick(
       (nearest.x - graphWidth / 2) / scale + centerX,
     )}, ${formatTick(
       (graphHeight / 2 - nearest.y) / verticalScale() + centerY,
@@ -2237,6 +2295,18 @@ function draw(): void {
       }
       continue;
     }
+    if (graph.kind === "sideways") {
+      const evaluate = (y: number) => {
+        const result = graph.evaluate(y);
+        return typeof result === "number" ? result : result.value.toNumber();
+      };
+      const curve = drawExplicitCurve(
+        graphId, expression.color, evaluate, width, height, colorAt, lineWidth, opacity, true,
+      );
+      implicitCurves.push(curve);
+      detectExplicitPoints(curve, evaluate, candidates, width, height, true);
+      continue;
+    }
     if (graph.kind === "implicit") {
       const curve = drawImplicit(
         graph.evaluate, width, height, graphId, expression.color, colorAt, lineWidth, opacity,
@@ -2345,7 +2415,7 @@ function draw(): void {
       );
     }
   }
-  drawGrid(width, height);
+  drawGrid();
   for (const point of listPoints) {
     const screenX = width / 2 + (point.x - centerX) * scale;
     const screenY = height / 2 - (point.y - centerY) * verticalScale();
@@ -2445,6 +2515,7 @@ function previewZoom(factor: number, anchorX: number, anchorY: number): void {
   canvas.style.transformOrigin = "0 0";
   canvas.style.transform =
     `matrix(${visualScale}, 0, 0, ${visualScale}, ${translateX}, ${translateY})`;
+  drawGrid();
   pointContext.clearRect(0, 0, bounds.width, bounds.height);
 
   if (zoomRedrawTimer !== undefined) window.clearTimeout(zoomRedrawTimer);
@@ -5300,6 +5371,7 @@ canvas.addEventListener("pointermove", (event) => {
       centerX = drag.centerX - deltaX / scale;
       centerY = drag.centerY + deltaY / verticalScale();
       canvas.style.transform = `translate3d(${deltaX}px, ${deltaY}px, 0)`;
+      drawGrid();
     }
   } else {
     const screenX = event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS;
@@ -5353,6 +5425,7 @@ canvas.addEventListener("pointercancel", () => {
   clearDragTransformAfterDraw = false;
   canvas.style.transform = "";
   canvas.style.cursor = "crosshair";
+  drawGrid();
   drawHoverOverlay();
 });
 canvas.addEventListener("pointerleave", () => {

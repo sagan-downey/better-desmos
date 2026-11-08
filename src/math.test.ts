@@ -364,6 +364,17 @@ describe("compileExpression", () => {
 
   it("distinguishes explicit y assignments from implicit equations", () => {
     expect(compileGraphExpression("y = x^2").kind).toBe("explicit");
+    const sidewaysTangent = compileGraphExpression("x=tan(36y)");
+    expect(sidewaysTangent.kind).toBe("sideways");
+    if (sidewaysTangent.kind === "sideways") {
+      const result = sidewaysTangent.evaluate(Math.atan(2) / 36);
+      expect(typeof result === "number" ? result : result.value.toNumber()).toBeCloseTo(2);
+    }
+    const fastSidewaysTangent = compileFastGraphExpression("x=tan(36y)");
+    expect(fastSidewaysTangent.kind).toBe("sideways");
+    if (fastSidewaysTangent.kind === "sideways") {
+      expect(fastSidewaysTangent.evaluate(Math.atan(2) / 36)).toBeCloseTo(2);
+    }
     expect(compileGraphExpression("x^2 + y^2 = 4").kind).toBe("implicit");
     expect(() => compileImplicitEquation("x + y")).toThrow(/exactly one equals sign/);
     expect(() => compileImplicitEquation("x = y = 2")).toThrow(/exactly one equals sign/);
@@ -442,5 +453,33 @@ describe("compileExpression", () => {
     expect(compileFastGraphExpression("x^2 + y^2 = 4").kind).toBe("implicit");
     expect(compileFastGraphExpression("x * y = x^2").kind).toBe("implicit");
     expect(compileFastGraphExpression("x + y = x + y").kind).toBe("implicit");
+  });
+
+  it("plots equations that solve for x as sideways explicit curves", () => {
+    for (const compile of [compileGraphExpression, compileFastGraphExpression]) {
+      const variables = { a: 2 };
+      const shifted = compile("2x + 1 = a*y^2", variables);
+      expect(shifted.kind).toBe("sideways");
+      if (shifted.kind === "sideways") {
+        const numberAt = (y: number) => {
+          const result = shifted.evaluate(y);
+          return typeof result === "number" ? result : result.value.toNumber();
+        };
+        expect(numberAt(3)).toBe(8.5);
+        variables.a = 4;
+        expect(numberAt(3)).toBe(17.5);
+        expect(() => shifted.evaluate(Number.NaN)).toThrow(/finite/);
+      }
+      const reciprocal = compile("x=1/y");
+      expect(reciprocal.kind).toBe("sideways");
+      if (reciprocal.kind === "sideways") {
+        expect(() => reciprocal.evaluate(0)).toThrow();
+      }
+      expect(compile("x=2").kind).toBe("sideways");
+      expect(compile("y^2=x").kind).toBe("sideways");
+      expect(compile("x = 2y + 3").kind).toBe("explicit");
+      expect(compile("x^2 + y^2 = 4").kind).toBe("implicit");
+      expect(compile("x*y=y^2").kind).toBe("implicit");
+    }
   });
 });

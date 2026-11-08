@@ -4,7 +4,7 @@ A browser-based graphing calculator built with TypeScript and Vite. Its small st
 
 ## Versioning
 
-The current app version is **2.11**. Keep the package version in `package.json` in sync as `2.11.0`.
+The current app version is **2.12**. Keep the package version in `package.json` in sync as `2.12.0`.
 
 ## Run locally
 
@@ -46,7 +46,7 @@ Define a one-argument function with any single-letter name and `x` as its input,
 
 Click an expression's color circle to open its appearance settings. Set the base color, line size (1–10 px), and opacity (0–100%) there. The panel also supports hue, saturation, and value formulas based on `x`, `y`, and sliders. Entering spatial formulas makes the expression circle show a rainbow indicator, while the formulas determine the graph color. Hue uses degrees and is clamped to 0–360 for color conversion: values above 360 remain above 360 in the formula result but render as the endpoint color instead of restarting the rainbow. Saturation and value use normalized decimals (0–1). Opacity applies to curves, implicit contours, inequality boundaries and fill, and list points.
 
-Implicit equations use one equals sign and may contain both `x` and `y`. Invalid syntax is reported beside its expression. Domain errors at individual sample points leave gaps in the graph, as expected for functions with restricted domains or discontinuities.
+Equations use one equals sign and may contain both `x` and `y`. Equations linear in `y` or `x` with a coordinate-independent, nonzero coefficient are plotted as explicit curves in the corresponding direction; for example, `x = tan(36y)` is sampled along `y`, with gaps between its tangent branches. Other equations use the implicit contour renderer, which can miss narrow features or confuse discontinuities with contour crossings. Invalid syntax is reported beside its expression. Domain errors at individual sample points leave gaps in the graph.
 
 Expressions that do not depend on graph coordinates, such as `sin(pi / 2)` or `2^10`, display their numeric result in the workspace instead of drawing a horizontal line. Results that require numerical evaluation or display rounding are marked with `≈`; results depending on sliders update as those sliders change.
 
@@ -77,6 +77,8 @@ Move the cursor over an explicit curve to reveal detected x/y-axis intercepts, l
 At most 10 axis intercepts per curve are retained, prioritizing those nearest the center of the current view. These detections use sampled graph data, so they are approximations, not a symbolic guarantee. Narrow features, tangent roots, or points between samples may be missed. Implicit curves are not assigned intersections with other graphs because the number of crossings can be infinite.
 
 ## Numeric approach and limitations
+
+The grid, axes, and axis numbers use a separate viewport-sized overlay. They redraw immediately during zoom and pan previews, keeping text and grid lines at their normal size while the curve snapshot is scaled or translated. Curve sampling refreshes after the interaction settles.
 
 Finite decimal literals and arithmetic made only from rational values are represented as reduced `BigInt` fractions. This preserves exact rational values internally, including fractions such as `1 / 3`; conversion to decimal occurs when a value needs to be plotted. Exact square roots and integer powers are retained as rationals when practical.
 

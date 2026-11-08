@@ -121,8 +121,10 @@ export function expandUserFunctions(
 export type ImplicitEvaluation = (x: number, y: number) => Decimal | number;
 type PreciseImplicitEvaluation = (x: number, y: number) => Decimal;
 export type ExplicitEvaluation = (x: number) => Evaluation | number;
+
 export type GraphExpression =
   | { kind: "explicit"; evaluate: ExplicitEvaluation }
+  | { kind: "sideways"; evaluate: ExplicitEvaluation }
   | { kind: "implicit"; evaluate: ImplicitEvaluation }
   | { kind: "inequality"; relation: "<" | "<=" | ">" | ">="; evaluate: ImplicitEvaluation }
   | {
@@ -686,7 +688,7 @@ function assertFiniteFastResult(value: number): number {
   return value;
 }
 
-interface YAffineExpression {
+interface AffineExpression {
   coefficient: Node;
   constant: Node;
 }
@@ -735,16 +737,16 @@ function binaryNode(operator: "+" | "-" | "*" | "/", left: Node, right: Node): N
   return { type: "binary", operator, left, right };
 }
 
-function affineInY(node: Node): YAffineExpression | undefined {
-  if (node.type === "variable" && node.name === "y") {
+function affineInVariable(node: Node, variable: "x" | "y"): AffineExpression | undefined {
+  if (node.type === "variable" && node.name === variable) {
     return { coefficient: oneNode(), constant: zeroNode() };
   }
   if (node.type === "number" || node.type === "constant" ||
-      (node.type === "variable" && node.name !== "y")) {
+      (node.type === "variable" && node.name !== variable)) {
     return { coefficient: zeroNode(), constant: node };
   }
   if (node.type === "unary") {
-    const operand = affineInY(node.operand);
+    const operand = affineInVariable(node.operand, variable);
     if (!operand) return undefined;
     return node.operator === "+"
       ? operand
@@ -754,41 +756,39 @@ function affineInY(node: Node): YAffineExpression | undefined {
       };
   }
   if (node.type === "call") {
-    return node.argument.type === "variable" && node.argument.name === "y"
+    return containsVariable(node.argument, variable)
       ? undefined
-      : containsY(node.argument)
-        ? undefined
-        : { coefficient: zeroNode(), constant: node };
+      : { coefficient: zeroNode(), constant: node };
   }
   if (node.type !== "binary") {
     return undefined;
   }
 
-  const leftContainsY = containsY(node.left);
-  const rightContainsY = containsY(node.right);
-  if (!leftContainsY && !rightContainsY) {
+  const leftContainsVariable = containsVariable(node.left, variable);
+  const rightContainsVariable = containsVariable(node.right, variable);
+  if (!leftContainsVariable && !rightContainsVariable) {
     return { coefficient: zeroNode(), constant: node };
   }
   if (node.operator === "+" || node.operator === "-") {
-    const left = affineInY(node.left);
-    const right = affineInY(node.right);
+    const left = affineInVariable(node.left, variable);
+    const right = affineInVariable(node.right, variable);
     if (!left || !right) return undefined;
     return {
       coefficient: binaryNode(node.operator, left.coefficient, right.coefficient),
       constant: binaryNode(node.operator, left.constant, right.constant),
     };
   }
-  if (node.operator === "*" && leftContainsY !== rightContainsY) {
-    const affine = affineInY(leftContainsY ? node.left : node.right);
-    const factor = leftContainsY ? node.right : node.left;
+  if (node.operator === "*" && leftContainsVariable !== rightContainsVariable) {
+    const affine = affineInVariable(leftContainsVariable ? node.left : node.right, variable);
+    const factor = leftContainsVariable ? node.right : node.left;
     if (!affine) return undefined;
     return {
       coefficient: binaryNode("*", affine.coefficient, factor),
       constant: binaryNode("*", affine.constant, factor),
     };
   }
-  if (node.operator === "/" && !rightContainsY) {
-    const numerator = affineInY(node.left);
+  if (node.operator === "/" && !rightContainsVariable) {
+    const numerator = affineInVariable(node.left, variable);
     if (!numerator) return undefined;
     return {
       coefficient: binaryNode("/", numerator.coefficient, node.right),
@@ -798,84 +798,86 @@ function affineInY(node: Node): YAffineExpression | undefined {
   return undefined;
 }
 
-function containsY(node: Node): boolean {
+function containsVariable(node: Node, variable: "x" | "y"): boolean {
   switch (node.type) {
     case "variable":
-      return node.name === "y";
+      return node.name === variable;
     case "unary":
-      return containsY(node.operand);
+      return containsVariable(node.operand, variable);
     case "binary":
-      return containsY(node.left) || containsY(node.right);
+      return containsVariable(node.left, variable) || containsVariable(node.right, variable);
     case "call":
-      return containsY(node.argument);
+      return containsVariable(node.argument, variable);
     default:
       return false;
   }
 }
 
-function containsX(node: Node): boolean {
-  switch (node.type) {
-    case "variable":
-      return node.name === "x";
-    case "unary":
-      return containsX(node.operand);
-    case "binary":
-      return containsX(node.left) || containsX(node.right);
-    case "call":
-      return containsX(node.argument);
-    default:
-      return false;
-  }
-}
-
-function compileYAffineEquation(
+function compileAffineEquation(
   left: Node,
   right: Node,
   variables: Record<string, number>,
   fast: boolean,
-): Extract<GraphExpression, { kind: "explicit" }> | undefined {
-  const leftAffine = affineInY(left);
-  const rightAffine = affineInY(right);
+  solveFor: "x" | "y",
+): Extract<GraphExpression, { kind: "explicit" | "sideways" }> | undefined {
+  const parameter = solveFor === "x" ? "y" : "x";
+  const leftAffine = affineInVariable(left, solveFor);
+  const rightAffine = affineInVariable(right, solveFor);
   if (!leftAffine || !rightAffine) return undefined;
   const coefficient = binaryNode("-", leftAffine.coefficient, rightAffine.coefficient);
   const constant = binaryNode("-", leftAffine.constant, rightAffine.constant);
-  if (containsY(coefficient) || containsY(constant) || containsX(coefficient)) {
+  if (containsVariable(coefficient, solveFor) || containsVariable(constant, solveFor) ||
+      containsVariable(coefficient, parameter)) {
     return undefined;
   }
   const solution = binaryNode("/", negateNode(constant), coefficient);
+  const kind = solveFor === "x" ? "sideways" : "explicit";
 
   if (fast) {
     const evaluateCoefficient = compileFastEvaluator(coefficient, variables);
-    if (evaluateCoefficient(0) === 0) return undefined;
+    if (evaluateCoefficient(0, 0) === 0) return undefined;
     const evaluateSolution = compileFastEvaluator(solution, variables);
     return {
-      kind: "explicit",
-      evaluate: (x: number) => {
-        if (!Number.isFinite(x)) {
-          throw new Error("x must be a finite number");
-        }
-        const value = evaluateSolution(x);
+      kind,
+      evaluate: (value: number) => {
         if (!Number.isFinite(value)) {
-          throw new Error("Equation does not define a y-value for this x");
+          throw new Error(`${parameter} must be a finite number`);
         }
-        return assertFiniteFastResult(value);
+        const result = evaluateSolution(
+          solveFor === "x" ? 0 : value,
+          solveFor === "x" ? value : 0,
+        );
+        if (!Number.isFinite(result)) {
+          throw new Error(`Equation does not define a ${solveFor}-value for this ${parameter}`);
+        }
+        return assertFiniteFastResult(result);
       },
     };
   }
 
-  if (asDecimal(evaluate(coefficient, new Decimal(0), undefined, variables)).isZero()) {
+  if (asDecimal(evaluate(
+    coefficient,
+    new Decimal(0),
+    new Decimal(0),
+    variables,
+  )).isZero()) {
     return undefined;
   }
   return {
-    kind: "explicit",
-    evaluate: (x: number) => {
-      if (!Number.isFinite(x)) {
-        throw new Error("x must be a finite number");
+    kind,
+    evaluate: (value: number) => {
+      if (!Number.isFinite(value)) {
+        throw new Error(`${parameter} must be a finite number`);
       }
-      const value = evaluate(solution, new Decimal(x.toString()), undefined, variables);
+      const result = evaluate(
+        solution,
+        new Decimal(solveFor === "x" ? "0" : value.toString()),
+        new Decimal(solveFor === "x" ? value.toString() : "0"),
+        variables,
+      );
       return {
-        value: asDecimal(value),
-        exact: value.kind === "rational",
+        value: asDecimal(result),
+        exact: result.kind === "rational",
       };
     },
   };
@@ -1728,7 +1730,8 @@ export function compileGraphExpression(
       const variableNames = Object.keys(variables);
       const left = parse(source.slice(0, splitAt), true, false, variableNames);
       const right = parse(source.slice(splitAt + 1), true, false, variableNames);
-      const explicit = compileYAffineEquation(left, right, variables, false);
+      const explicit = compileAffineEquation(left, right, variables, false, "y") ??
+        compileAffineEquation(left, right, variables, false, "x");
       if (explicit) return explicit;
     }
     return { kind: "implicit", evaluate: compileImplicitEquation(source, variables) };
@@ -1782,7 +1785,8 @@ export function compileFastGraphExpression(
   const variableNames = Object.keys(variables);
   const left = parse(leftSource, true, false, variableNames);
   const right = parse(rightSource, true, false, variableNames);
-  const explicit = compileYAffineEquation(left, right, variables, true);
+  const explicit = compileAffineEquation(left, right, variables, true, "y") ??
+    compileAffineEquation(left, right, variables, true, "x");
   if (explicit) return explicit;
   const evaluateLeftFast = compileFastEvaluator(left, variables);
   const evaluateRightFast = compileFastEvaluator(right, variables);
