@@ -4,7 +4,7 @@ A browser-based graphing calculator built with TypeScript and Vite. Its small st
 
 ## Versioning
 
-The current app version is **2.13**. Keep the package version in `package.json` in sync as `2.13.0`.
+The current app version is **2.14**. Keep the package version in `package.json` in sync as `2.14.0`.
 
 ## Run locally
 
@@ -109,6 +109,10 @@ Hover uses a conservative segment index. Arbitrary points can be inspected on ex
 Graph items are drawn from the bottom of the workspace list upward, so higher rows appear on top of lower rows. This applies across expressions and tables, including folder order, regression lines, shaded regions, and plotted points. Reordering rows changes both graph layering and hover priority.
 
 Graph rendering still runs synchronously on the main thread. Zoom previews remain responsive between draws, but an already-running draw cannot yet be interrupted.
+
+After a normal-resolution draw, the visible viewport progressively refines at 1.5x, 2x, 3x, and 4x its display pixel ratio, with a 700 ms idle gap before each pass. Only the viewport is refined; the surrounding pan/zoom-out buffer stays at normal resolution. Each pass uses denser sampling and finer curve tolerances, then replaces the visible detail canvas only when complete. Zoom-in previews transform the latest sharp canvas; zoom-out previews use the normal buffered graph. Pending refinement is canceled by pan, zoom, edits, resize, slider playback, and tickers, and resumes after the view settles. Grid labels and hover remain display-sized overlays.
+
+Refinement is limited to 16 million pixels per visible canvas and stops escalating when a pass takes 120 ms or longer. This avoids unbounded resolution growth, but a synchronous refinement pass can still briefly block input once started. Higher-resolution pixels improve scroll-zoom previews; ordinary screenshots remain limited to the screen's pixel resolution. No image-export feature is added.
 
 When running `npm run dev`, use the browser developer console:
 

@@ -27,7 +27,33 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$GITHUB_REF_NAME" = "v2.13.0" ]; then
+          if [ "$GITHUB_REF_NAME" = "v2.14.0" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
+              --title "Better Desmos 2.14 — Progressive high-resolution zoom previews" \
+              --notes-file - <<'NOTES'
+          ## What's new
+
+          - **Progressive viewport refinement:** The normal-resolution graph appears first, then the visible area refines at 1.5x, 2x, 3x, and 4x the display pixel ratio while idle.
+          - **Sharper zoom-in previews:** Scroll zoom uses the latest completed high-resolution viewport snapshot. The surrounding pan/zoom-out buffer remains at normal resolution.
+          - **Denser geometry, not just enlarged pixels:** Refinement increases sampling density and tightens curve tolerances, including implicit contours and inequality shading.
+          - **Responsive scheduling:** Pan, zoom, edits, resize, playback, and tickers cancel pending refinement. Completed passes swap into view without partial frames.
+          - **Consistent version labels:** The calculator badge, accessible brand name, page title, and package metadata show 2.14 / 2.14.0.
+
+          ## Download and run
+
+          Download **better-desmos.html** below and open it in your browser. It is self-contained and needs no installation or server. Replace your older HTML file and reload it.
+
+          ## Validation
+
+          - All 38 tests passed; TypeScript checks, production build, and whitespace checks passed.
+          - Browser checks confirmed progressive resolution and denser sampling only in the visible viewport.
+          - Repeated zoom previews, normal-resolution zoom-out, playback cancellation/resumption, edits, and multiple graph types were checked.
+
+          ## Known limitations
+
+          Refinement is bounded to 16 million pixels per viewport canvas and stops escalating after an expensive pass. Rendering remains synchronous: an already-running pass can briefly block input. Ordinary screenshots remain limited to screen pixels; this release improves zoom previews and does not add image export. Existing numerical graphing limitations still apply.
+          NOTES
+          elif [ "$GITHUB_REF_NAME" = "v2.13.0" ]; then
             gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
               --title "Better Desmos 2.13 — Faster redraws and consistent graph layering" \
               --notes-file - <<'NOTES'

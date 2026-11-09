@@ -26,7 +26,7 @@ import {
   type PolynomialRegression,
   type TrigonometricRegression,
 } from "./math";
-import { BoundedCache, referencedVariableSignature, SegmentIndex, selectHoverPoint, tangentBranchRange, tangentPixelCoverage } from "./performance";
+import { BoundedCache, referencedVariableSignature, SegmentIndex, selectHoverPoint, tangentBranchRange, tangentPixelCoverage, refinementLevels } from "./performance";
 import "./style.css";
 
 type CompiledGraph = GraphExpression;
@@ -856,7 +856,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 2.13 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.13</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 2.14 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.14</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -903,7 +903,7 @@ app.innerHTML = `
           </button>
         </div>
       </div>
-      <div class="canvas-wrap"><canvas id="graph" aria-label="Graph of the entered expressions"></canvas><canvas id="graph-grid" aria-hidden="true"></canvas><canvas id="graph-points" aria-hidden="true"></canvas></div>
+      <div class="canvas-wrap"><canvas id="graph" aria-label="Graph of the entered expressions"></canvas><canvas id="graph-detail" aria-hidden="true" hidden></canvas><canvas id="graph-grid" aria-hidden="true"></canvas><canvas id="graph-points" aria-hidden="true"></canvas></div>
     </section>
   </main>
   <dialog class="settings-dialog" id="settings-dialog" aria-labelledby="settings-title">
@@ -1011,7 +1011,8 @@ const tickerList = document.createElement("div");
 tickerList.className = "tickers-panel";
 const workspaceAdd = document.querySelector<HTMLSelectElement>("#workspace-add")!;
 const canvas = document.querySelector<HTMLCanvasElement>("#graph")!;
-const context = canvas.getContext("2d")!;
+let context = canvas.getContext("2d")!;
+const detailCanvas = document.querySelector<HTMLCanvasElement>("#graph-detail")!;
 const canvasWrap = canvas.parentElement as HTMLDivElement;
 const gridCanvas = document.querySelector<HTMLCanvasElement>("#graph-grid")!;
 const gridContext = gridCanvas.getContext("2d")!;
@@ -1019,6 +1020,76 @@ const pointCanvas = document.querySelector<HTMLCanvasElement>("#graph-points")!;
 const pointContext = pointCanvas.getContext("2d")!;
 const GRAPH_BUFFER_VIEWPORTS = 1;
 const GRAPH_BUFFER_SCALE = GRAPH_BUFFER_VIEWPORTS * 2 + 1;
+let refinementTimer: number | undefined;
+let refinementRevision = 0;
+let renderDetailFactor = 1;
+
+function cancelRefinement(): void {
+  refinementRevision += 1;
+  if (refinementTimer !== undefined) {
+    window.clearTimeout(refinementTimer);
+    refinementTimer = undefined;
+  }
+}
+
+function scheduleRefinement(): void {
+  cancelRefinement();
+  const bounds = canvasWrap.getBoundingClientRect();
+  if (bounds.width <= 0 || bounds.height <= 0) return;
+  const dpr = window.devicePixelRatio || 1;
+  const levels = refinementLevels(bounds.width, bounds.height, dpr);
+  const revision = refinementRevision;
+  const refine = (index: number) => {
+    refinementTimer = undefined;
+    if (revision !== refinementRevision || drag || drawFrame !== undefined ||
+        zoomRedrawTimer !== undefined || sliderAnimations.size > 0 || runningTickers.size > 0) return;
+    const factor = levels[index];
+    if (factor === undefined) return;
+    const target = document.createElement("canvas");
+    const targetContext = target.getContext("2d");
+    if (!targetContext) {
+      setProjectStatus("Could not create the high-resolution graph canvas.");
+      return;
+    }
+    const previousContext = context;
+    const explicitSpacing = graphSettings.explicitSampleSpacing;
+    const implicitSpacing = graphSettings.implicitSampleSpacing;
+    const profilingEnabled = performanceProfile.enabled;
+    const started = performance.now();
+    try {
+      context = targetContext;
+      renderDetailFactor = factor;
+      performanceProfile.enabled = false;
+      graphSettings.explicitSampleSpacing = explicitSpacing / factor;
+      graphSettings.implicitSampleSpacing = implicitSpacing / factor;
+      renderGraph(target, bounds.width, bounds.height, dpr * factor);
+      if (revision !== refinementRevision) return;
+      detailCanvas.width = target.width;
+      detailCanvas.height = target.height;
+      const detailContext = detailCanvas.getContext("2d");
+      if (!detailContext) throw new Error("Could not display the high-resolution graph.");
+      detailContext.drawImage(target, 0, 0);
+      detailCanvas.style.transform = "";
+      detailCanvas.dataset.resolution = String(factor);
+      detailCanvas.hidden = false;
+    } catch (reason) {
+      console.error("Graph refinement failed", reason);
+      setProjectStatus(reason instanceof Error ? reason.message : "Could not refine the graph.");
+      return;
+    } finally {
+      context = previousContext;
+      renderDetailFactor = 1;
+      performanceProfile.enabled = profilingEnabled;
+      graphSettings.explicitSampleSpacing = explicitSpacing;
+      graphSettings.implicitSampleSpacing = implicitSpacing;
+    }
+    // Stop escalating expensive views rather than repeatedly blocking interaction.
+    if (performance.now() - started < 120 && index + 1 < levels.length) {
+      refinementTimer = window.setTimeout(() => refine(index + 1), 700);
+    }
+  };
+  if (levels.length > 0) refinementTimer = window.setTimeout(() => refine(0), 700);
+}
 let workspaceDragState: {
   pointerId: number;
   sourceKey: string;
@@ -1261,7 +1332,7 @@ function drawImplicit(
     }
     geometry.segments.push(x1, y1, x2, y2);
   };
-  const step = Math.max(1, Math.min(
+  const step = Math.max(1 / renderDetailFactor, Math.min(
     graphSettings.implicitSampleSpacing, Math.min(scale, verticalScale()) * 0.15,
   ));
   const columns = Math.ceil(width / step) + 1;
@@ -1467,7 +1538,7 @@ function drawExplicitCurve(
   }:${centerX}:${centerY}:${scale}:${graphOptions.aspectRatio}:${width}:${height}:${
     graphSettings.explicitSampleSpacing
   }:${sideways}` : "";
-  const cached = expression && performanceProfile.cacheEnabled
+  const cached = expression && renderDetailFactor === 1 && performanceProfile.cacheEnabled
     ? expressionCurveCaches.get(expression)
     : undefined;
   if (cached?.key === cacheKey) {
@@ -1531,7 +1602,7 @@ function drawExplicitCurve(
             context.fillStyle = color;
             context.fillRect(0, 0, width, height);
           } else {
-            const dpr = window.devicePixelRatio || 1;
+            const dpr = context.getTransform().a;
             const raster = document.createElement("canvas");
             raster.width = Math.max(1, Math.round(width * dpr));
             raster.height = Math.max(1, Math.round(height * dpr));
@@ -1568,7 +1639,7 @@ function drawExplicitCurve(
         const error = sideways
           ? Math.abs(midpoint.y - (first.y + second.y) / 2)
           : Math.abs(midpoint.x - (first.x + second.x) / 2);
-        if (depth < 16 && (error > 0.25 || (depth < 2))) {
+        if (depth < 16 && (error > 0.25 / renderDetailFactor || (depth < 2))) {
           appendInterval(first, midpoint, from, (from + to) / 2, branch, depth + 1);
           appendInterval(midpoint, second, (from + to) / 2, to, branch, depth + 1);
         } else {
@@ -1618,7 +1689,7 @@ function drawExplicitCurve(
         context.stroke(path);
       }
       context.restore();
-      if (expression && performanceProfile.cacheEnabled) {
+      if (expression && renderDetailFactor === 1 && performanceProfile.cacheEnabled) {
         expressionCurveCaches.set(expression, { key: cacheKey, curve: geometry, path });
       }
       return geometry;
@@ -1656,7 +1727,7 @@ function drawExplicitCurve(
     depth: number,
     output: GraphSample[],
   ): void => {
-    if (depth >= 10) {
+    if (depth >= 10 + Math.ceil(Math.log2(renderDetailFactor))) {
       output.push(second);
       return;
     }
@@ -1683,7 +1754,7 @@ function drawExplicitCurve(
     const linearMidpoint = (firstOutput + secondOutput) / 2;
     const curvature = Math.abs(midpointOutput - linearMidpoint);
     const refine = !firstValid || !secondValid || !midpointValid ||
-      screenDelta > 24 || curvature > 0.5;
+      screenDelta > 24 || curvature > 0.5 / renderDetailFactor;
     if (!firstValid && !secondValid && !midpointValid &&
         Math.sign(firstOutput - outputLength / 2) === Math.sign(secondOutput - outputLength / 2) &&
         Math.sign(secondOutput - outputLength / 2) === Math.sign(midpointOutput - outputLength / 2) &&
@@ -1764,7 +1835,7 @@ function drawExplicitCurve(
     context.stroke(path);
   }
   context.restore();
-  if (expression && performanceProfile.cacheEnabled) {
+  if (expression && renderDetailFactor === 1 && performanceProfile.cacheEnabled) {
     expressionCurveCaches.set(expression, { key: cacheKey, curve: geometry, path });
   }
   return geometry;
@@ -2334,7 +2405,7 @@ function drawInequality(
   lineWidth = 2,
   opacity = 1,
 ): CurveGeometry {
-  const cellSize = 5;
+  const cellSize = 5 / renderDetailFactor;
   context.save();
   context.globalAlpha = 0.18 * opacity;
   for (let screenY = 0; screenY < height; screenY += cellSize) {
@@ -2366,19 +2437,30 @@ function drawInequality(
 }
 
 function draw(): void {
+  cancelRefinement();
+  detailCanvas.hidden = true;
+  detailCanvas.style.transform = "";
+  detailCanvas.width = 1;
+  detailCanvas.height = 1;
+  delete detailCanvas.dataset.resolution;
   synchronizeVariableDefinitions();
-  const profileStart = performanceProfile.enabled ? performance.now() : 0;
   const bounds = canvasWrap.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  const width = Math.max(1, bounds.width * GRAPH_BUFFER_SCALE);
-  const height = Math.max(1, bounds.height * GRAPH_BUFFER_SCALE);
+  renderGraph(
+    canvas, Math.max(1, bounds.width * GRAPH_BUFFER_SCALE),
+    Math.max(1, bounds.height * GRAPH_BUFFER_SCALE), window.devicePixelRatio || 1,
+  );
+  scheduleRefinement();
+}
+
+function renderGraph(target: HTMLCanvasElement, width: number, height: number, dpr: number): void {
+  const profileStart = performanceProfile.enabled ? performance.now() : 0;
   const canvasWidth = Math.max(1, Math.round(width * dpr));
   const canvasHeight = Math.max(1, Math.round(height * dpr));
-  if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
-    canvas.width = canvasWidth;
-    canvas.height = canvasHeight;
-    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (target.width !== canvasWidth || target.height !== canvasHeight) {
+    target.width = canvasWidth;
+    target.height = canvasHeight;
   }
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
   context.clearRect(0, 0, width, height);
   context.fillStyle = currentThemeColor("app-bg");
   context.fillRect(0, 0, width, height);
@@ -2468,7 +2550,7 @@ function draw(): void {
             graphId,expression.color,evaluate,width,height,colorAt,lineWidth,opacity,true,expression,graph.tangent,
           );
           implicitCurves.push(curve);
-          detectExplicitPoints(curve,evaluate,candidates,width,height,true);
+          if (renderDetailFactor === 1) detectExplicitPoints(curve,evaluate,candidates,width,height,true);
           expression.evaluationError = undefined;
         } catch (reason) {
           expression.evaluationError = reason instanceof Error ? reason.message : "Could not render curve.";
@@ -2481,7 +2563,7 @@ function draw(): void {
           graph.evaluate,width,height,graphId,expression.color,colorAt,lineWidth,opacity,
         );
         implicitCurves.push(curve);
-        detectImplicitAxisIntercepts(curve,graph.evaluate,candidates,width,height);
+        if (renderDetailFactor === 1) detectImplicitAxisIntercepts(curve,graph.evaluate,candidates,width,height);
         continue;
       }
       if(graph.kind==="inequality") {
@@ -2548,7 +2630,7 @@ function draw(): void {
           graphId,expression.color,evaluate,width,height,colorAt,lineWidth,opacity,false,expression,graph.tangent,
         );
         explicitCurves.push(curve);
-        detectExplicitPoints(curve,evaluate,candidates,width,height);
+        if (renderDetailFactor === 1) detectExplicitPoints(curve,evaluate,candidates,width,height);
         expression.evaluationError = undefined;
       } catch (reason) {
         expression.evaluationError = reason instanceof Error ? reason.message : "Could not render curve.";
@@ -2580,7 +2662,7 @@ function draw(): void {
         );
         context.setLineDash([]);
         explicitCurves.push(curve);
-        detectExplicitPoints(curve,evaluate,candidates,width,height);
+        if (renderDetailFactor === 1) detectExplicitPoints(curve,evaluate,candidates,width,height);
       }
     }
 
@@ -2635,6 +2717,7 @@ function draw(): void {
   for (const item of workspaceBlocks().flatMap((block) => block.items).reverse()) {
     drawWorkspaceItem(item);
   }
+  if (renderDetailFactor !== 1) return;
   for (let first = 0; first < explicitCurves.length; first += 1) {
     for (let second = first + 1; second < explicitCurves.length; second += 1) {
       detectExplicitIntersections(
@@ -2681,6 +2764,7 @@ function draw(): void {
 }
 
 function previewZoom(factor: number, anchorX: number, anchorY: number): void {
+  cancelRefinement();
   if (drawFrame !== undefined) {
     window.cancelAnimationFrame(drawFrame);
     drawFrame = undefined;
@@ -2703,6 +2787,18 @@ function previewZoom(factor: number, anchorX: number, anchorY: number): void {
   canvas.style.transformOrigin = "0 0";
   canvas.style.transform =
     `matrix(${visualScale}, 0, 0, ${visualScale}, ${translateX}, ${translateY})`;
+  if (detailCanvas.dataset.resolution) {
+    if (visualScale < 1) {
+      detailCanvas.hidden = true;
+    } else {
+      detailCanvas.hidden = false;
+      detailCanvas.style.transformOrigin = "0 0";
+      detailCanvas.style.transform =
+        `matrix(${visualScale}, 0, 0, ${visualScale}, ${
+          translateX + bounds.width * GRAPH_BUFFER_VIEWPORTS * (visualScale - 1)
+        }, ${translateY + bounds.height * GRAPH_BUFFER_VIEWPORTS * (visualScale - 1)})`;
+    }
+  }
   drawGrid();
   pointContext.clearRect(0, 0, bounds.width, bounds.height);
 
@@ -2714,6 +2810,7 @@ function previewZoom(factor: number, anchorX: number, anchorY: number): void {
 }
 
 function scheduleDraw(): void {
+  cancelRefinement();
   if (drawFrame !== undefined) return;
   drawFrame = window.requestAnimationFrame(() => {
     drawFrame = undefined;
@@ -3438,12 +3535,14 @@ function stopSliderAnimation(name?: string): void {
   if (wasAnimating && sliderAnimations.size === 0 && runningTickers.size === 0) {
     captureProjectHistory();
     if (!saveProjectLocally()) scheduleProjectSave(false);
+    scheduleRefinement();
   }
 }
 
 function startSliderAnimation(name: string): void {
   const options = sliderOptions[name];
   if (!options) return;
+  cancelRefinement();
   if (sliderAnimations.size === 0) flushPendingHistory();
   sliderAnimations.set(name, { direction: 1, lastTime: performance.now() });
   if (sliderAnimationTimer !== undefined) return;
@@ -3496,6 +3595,7 @@ function stopTicker(id: number, save = true): void {
       captureProjectHistory();
       scheduleProjectSave();
     }
+    scheduleRefinement();
   }
 }
 
@@ -3505,6 +3605,7 @@ function stopAllTickers(save = true): void {
 
 function startTicker(ticker: Ticker): void {
   if (runningTickers.has(ticker.id)) return;
+  cancelRefinement();
   for (const name of sliderNames()) sliderValues[name] ??= 1;
   renderSliders();
   let action: ReturnType<typeof compileTickerAction>;
@@ -5540,6 +5641,7 @@ function moveDraggablePoint(
 }
 
 canvas.addEventListener("pointerdown", (event) => {
+  cancelRefinement();
   const bounds = canvasWrap.getBoundingClientRect();
   const screenX = event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS;
   const screenY = event.clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS;
@@ -5598,6 +5700,7 @@ canvas.addEventListener("pointermove", (event) => {
       centerX = drag.centerX - deltaX / scale;
       centerY = drag.centerY + deltaY / verticalScale();
       canvas.style.transform = `translate3d(${deltaX}px, ${deltaY}px, 0)`;
+      detailCanvas.style.transform = canvas.style.transform;
       drawGrid();
     }
   } else {
@@ -5633,7 +5736,9 @@ canvas.addEventListener("pointerup", (event) => {
     scheduleDraw();
   } else {
     canvas.style.transform = "";
+    detailCanvas.style.transform = "";
     drawHoverOverlay();
+    scheduleRefinement();
   }
 });
 canvas.addEventListener("pointercancel", () => {
@@ -5651,9 +5756,11 @@ canvas.addEventListener("pointercancel", () => {
   drag = undefined;
   clearDragTransformAfterDraw = false;
   canvas.style.transform = "";
+  detailCanvas.style.transform = "";
   canvas.style.cursor = "crosshair";
   drawGrid();
   drawHoverOverlay();
+  scheduleRefinement();
 });
 canvas.addEventListener("pointerleave", () => {
   if (!drag) {

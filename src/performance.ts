@@ -84,6 +84,14 @@ export interface IndexedCurve {
   hoverPoint?: (x: number, y: number) => { x: number; y: number };
 }
 
+export function refinementLevels(width: number, height: number, dpr: number): number[] {
+  if (![width, height, dpr].every((value) => Number.isFinite(value) && value > 0)) {
+    throw new Error("Refinement requires positive finite viewport dimensions and pixel ratio.");
+  }
+  return [1.5, 2, 3, 4].filter((factor) =>
+    Math.round(width * dpr * factor) * Math.round(height * dpr * factor) <= 16_000_000);
+}
+
 export function tangentBranchRange(slope: number, offset: number, min: number, max: number) {
   if (![slope, offset, min, max].every(Number.isFinite) || slope === 0) {
     throw new Error("Tangent branches require finite bounds and a nonzero finite slope.");

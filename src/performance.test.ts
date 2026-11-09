@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { BoundedCache, referencedVariableSignature, SegmentIndex, selectHoverPoint, tangentBranchRange, tangentPixelCoverage } from "./performance";
+import { BoundedCache, referencedVariableSignature, SegmentIndex, selectHoverPoint, tangentBranchRange, tangentPixelCoverage, refinementLevels } from "./performance";
+
+describe("progressive viewport refinement", () => {
+  it("progresses through display-relative levels without exceeding the visible-canvas pixel budget", () => {
+    expect(refinementLevels(800, 600, 1)).toEqual([1.5, 2, 3, 4]);
+    expect(refinementLevels(800, 600, 2)).toEqual([1.5, 2]);
+    expect(refinementLevels(4000, 3000, 2)).toEqual([]);
+    for (const factor of refinementLevels(1200, 800, 2)) {
+      expect(Math.round(1200 * 2 * factor) * Math.round(800 * 2 * factor))
+        .toBeLessThanOrEqual(16_000_000);
+    }
+    expect(refinementLevels(1000, 1000, 1)).toEqual([1.5, 2, 3, 4]);
+    expect(() => refinementLevels(0, 600, 1)).toThrow(/positive finite/);
+  });
+});
 
 describe("bounded sample caching", () => {
   it("evicts least-recently-used entries and remains active after reaching capacity", () => {
