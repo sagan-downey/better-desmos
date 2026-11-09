@@ -18,7 +18,144 @@ import {
   getPrecisionDigits,
   setPrecisionDigits,
   expandUserFunctions,
+  UndefinedPointError,
 } from "./math";
+
+describe("restrictions and piecewise expressions", () => {
+  it("selects the first matching branch lazily and preserves exact results", () => {
+    const expression = compileExpression("{x<0: -x, x=0: 1/3, sqrt(x)}");
+    expect(expression(-2).value.toNumber()).toBe(2);
+    expect(expression(0).exact).toBe(true);
+    expect(expression(0).value.toNumber()).toBeCloseTo(1 / 3);
+    expect(expression(4).value.toNumber()).toBe(2);
+    expect(compileExpression("{x<0: sqrt(-1), 7}")(2).value.toNumber()).toBe(7);
+    expect(compileExpression("{x>=0: 1, x>=0: 2}")(0).value.toNumber()).toBe(1);
+    expect(() => compileExpression("{x>0: x}")(-1)).toThrow(UndefinedPointError);
+    expect(() => compileExpression("{x<0: sqrt(x), 0}")(-1)).toThrow(/sqrt/);
+  });
+
+  it("supports chained comparisons, grouped conditions, and/or and nested piecewise arithmetic", () => {
+    const expression = compileExpression("2+{(x+1)<=0 or (1<x<3 and x!=2): {x<0: 4, 5}, 0}");
+    expect(expression(-2).value.toNumber()).toBe(6);
+    expect(expression(1.5).value.toNumber()).toBe(7);
+    expect(expression(2).value.toNumber()).toBe(2);
+    expect(expression(3).value.toNumber()).toBe(2);
+    expect(compileExpression("{x≤0: 2, x≥1: 3, 4}")(0).value.toNumber()).toBe(2);
+    expect(compileExpression("{x≠0: 1, 0}")(0).value.toNumber()).toBe(0);
+    expect(compileExpression("sqrt(4){x>0, x<-1}")(-2).value.toNumber()).toBe(2);
+    expect(() => compileExpression("1{x>0}{x<2}")(3)).toThrow(UndefinedPointError);
+    expect(compileExpression("{x=0 or 1/x>0: 5, 0}")(0).value.toNumber()).toBe(5);
+    expect(compileExpression("{({x<0:0,2})<1:7,9}")(-1).value.toNumber()).toBe(7);
+    expect(compileExpression("{1/3>0.333333333333333333333333333333333333333333333333333:1,0}")(0)
+      .value.toNumber()).toBe(1);
+  });
+
+  it("handles live slider conditions and expanded function bodies", () => {
+    const variables = { a: 2 };
+    const source = expandUserFunctions("f(x)", [{ name: "f", parameter: "x", body: "{x<a: x^2, a}" }]);
+    const expression = compileExpression(source, variables);
+    expect(expression(3).value.toNumber()).toBe(2);
+    variables.a = 4;
+    expect(expression(3).value.toNumber()).toBe(9);
+  });
+
+  it("clips explicit/sideways graphs in both modes using the actual plotted coordinates", () => {
+    for (const compile of [compileGraphExpression, compileFastGraphExpression]) {
+      const graph = compile("y=x^2 {-2<x<2}{y<=1}");
+      expect(graph.kind).toBe("explicit");
+      if (graph.kind !== "explicit") throw Error("Expected explicit");
+      expect(() => graph.evaluate(1)).not.toThrow();
+      expect(() => graph.evaluate(1.5)).toThrow(UndefinedPointError);
+      expect(() => graph.evaluate(-2)).toThrow(UndefinedPointError);
+      const sideways = compile("x=y^2 {x<4 and y>=0}");
+      expect(sideways.kind).toBe("sideways");
+      if (sideways.kind !== "sideways") throw Error("Expected sideways");
+      expect(() => sideways.evaluate(1)).not.toThrow();
+      expect(() => sideways.evaluate(-1)).toThrow(UndefinedPointError);
+      expect(() => sideways.evaluate(2)).toThrow(UndefinedPointError);
+      const branch = compile("y={x<0: -1, x=0: 0, 1}");
+      expect(branch.kind).toBe("explicit");
+      if (branch.kind !== "explicit") throw Error("Expected explicit piecewise");
+      const result = branch.evaluate(-1);
+      expect(typeof result === "number" ? result : result.value.toNumber()).toBe(-1);
+    }
+  });
+
+  it("restricts implicit equations, inequalities and parameterized curves", () => {
+    for (const compile of [compileGraphExpression, compileFastGraphExpression]) {
+      for (const source of ["x^2+y^2=4{x>=0}", "x^2+y^2<=4{x>=0}"]) {
+        const graph = compile(source);
+        if (graph.kind !== "implicit" && graph.kind !== "inequality") throw Error("Expected contour");
+        expect(() => graph.evaluate(2, 0)).not.toThrow();
+        expect(() => graph.evaluate(-2, 0)).toThrow(UndefinedPointError);
+      }
+      const graph = compile("parametric(t,{t<0: t^2, t},-2,2){x>=0}");
+      if (graph.kind !== "parametric") throw Error("Expected parametric");
+      expect(graph.evaluate(1)).toEqual([1, 1]);
+      expect(() => graph.evaluate(-1)).toThrow(UndefinedPointError);
+      const implicit = compile("x^2+y^2={x>=0: 4, 1}");
+      if (implicit.kind !== "implicit") throw Error("Expected implicit piecewise");
+      const result = implicit.evaluate(-1, 0);
+      expect(typeof result === "number" ? result : result.toNumber()).toBe(0);
+      const point = compile("(a,b){x>=0}", { a: -1, b: 2 });
+      if (point.kind !== "point") throw Error("Expected point");
+      expect(() => point.evaluate()).toThrow(UndefinedPointError);
+      const polar = compile("polar({t<pi: 2, 1},0,2pi){y>=0}");
+      if (polar.kind !== "parametric") throw Error("Expected polar");
+      expect(() => polar.evaluate(Math.PI / 2)).not.toThrow();
+      expect(() => polar.evaluate(Math.PI * 1.5)).toThrow(UndefinedPointError);
+    }
+  });
+
+  it("keeps restrictions live and avoids unrestricted tangent optimization", () => {
+    for (const compile of [compileGraphExpression, compileFastGraphExpression]) {
+      const variables = { a: 1 };
+      const graph = compile("tan(x){x<a}", variables);
+      if (graph.kind !== "explicit") throw Error("Expected explicit");
+      expect(graph.tangent).toBeUndefined();
+      expect(() => graph.evaluate(2)).toThrow(UndefinedPointError);
+      variables.a = 3;
+      expect(() => graph.evaluate(2)).not.toThrow();
+    }
+  });
+
+  it("identifies branch boundaries so renderers never join different piecewise branches", () => {
+    for (const compile of [compileGraphExpression, compileFastGraphExpression]) {
+      for (const source of ["y={x<0: -1, 1}", "y=2+{x<0: -1, 1}{x>-2}"]) {
+        const graph = compile(source);
+        if (graph.kind !== "explicit" || !graph.region) throw Error("Expected branch metadata");
+        expect(graph.region(-1)).not.toBe(graph.region(1));
+        expect(graph.region(-1)).toBe(graph.region(-0.1));
+      }
+      const graph = compile("parametric(t,{t<0: -1, 1},-2,2)");
+      if (graph.kind !== "parametric" || !graph.region) throw Error("Expected parametric branch metadata");
+      expect(graph.region(-1)).not.toBe(graph.region(1));
+      const implicit = compile("{x<0: -1, 1}=0");
+      if (implicit.kind !== "implicit" || !implicit.region) throw Error("Expected implicit branch metadata");
+      expect(implicit.region(-1, 0)).not.toBe(implicit.region(1, 0));
+      const inequality = compile("y^2<{x<0:1,4}");
+      if (inequality.kind !== "inequality" || !inequality.region) throw Error("Expected inequality branch metadata");
+      expect(inequality.region(-1, 0)).not.toBe(inequality.region(1, 0));
+    }
+  });
+
+  it("restricts list points without shifting the surviving points' x coordinates", () => {
+    for (const compile of [compileGraphExpression, compileFastGraphExpression]) {
+      const graph = compile("list(1,2,3,4){x>2 and y<4}");
+      if (graph.kind !== "list") throw Error("Expected list");
+      expect(graph.evaluate()).toEqual([undefined, undefined, 3, undefined]);
+    }
+  });
+
+  it("reports invalid syntax and never executes user text", () => {
+    for (const source of ["{}", "{x<0:}", "{x<0: 1, 2, x>1: 3}", "{1: 2}",
+      "{x<: 1}", "x{}", "x{x}", "{x<0: 1", "{x<0: window.alert(1), 0}", "x{unknown>0}",
+      "x{x>0}+1{x<2}"]) {
+      expect(() => compileGraphExpression(source), source).toThrow();
+      expect(() => compileFastGraphExpression(source), source).toThrow();
+    }
+  });
+});
 
 describe("compileExpression", () => {
   it("provides live affine tangent branches in both graph orientations and modes", () => {

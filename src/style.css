@@ -131,6 +131,16 @@ button { color: inherit; }
 .ticker-content > button { padding: 5px 8px; border: 1px solid var(--border-medium); border-radius: 5px; color: var(--text-secondary); background: var(--raised-bg); font-size: 11px; cursor: pointer; }
 .ticker-error { grid-column: 1 / -1; margin: 0; color: var(--error); font-size: 10px; overflow-wrap: anywhere; }
 .ticker-panel [aria-invalid="true"] { border-color: var(--error-border); }
+.photo-panel { margin-bottom: 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-bg); }
+.photo-heading { display: flex; align-items: center; gap: 6px; padding: 8px; }
+.photo-heading .workspace-item-name { min-width: 0; flex: 1; }
+.photo-heading > button:not(.remove-button) { padding: 5px 8px; border: 1px solid var(--border-medium); border-radius: 5px; color: var(--text-secondary); background: var(--raised-bg); font-size: 12px; cursor: pointer; }
+.photo-content { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 0 8px 8px; }
+.photo-field { display: grid; gap: 5px; color: var(--text-secondary); font-size: 12px; }
+.photo-field input, .photo-field select { min-width: 0; width: 100%; min-height: 36px; padding: 7px; border: 1px solid var(--border-medium); border-radius: 5px; color: var(--text); background: var(--input-bg); }
+.photo-field input[type="range"] { padding: 0; border: 0; background: transparent; accent-color: var(--accent); }
+.photo-error { grid-column: 1 / -1; margin: 0; color: var(--error); font-size: 12px; overflow-wrap: anywhere; }
+.photo-panel [aria-invalid="true"] { border-color: var(--error-border); }
 .hsv-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: 5px; }
 .expression-row .hsv-fields input { padding: 5px; font-size: 10px; }
 .appearance-hsv-control small { display: block; margin-top: 5px; color: var(--muted-text); line-height: 1.4; }

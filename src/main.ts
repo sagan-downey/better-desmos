@@ -1,5 +1,7 @@
 import {
   compileExpression,
+  graphRelation,
+  UndefinedPointError,
   compileFastGraphExpression,
   compileGraphExpression,
   compileTickerAction,
@@ -27,6 +29,7 @@ import {
   type TrigonometricRegression,
 } from "./math";
 import { BoundedCache, referencedVariableSignature, SegmentIndex, selectHoverPoint, tangentBranchRange, tangentPixelCoverage, refinementLevels } from "./performance";
+import { parsePhotos, evaluatePhotoTransform, photoMatrix, PHOTO_FIELDS, PHOTO_TYPES, MAX_PHOTO_BYTES, MAX_PHOTO_PIXELS, MAX_TOTAL_PHOTO_PIXELS, type Photo } from "./photos";
 import "./style.css";
 
 type CompiledGraph = GraphExpression;
@@ -129,6 +132,7 @@ interface ProjectState {
   tables: DataTable[];
   texts?: TextBlock[];
   tickers?: Ticker[];
+  photos?: Photo[];
   workspaceOrder: WorkspaceItem[];
   folders: Folder[];
   sliders: Record<string, number>;
@@ -148,7 +152,7 @@ interface GraphOptions {
 }
 
 interface WorkspaceItem {
-  type: "expression" | "table" | "text" | "ticker" | "folder";
+  type: "expression" | "table" | "text" | "ticker" | "photo" | "folder";
   id: number;
   folderId?: number;
 }
@@ -177,6 +181,7 @@ interface GraphSample {
   screenX: number;
   screenY: number;
   connected: boolean;
+  region?: string;
 }
 
 interface PointCandidate {
@@ -394,6 +399,7 @@ function parseProjectState(text: string): ProjectState {
     throw new Error("Project file has an invalid or unsupported structure.");
   }
   const graphOptions = value.graphOptions;
+  const parsedPhotos = parsePhotos(value.photos);
   if (graphOptions !== undefined &&
       (!isRecord(graphOptions) ||
         typeof graphOptions.showGrid !== "boolean" ||
@@ -602,12 +608,15 @@ function parseProjectState(text: string): ProjectState {
       ...parsedTickers.map(({ id, folderId }): WorkspaceItem => ({
         type: "ticker", id, folderId,
       })),
+      ...parsedPhotos.map(({ id, folderId }): WorkspaceItem => ({
+        type: "photo", id, folderId,
+      })),
       ...parsedFolders.map(({ id }): WorkspaceItem => ({ type: "folder", id })),
     ]
     : rawWorkspaceOrder.map((item): WorkspaceItem => {
       if (!isRecord(item) ||
           (item.type !== "expression" && item.type !== "table" &&
-            item.type !== "text" && item.type !== "ticker" && item.type !== "folder") ||
+            item.type !== "text" && item.type !== "ticker" && item.type !== "photo" && item.type !== "folder") ||
           !Number.isSafeInteger(item.id) || Number(item.id) < 1 ||
           (item.type === "folder" && item.folderId !== undefined) ||
           (item.folderId !== undefined && !Number.isSafeInteger(item.folderId))) {
@@ -652,12 +661,13 @@ function parseProjectState(text: string): ProjectState {
     ...tableIds.map((id) => `table:${id}`),
     ...parsedTexts.map(({ id }) => `text:${id}`),
     ...parsedTickers.map(({ id }) => `ticker:${id}`),
+    ...parsedPhotos.map(({ id }) => `photo:${id}`),
     ...folderIds.map((id) => `folder:${id}`),
   ];
   if (new Set(workspaceKeys).size !== workspaceKeys.length ||
       workspaceKeys.length !== expectedWorkspaceKeys.length ||
       expectedWorkspaceKeys.some((key) => !workspaceKeys.includes(key))) {
-    throw new Error("Project workspace order must include each expression, table, text block, ticker, and folder exactly once.");
+    throw new Error("Project workspace order must include each expression, table, text block, ticker, photo, and folder exactly once.");
   }
   return {
     version: 1,
@@ -665,6 +675,7 @@ function parseProjectState(text: string): ProjectState {
     tables: parsedTables,
     texts: parsedTexts,
     tickers: parsedTickers,
+    photos: parsedPhotos,
     workspaceOrder: parsedWorkspaceOrder,
     folders: parsedFolders,
     sliders,
@@ -722,12 +733,24 @@ let expressions: Expression[] = initialProject?.expressions ?? [];
 let tables: DataTable[] = initialProject?.tables ?? [];
 let textBlocks: TextBlock[] = initialProject?.texts ?? [];
 let tickers: Ticker[] = initialProject?.tickers ?? [];
+let photos: Photo[] = initialProject?.photos ?? [];
+interface PhotoImage {
+  bitmap?: ImageBitmap;
+  error?: string;
+  transformError?: string;
+  retryOnRelease?: boolean;
+  loading: boolean;
+}
+const photoImages = new Map<Photo, PhotoImage>();
+let photoPixels = 0;
+let photoUploadRevision = 0;
 let folders: Folder[] = initialProject?.folders ?? [];
 let workspaceOrder: WorkspaceItem[] = initialProject?.workspaceOrder ?? [
   ...expressions.map(({ id }): WorkspaceItem => ({ type: "expression", id })),
   ...tables.map(({ id }): WorkspaceItem => ({ type: "table", id })),
   ...textBlocks.map(({ id }): WorkspaceItem => ({ type: "text", id })),
   ...tickers.map(({ id }): WorkspaceItem => ({ type: "ticker", id })),
+  ...photos.map(({ id }): WorkspaceItem => ({ type: "photo", id })),
   ...folders.map(({ id }): WorkspaceItem => ({ type: "folder", id })),
 ];
 const sliderValues: Record<string, number> = initialProject?.sliders ?? {};
@@ -751,6 +774,7 @@ let nextRowId = Math.max(0, ...tables.flatMap((table) => table.rows.map((row) =>
 let nextFolderId = Math.max(0, ...folders.map((folder) => folder.id)) + 1;
 let nextTextId = Math.max(0, ...textBlocks.map((textBlock) => textBlock.id)) + 1;
 let nextTickerId = Math.max(0, ...tickers.map((ticker) => ticker.id)) + 1;
+let nextPhotoId = Math.max(0, ...photos.map((photo) => photo.id)) + 1;
 let centerX = initialProject?.centerX ?? 0;
 let centerY = initialProject?.centerY ?? 0;
 let scale = initialProject?.scale ?? 48;
@@ -856,7 +880,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 2.14 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">2.14</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 3.0 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">3.0</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -874,15 +898,17 @@ app.innerHTML = `
               <option value="table">Add table</option>
               <option value="text">Add text</option>
               <option value="ticker">Add ticker</option>
+              <option value="photo">Add photo</option>
               <option value="folder">Add folder</option>
             </select>
           </label>
           <input type="file" id="project-file" accept="application/json,.json" hidden />
+          <input type="file" id="photo-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
         </div>
       </div>
       <span id="project-status" role="status"></span>
       <div class="sidebar-scroll">
-        <div class="workspace-items" id="workspace-items" aria-label="Expressions, tables, text, and folders"></div>
+        <div class="workspace-items" id="workspace-items" aria-label="Expressions, tables, text, tickers, photos, and folders"></div>
         <section class="sliders-panel" id="sliders" aria-label="Parameter sliders"></section>
       </div>
     </aside>
@@ -1009,6 +1035,7 @@ const textList = document.createElement("div");
 textList.className = "text-blocks";
 const tickerList = document.createElement("div");
 tickerList.className = "tickers-panel";
+const photoList = document.createElement("div");
 const workspaceAdd = document.querySelector<HTMLSelectElement>("#workspace-add")!;
 const canvas = document.querySelector<HTMLCanvasElement>("#graph")!;
 let context = canvas.getContext("2d")!;
@@ -1323,6 +1350,7 @@ function drawImplicit(
   colorAt?: (x: number, y: number) => string,
   lineWidth = 2,
   opacity = 1,
+  regionAt?: (x: number, y?: number) => string,
 ): CurveGeometry {
   const geometry: CurveGeometry = { id, color, segments: [], colorAt };
   const addSegment = (x1: number, y1: number, x2: number, y2: number) => {
@@ -1346,6 +1374,7 @@ function drawImplicit(
     screenYs, (py) => (height / 2 - py) / verticalScale() + centerY,
   );
   const values = new Float64Array(columns * rows);
+  const regions = regionAt ? new Array<string | undefined>(columns * rows) : undefined;
   values.fill(Number.NaN);
 
   for (let row = 0; row < rows; row += 1) {
@@ -1357,6 +1386,7 @@ function drawImplicit(
         const value = typeof result === "number" ? result : result.toNumber();
         if (Number.isFinite(value)) {
           values[row * columns + column] = value;
+          if (regions) regions[row * columns + column] = regionAt!(x, y);
         }
       } catch {
         // Undefined samples leave gaps in the implicit contour.
@@ -1390,6 +1420,12 @@ function drawImplicit(
       const topRight = values[row * columns + column + 1]!;
       const bottomRight = values[(row + 1) * columns + column + 1]!;
       const bottomLeft = values[(row + 1) * columns + column]!;
+      if (regions) {
+        const region = regions[row * columns + column];
+        if (region !== regions[row * columns + column + 1] ||
+            region !== regions[(row + 1) * columns + column + 1] ||
+            region !== regions[(row + 1) * columns + column]) continue;
+      }
       if (!Number.isFinite(topLeft) || !Number.isFinite(topRight) ||
           !Number.isFinite(bottomRight) || !Number.isFinite(bottomLeft)) {
         continue;
@@ -1531,6 +1567,7 @@ function drawExplicitCurve(
   sideways = false,
   expression?: Expression,
   tangent?: () => { slope: number; offset: number },
+  regionAt?: (parameter: number) => string,
 ): ExplicitCurveData {
   const source = expression ? expandFunctions(expression.text) : "";
   const cacheKey = expression ? `${graphMode}:${getPrecisionDigits()}:${source}:${
@@ -1714,6 +1751,7 @@ function drawExplicitCurve(
         screenX,
         screenY,
         connected: false,
+        region: regionAt?.(parameter),
       };
     } catch {
       return sideways
@@ -1753,7 +1791,8 @@ function drawExplicitCurve(
     }
     const linearMidpoint = (firstOutput + secondOutput) / 2;
     const curvature = Math.abs(midpointOutput - linearMidpoint);
-    const refine = !firstValid || !secondValid || !midpointValid ||
+    const refine = first.region !== second.region || first.region !== midpoint.region ||
+      !firstValid || !secondValid || !midpointValid ||
       screenDelta > 24 || curvature > 0.5 / renderDetailFactor;
     if (!firstValid && !secondValid && !midpointValid &&
         Math.sign(firstOutput - outputLength / 2) === Math.sign(secondOutput - outputLength / 2) &&
@@ -1794,14 +1833,16 @@ function drawExplicitCurve(
       outputPixel >= -outputLength * 2 && outputPixel <= outputLength * 3;
     const jumpTooLarge = previousOutput !== undefined &&
       Math.abs(outputPixel - previousOutput) > outputLength;
-    const connected = valid && drawing && previousOutput !== undefined && !jumpTooLarge;
+    const previous = samples.at(-1);
+    const sameRegion = previous?.region === sample.region;
+    const connected = valid && drawing && previousOutput !== undefined && !jumpTooLarge && sameRegion;
     if (!valid || jumpTooLarge) {
       drawing = false;
       previousOutput = Number.isFinite(outputPixel) ? outputPixel : undefined;
       samples.push(sample);
       return;
     }
-    if (!drawing) {
+    if (!drawing || !sameRegion) {
       path.moveTo(sample.screenX, sample.screenY);
       drawing = true;
     } else {
@@ -2345,6 +2386,7 @@ function drawParametricCurve(
   colorAt?: (x: number, y: number) => string,
   lineWidth = 2,
   opacity = 1,
+  regionAt?: (parameter: number) => string,
 ): ExplicitCurveData {
   const samples: GraphSample[] = [];
   const geometry: ExplicitCurveData = { id, color, samples, segments: [], colorAt };
@@ -2361,12 +2403,13 @@ function drawParametricCurve(
     const parameter = start + (end - start) * index / count;
     try {
       const [x, y] = evaluate(parameter);
+      const region = regionAt?.(parameter);
       const screenX = width / 2 + (x - centerX) * scale;
       const screenY = height / 2 - (y - centerY) * verticalScale();
       const valid = Number.isFinite(screenX) && Number.isFinite(screenY) &&
         screenX >= -width * 2 && screenX <= width * 3 &&
         screenY >= -height * 2 && screenY <= height * 3;
-      const connected = Boolean(valid && previous &&
+      const connected = Boolean(valid && previous && previous.region === region &&
         Math.hypot(screenX - previous.screenX, screenY - previous.screenY) <= height);
       if (!valid) {
         previous = undefined;
@@ -2378,7 +2421,7 @@ function drawParametricCurve(
       } else {
         if (!colorAt) context.moveTo(screenX, screenY);
       }
-      const sample = { x, y, screenX, screenY, connected };
+      const sample = { x, y, screenX, screenY, connected, region };
       samples.push(sample);
       previous = sample;
     } catch {
@@ -2404,6 +2447,7 @@ function drawInequality(
   colorAt?: (x: number, y: number) => string,
   lineWidth = 2,
   opacity = 1,
+  regionAt?: (x: number, y?: number) => string,
 ): CurveGeometry {
   const cellSize = 5 / renderDetailFactor;
   context.save();
@@ -2433,7 +2477,7 @@ function drawInequality(
     }
   }
   context.restore();
-  return drawImplicit(evaluate, width, height, id, color, colorAt, lineWidth, opacity);
+  return drawImplicit(evaluate, width, height, id, color, colorAt, lineWidth, opacity, regionAt);
 }
 
 function draw(): void {
@@ -2481,6 +2525,11 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
   const expressionById = new Map(expressions.map((expression) => [expression.id, expression]));
   const tableById = new Map(tables.map((table) => [table.id, table]));
   const drawWorkspaceItem=(item: WorkspaceItem): void => {
+    if (item.type === "photo") {
+      const photo = photos.find((entry) => entry.id === item.id);
+      if (photo) drawPhoto(photo, width, height);
+      return;
+    }
     listPoints.length=0;
     nextDraggableGraphPoints.length=0;
     const entry = item.type === "expression" ? expressionById.get(item.id) : undefined;
@@ -2534,10 +2583,11 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
           );
           expression.evaluationError=undefined;
         } catch(reason) {
-          expression.evaluationError=reason instanceof Error
+          expression.evaluationError=reason instanceof UndefinedPointError ? undefined : reason instanceof Error
             ? reason.message
             :"Could not evaluate point";
         }
+        updateExpressionErrorDisplay(expression);
         continue;
       }
       if(graph.kind==="sideways") {
@@ -2547,7 +2597,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
         });
         try {
           const curve=drawExplicitCurve(
-            graphId,expression.color,evaluate,width,height,colorAt,lineWidth,opacity,true,expression,graph.tangent,
+            graphId,expression.color,evaluate,width,height,colorAt,lineWidth,opacity,true,expression,graph.tangent,graph.region,
           );
           implicitCurves.push(curve);
           if (renderDetailFactor === 1) detectExplicitPoints(curve,evaluate,candidates,width,height,true);
@@ -2560,7 +2610,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
       }
       if(graph.kind==="implicit") {
         const curve=drawImplicit(
-          graph.evaluate,width,height,graphId,expression.color,colorAt,lineWidth,opacity,
+          graph.evaluate,width,height,graphId,expression.color,colorAt,lineWidth,opacity,graph.region,
         );
         implicitCurves.push(curve);
         if (renderDetailFactor === 1) detectImplicitAxisIntercepts(curve,graph.evaluate,candidates,width,height);
@@ -2569,7 +2619,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
       if(graph.kind==="inequality") {
         const curve=drawInequality(
           graph.evaluate,graph.relation,graphId,expression.color,width,height,colorAt,
-          lineWidth,opacity,
+          lineWidth,opacity,graph.region,
         );
         implicitCurves.push(curve);
         continue;
@@ -2578,7 +2628,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
         const curve=drawParametricCurve(
           graphId,expression.color,graph.evaluate,graph.start,graph.end,width,height,
           colorAt,
-          lineWidth,opacity,
+          lineWidth,opacity,graph.region,
         );
         explicitCurves.push(curve);
         continue;
@@ -2587,7 +2637,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
         try {
           expression.evaluationError=undefined;
           const values=graph.evaluate();
-          if(values.some((value) => !Number.isFinite(value))) {
+          if(values.some((value) => value !== undefined && !Number.isFinite(value))) {
             throw new Error("List values must be finite numbers");
           }
           const expressionError=workspaceList.querySelector<HTMLParagraphElement>(
@@ -2598,6 +2648,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
             `[data-expression-id="${expression.id}"] input[type="text"]`,
           )?.removeAttribute("aria-invalid");
           values.forEach((y,index) => {
+            if (y === undefined) return;
             const x=index+1;
             const screenX=width/2+(x-centerX)*scale;
             const screenY=height/2-(y-centerY)*verticalScale();
@@ -2627,7 +2678,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
       });
       try {
         const curve=drawExplicitCurve(
-          graphId,expression.color,evaluate,width,height,colorAt,lineWidth,opacity,false,expression,graph.tangent,
+          graphId,expression.color,evaluate,width,height,colorAt,lineWidth,opacity,false,expression,graph.tangent,graph.region,
         );
         explicitCurves.push(curve);
         if (renderDetailFactor === 1) detectExplicitPoints(curve,evaluate,candidates,width,height);
@@ -2843,7 +2894,7 @@ function updateScalarResult(expression: Expression): boolean {
   const source = expression.text.trim();
   const scalarKey = `${source}\u0000${userFunctionSignature()}`;
   const tokens = source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [];
-  if (!source || source.includes("=") || /[<>]/.test(source) ||
+  if (!source || graphRelation(source) ||
       /^(?:list|derivative|integral|parametric|polar)\s*\(/i.test(source) ||
       tokens.some((name) => ["x", "y", "t"].includes(name.toLowerCase()))) {
     expression.scalarText = scalarKey;
@@ -3073,7 +3124,7 @@ function synchronizeVariableDefinitions(): {
 } {
   const functionStates = getUserFunctionDefinitions();
   const reserved = new Set([
-    "x", "y", "t", "pi", "e", "sqrt", "sin", "cos", "tan", "asin", "acos",
+    "x", "y", "t", "and", "or", "pi", "e", "sqrt", "sin", "cos", "tan", "asin", "acos",
     "atan", "ln", "log", "exp", "abs", "floor", "ceil", "parametric", "polar",
     "derivative", "integral", "list", "sum", "product", "min", "max", "mean",
     "median", "variance", "stdev", "factorial",
@@ -3110,7 +3161,8 @@ function synchronizeVariableDefinitions(): {
       expression.hsv?.saturation ?? "",
       expression.hsv?.value ?? "",
     ];
-  }).concat(tickers.map((ticker) => ticker.action));
+  }).concat(tickers.map((ticker) => ticker.action),
+    photos.flatMap((photo) => PHOTO_FIELDS.map(([key]) => photo[key])));
   const sliderAnalysisKey = JSON.stringify([sources, [...definitionNames], [...reserved]]);
   if (sliderAnalysis?.key !== sliderAnalysisKey) {
     sliderAnalysis = {
@@ -3700,6 +3752,8 @@ function synchronizeWorkspaceOrder(): void {
       ({ type: "text" as const, id, folderId })),
     ...tickers.map(({ id, folderId }) =>
       ({ type: "ticker" as const, id, folderId })),
+    ...photos.map(({ id, folderId }) =>
+      ({ type: "photo" as const, id, folderId })),
     ...folders.map(({ id }) => ({ type: "folder" as const, id })),
   ];
   const availableKeys = new Set(items.map(workspaceItemKey));
@@ -3739,6 +3793,9 @@ function synchronizeWorkspaceOrder(): void {
     } else if (item.type === "ticker") {
       const ticker = tickers.find((entry) => entry.id === item.id);
       if (ticker) ticker.folderId = item.folderId;
+    } else if (item.type === "photo") {
+      const photo = photos.find((entry) => entry.id === item.id);
+      if (photo) photo.folderId = item.folderId;
     }
   }
 }
@@ -3758,7 +3815,7 @@ function renderWorkspaceItems(): void {
   for (const element of workspaceList.querySelectorAll<HTMLElement>(".workspace-item[data-workspace-key]")) {
     if (element.dataset.workspaceKey) nodes.set(element.dataset.workspaceKey, element);
   }
-  for (const staging of [expressionList, tableList, textList, tickerList]) {
+  for (const staging of [expressionList, tableList, textList, tickerList, photoList]) {
     for (const item of staging.children) {
       const element = item as HTMLElement;
       if (element.dataset.workspaceKey) nodes.set(element.dataset.workspaceKey, element);
@@ -3816,6 +3873,9 @@ function renderWorkspaceItems(): void {
           textBlock.folderId === folder.id ? { ...textBlock, folderId: undefined } : textBlock);
         tickers = tickers.map((ticker) =>
           ticker.folderId === folder.id ? { ...ticker, folderId: undefined } : ticker);
+        for (const photo of photos) {
+          if (photo.folderId === folder.id) photo.folderId = undefined;
+        }
         folders = folders.filter((entry) => entry.id !== folder.id);
         renderTextBlocks();
         renderTickers();
@@ -3888,9 +3948,12 @@ function reorderWorkspaceBlock(
   } else if (source.type === "table") {
     const table = tables.find((entry) => entry.id === source.id);
     if (table) table.folderId = validFolderId;
-  } else {
+  } else if (source.type === "text") {
     const textBlock = textBlocks.find((entry) => entry.id === source.id);
     if (textBlock) textBlock.folderId = validFolderId;
+  } else if (source.type === "photo") {
+    const photo = photos.find((entry) => entry.id === source.id);
+    if (photo) photo.folderId = validFolderId;
   }
 
   if (validFolderId !== undefined) {
@@ -4660,6 +4723,265 @@ function renderTables(): void {
   scheduleProjectSave();
 }
 
+function releasePhotoImage(photo: Photo): void {
+  const image = photoImages.get(photo);
+  if (image?.bitmap) {
+    photoPixels -= image.bitmap.width * image.bitmap.height;
+    image.bitmap.close();
+    for (const [entry, state] of photoImages) {
+      if (state.retryOnRelease) photoImages.delete(entry);
+    }
+  }
+  photoImages.delete(photo);
+}
+
+async function decodePhoto(source: string): Promise<ImageBitmap> {
+  const image = new Image();
+  image.src = source;
+  await image.decode();
+  if (image.naturalWidth * image.naturalHeight > MAX_PHOTO_PIXELS) {
+    throw new Error("Photos must contain at most 16 million pixels.");
+  }
+  return createImageBitmap(image);
+}
+
+function updatePhotoError(photo: Photo, image: PhotoImage): void {
+  const error = workspaceList.querySelector<HTMLElement>(`[data-photo-error-id="${photo.id}"]`);
+  const message = [image.error, image.transformError].filter(Boolean).join(" ");
+  if (error && error.textContent !== message) error.textContent = message;
+  for (const [key, label] of PHOTO_FIELDS) {
+    workspaceList.querySelector<HTMLInputElement>(
+      `[data-workspace-key="photo:${photo.id}"] [data-photo-field="${key}"]`,
+    )?.setAttribute("aria-invalid", String(Boolean(image.transformError?.startsWith(`${label}:`))));
+  }
+}
+
+function ensurePhotoImage(photo: Photo): PhotoImage {
+  const existing = photoImages.get(photo);
+  if (existing) return existing;
+  const image: PhotoImage = { loading: true };
+  photoImages.set(photo, image);
+  void decodePhoto(photo.source).then((bitmap) => {
+    if (photoImages.get(photo) !== image) {
+      bitmap.close();
+      return;
+    }
+    if (photoPixels + bitmap.width * bitmap.height > MAX_TOTAL_PHOTO_PIXELS) {
+      bitmap.close();
+      image.retryOnRelease = true;
+      throw new Error("Loaded photos must total at most 32 million pixels. Remove a photo to free space.");
+    }
+    image.bitmap = bitmap;
+    photoPixels += bitmap.width * bitmap.height;
+    image.loading = false;
+    updatePhotoError(photo, image);
+    scheduleDraw();
+  }).catch((reason: unknown) => {
+    if (photoImages.get(photo) !== image) return;
+    image.loading = false;
+    image.error = `Could not load photo: ${reason instanceof Error ? reason.message : "Invalid image data."}`;
+    updatePhotoError(photo, image);
+    setProjectStatus(image.error);
+    scheduleDraw();
+  });
+  return image;
+}
+
+function drawPhoto(photo: Photo, width: number, height: number): void {
+  const image = ensurePhotoImage(photo);
+  try {
+    const transform = evaluatePhotoTransform(photo, sliderValues, expandFunctions);
+    const matrix = photoMatrix(transform, centerX, centerY, scale, verticalScale(), width, height);
+    image.transformError = undefined;
+    if (!photo.hidden && image.bitmap && transform.width !== 0 && transform.height !== 0) {
+      context.save();
+      try {
+        context.globalAlpha = photo.opacity;
+        context.transform(...matrix);
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = "high";
+        context.drawImage(image.bitmap, -0.5, -0.5, 1, 1);
+      } finally {
+        context.restore();
+      }
+    }
+  } catch (reason) {
+    image.transformError = reason instanceof Error ? reason.message : "Could not position photo.";
+  }
+  updatePhotoError(photo, image);
+}
+
+function renderPhotos(): void {
+  photoList.replaceChildren();
+  for (const [index, photo] of photos.entries()) {
+    const label = `Photo ${index + 1}`;
+    const wrapper = createWorkspaceItem(`photo:${photo.id}`, label);
+    const panel = document.createElement("section");
+    panel.className = "photo-panel";
+    const heading = document.createElement("div");
+    heading.className = "photo-heading";
+    const name = document.createElement("input");
+    name.className = "workspace-item-name";
+    name.value = photo.name;
+    name.maxLength = 100;
+    name.setAttribute("aria-label", `${label} name`);
+    name.addEventListener("input", () => {
+      photo.name = name.value;
+      scheduleProjectSave();
+    });
+    const visibility = document.createElement("button");
+    visibility.type = "button";
+    visibility.textContent = photo.hidden ? "Show" : "Hide";
+    visibility.setAttribute("aria-label", `${photo.hidden ? "Show" : "Hide"} photo ${index + 1}`);
+    visibility.setAttribute("aria-pressed", String(!photo.hidden));
+    visibility.addEventListener("click", () => {
+      photo.hidden = !photo.hidden;
+      renderPhotos();
+      renderWorkspaceItems();
+      scheduleDraw();
+      scheduleProjectSave();
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "remove-button";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `Remove photo ${index + 1}`);
+    remove.addEventListener("click", () => {
+      releasePhotoImage(photo);
+      photos = photos.filter((entry) => entry !== photo);
+      workspaceOrder = workspaceOrder.filter((item) => item.type !== "photo" || item.id !== photo.id);
+      renderPhotos();
+      renderWorkspaceItems();
+      renderSliders();
+      scheduleDraw();
+      scheduleProjectSave();
+    });
+    heading.append(name, visibility, remove);
+    const content = document.createElement("div");
+    content.className = "photo-content";
+    for (const [key, fieldLabel] of PHOTO_FIELDS) {
+      const field = document.createElement("label");
+      field.className = "photo-field";
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = photo[key];
+      input.maxLength = 512;
+      input.dataset.photoField = key;
+      input.setAttribute("aria-label", `${label} ${fieldLabel}`);
+      input.addEventListener("input", () => {
+        photo[key] = input.value;
+        renderSliders();
+        scheduleDraw();
+        scheduleProjectSave();
+      });
+      field.append(document.createTextNode(fieldLabel), input);
+      content.append(field);
+    }
+    const unitLabel = document.createElement("label");
+    unitLabel.className = "photo-field";
+    const unit = document.createElement("select");
+    unit.setAttribute("aria-label", `${label} rotation units`);
+    for (const value of ["radians", "degrees"] as const) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value === "radians" ? "Radians" : "Degrees";
+      unit.append(option);
+    }
+    unit.value = photo.rotationUnit;
+    unit.addEventListener("change", () => {
+      photo.rotationUnit = unit.value === "degrees" ? "degrees" : "radians";
+      scheduleDraw();
+      scheduleProjectSave();
+    });
+    unitLabel.append(document.createTextNode("Rotation units"), unit);
+    const opacityLabel = document.createElement("label");
+    opacityLabel.className = "photo-field";
+    const opacity = document.createElement("input");
+    opacity.type = "range";
+    opacity.min = "0";
+    opacity.max = "100";
+    opacity.value = String(photo.opacity * 100);
+    opacity.setAttribute("aria-label", `${label} opacity`);
+    opacity.addEventListener("input", () => {
+      photo.opacity = Number(opacity.value) / 100;
+      scheduleDraw();
+      scheduleProjectSave();
+    });
+    opacityLabel.append(document.createTextNode("Opacity"), opacity);
+    const error = document.createElement("p");
+    error.className = "photo-error";
+    error.dataset.photoErrorId = String(photo.id);
+    error.setAttribute("role", "status");
+    const image = ensurePhotoImage(photo);
+    error.textContent = [image.error, image.transformError].filter(Boolean).join(" ");
+    content.append(unitLabel, opacityLabel, error);
+    panel.append(heading, content);
+    wrapper.append(panel);
+    photoList.append(wrapper);
+  }
+  renderWorkspaceItems();
+}
+
+const photoFileInput = document.querySelector<HTMLInputElement>("#photo-file")!;
+photoFileInput.addEventListener("change", async () => {
+  const file = photoFileInput.files?.[0];
+  photoFileInput.value = "";
+  if (!file) return;
+  const revision = photoUploadRevision;
+  let bitmap: ImageBitmap | undefined;
+  try {
+    if (!PHOTO_TYPES.includes(file.type)) throw new Error("Choose a PNG, JPEG, WebP, or GIF photo.");
+    if (file.size > MAX_PHOTO_BYTES) throw new Error("Photo files must be 2 MB or smaller.");
+    setProjectStatus("Loading photo...");
+    const source = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(reader.error ?? new Error("Could not read photo."));
+      reader.onload = () => typeof reader.result === "string"
+        ? resolve(reader.result) : reject(new Error("Could not read photo data."));
+      reader.readAsDataURL(file);
+    });
+    bitmap = await decodePhoto(source);
+    if (revision !== photoUploadRevision) {
+      bitmap.close();
+      return;
+    }
+    const photo: Photo = {
+      id: nextPhotoId, name: file.name.slice(0, 100), source,
+      centerX: "0", centerY: "0", rotation: "0", rotationUnit: "radians",
+      width: "1", height: "1",
+      initialWidth: 10, initialHeight: 10 * bitmap.height / bitmap.width,
+      opacity: 1, hidden: false,
+    };
+    parsePhotos([...photos, photo]);
+    const project = currentProjectState();
+    project.photos = [...photos, photo];
+    project.workspaceOrder.push({ type: "photo", id: photo.id });
+    if (new Blob([JSON.stringify(project, null, 2)]).size > 5_000_000) {
+      throw new Error("This photo would exceed the 5 MB project limit. Use a smaller photo.");
+    }
+    if (photoPixels + bitmap.width * bitmap.height > MAX_TOTAL_PHOTO_PIXELS) {
+      throw new Error("Loaded photos must total at most 32 million pixels. Remove a photo to free space.");
+    }
+    photos.push(photo);
+    workspaceOrder.push({ type: "photo", id: photo.id });
+    nextPhotoId += 1;
+    photoPixels += bitmap.width * bitmap.height;
+    photoImages.set(photo, { bitmap, loading: false });
+    bitmap = undefined;
+    renderPhotos();
+    renderSliders();
+    scheduleDraw();
+    scheduleProjectSave();
+    workspaceList.querySelector<HTMLInputElement>(
+      `[data-workspace-key="photo:${photo.id}"] [data-photo-field="centerX"]`,
+    )?.focus();
+    setProjectStatus(`Added ${file.name}`);
+  } catch (reason) {
+    bitmap?.close();
+    setProjectStatus(`Could not add photo: ${reason instanceof Error ? reason.message : "Invalid image file."}`);
+  }
+});
+
 function renderTextBlocks(): void {
   textList.replaceChildren();
   for (const [index, textBlock] of textBlocks.entries()) {
@@ -4949,6 +5271,7 @@ function currentProjectState(): ProjectState {
     texts: textBlocks.map(({ id, text, folderId }) => ({ id, text, folderId })),
     tickers: tickers.map(({ id, action, name, collapsed, intervalMs, runMode, tickCount, folderId }) =>
       ({ id, action, name, collapsed, intervalMs, runMode, tickCount, folderId })),
+    photos: photos.map((photo) => ({ ...photo })),
     workspaceOrder: [...workspaceOrder],
     folders: folders.map(({ id, name, collapsed }) => ({ id, name, collapsed })),
     sliders: { ...sliderValues },
@@ -5046,6 +5369,9 @@ function scheduleProjectSave(recordHistory = true): void {
 }
 
 function applyProjectState(project: ProjectState, recordHistory = true): void {
+  photoUploadRevision += 1;
+  for (const photo of photoImages.keys()) releasePhotoImage(photo);
+  photos = (project.photos ?? []).map((photo) => ({ ...photo }));
   stopAllTickers(false);
   stopSliderAnimation();
   expressions = project.expressions.map((expression) => ({ ...expression }));
@@ -5088,6 +5414,8 @@ function applyProjectState(project: ProjectState, recordHistory = true): void {
   nextFolderId = folders.reduce((next, folder) => Math.max(next, folder.id + 1), 1);
   nextTextId = textBlocks.reduce((next, textBlock) => Math.max(next, textBlock.id + 1), 1);
   nextTickerId = tickers.reduce((next, ticker) => Math.max(next, ticker.id + 1), 1);
+  nextPhotoId = photos.reduce((next, photo) => Math.max(next, photo.id + 1), 1);
+  renderPhotos();
   renderTextBlocks();
   renderExpressions();
   renderTables();
@@ -5098,6 +5426,9 @@ function applyProjectState(project: ProjectState, recordHistory = true): void {
 
 function encodeProjectShareLink(): string {
   const bytes = new TextEncoder().encode(JSON.stringify(currentProjectState()));
+  if (Math.ceil(bytes.length / 3) * 4 > 50_000) {
+    throw new Error("This project is too large for a shareable link. Export it as JSON instead.");
+  }
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -5333,6 +5664,8 @@ workspaceAdd.addEventListener("change", () => {
     addTextBlock();
   } else if (workspaceAdd.value === "ticker") {
     addTicker();
+  } else if (workspaceAdd.value === "photo") {
+    document.querySelector<HTMLInputElement>("#photo-file")!.click();
   } else if (workspaceAdd.value === "folder") {
     createFolder();
   }
@@ -5781,6 +6114,7 @@ window.addEventListener("resize", draw);
 desmosModeInput.checked = true;
 desmosModeInput.dispatchEvent(new Event("change"));
 setProjectStatus(projectStatus);
+renderPhotos();
 renderTextBlocks();
 renderExpressions();
 renderTables();

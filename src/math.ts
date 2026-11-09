@@ -31,7 +31,21 @@ type Node =
   | { type: "constant"; value: "pi" | "e" }
   | { type: "unary"; operator: "+" | "-"; operand: Node }
   | { type: "binary"; operator: "+" | "-" | "*" | "/" | "^"; left: Node; right: Node }
-  | { type: "call"; name: string; argument: Node };
+  | { type: "call"; name: string; argument: Node }
+  | { type: "restricted"; value: Node; condition: Condition }
+  | { type: "piecewise"; branches: Array<{ condition: Condition; value: Node }>; fallback?: Node };
+
+type Comparison = "<" | "<=" | ">" | ">=" | "=" | "!=";
+type Condition =
+  | { type: "comparison"; operator: Comparison; left: Node; right: Node }
+  | { type: "logical"; operator: "and" | "or"; left: Condition; right: Condition };
+
+export class UndefinedPointError extends Error {
+  constructor() {
+    super("Expression is undefined here: no condition is satisfied.");
+    this.name = "UndefinedPointError";
+  }
+}
 
 export interface Evaluation {
   value: Decimal;
@@ -123,18 +137,18 @@ type PreciseImplicitEvaluation = (x: number, y: number) => Decimal;
 export type ExplicitEvaluation = (x: number) => Evaluation | number;
 
 export type GraphExpression =
-  | { kind: "explicit"; evaluate: ExplicitEvaluation; tangent?: () => { slope: number; offset: number } }
-  | { kind: "sideways"; evaluate: ExplicitEvaluation; tangent?: () => { slope: number; offset: number } }
-  | { kind: "implicit"; evaluate: ImplicitEvaluation }
-  | { kind: "inequality"; relation: "<" | "<=" | ">" | ">="; evaluate: ImplicitEvaluation }
+  | { kind: "explicit"; evaluate: ExplicitEvaluation; tangent?: () => { slope: number; offset: number }; region?: (parameter: number) => string }
+  | { kind: "sideways"; evaluate: ExplicitEvaluation; tangent?: () => { slope: number; offset: number }; region?: (parameter: number) => string }
+  | { kind: "implicit"; evaluate: ImplicitEvaluation; region?: (x: number, y?: number) => string }
+  | { kind: "inequality"; relation: "<" | "<=" | ">" | ">="; evaluate: ImplicitEvaluation; region?: (x: number, y?: number) => string }
   | {
       kind: "point";
       evaluate: () => [number, number];
       xVariables: string[];
       yVariables: string[];
     }
-  | { kind: "parametric"; evaluate: (parameter: number) => [number, number]; start: number; end: number }
-  | { kind: "list"; evaluate: () => number[] };
+  | { kind: "parametric"; evaluate: (parameter: number) => [number, number]; start: number; end: number; region?: (parameter: number) => string }
+  | { kind: "list"; evaluate: () => Array<number | undefined> };
 
 export interface PolynomialRegression {
   center: Decimal;
@@ -279,11 +293,12 @@ function parse(
       continue;
     }
     const remaining = expression.slice(offset);
-    const match = /^(?:\d+(?:\.\d*)?|\.\d+)|^[a-zA-Z]+(?:_[a-zA-Z0-9]+)?|^[+\-*/^(),]/.exec(remaining);
+    const match = /^(?:\d+(?:\.\d*)?|\.\d+)|^[a-zA-Z]+(?:_[a-zA-Z0-9]+)?|^(?:<=|>=|!=|≤|≥|≠)|^[+\-*/^(),{}:<>=]/.exec(remaining);
     if (!match) {
       throw new Error(`Unexpected character "${expression[offset]}"`);
     }
-    tokens.push(match[0]);
+    tokens.push(match[0] === "≤" ? "<=" : match[0] === "≥" ? ">=" :
+      match[0] === "≠" ? "!=" : match[0].toLowerCase());
     offset += match[0].length;
   }
   if (tokens.length === 0) {
@@ -311,6 +326,40 @@ function parse(
       const value = sum();
       expect(")");
       return value;
+    }
+    if (token === "{") {
+      const branches: Array<{ condition: Condition; value: Node }> = [];
+      let fallback: Node | undefined;
+      if (peek() === "}") throw new Error("Piecewise expressions need at least one condition and value.");
+      while (true) {
+        let depth = 0;
+        let hasCondition = false;
+        for (let index = position; index < tokens.length; index += 1) {
+          const token = tokens[index];
+          if (depth === 0 && (token === "," || token === "}")) break;
+          if (depth === 0 && token === ":") {
+            hasCondition = true;
+            break;
+          }
+          if (token === "(" || token === "{") depth += 1;
+          if (token === ")" || token === "}") depth -= 1;
+        }
+        if (hasCondition) {
+          const condition = conditionOr();
+          expect(":");
+          branches.push({ condition, value: sum() });
+        } else {
+          fallback = sum();
+          if (branches.length === 0) {
+            throw new Error("Use {condition: value, ..., fallback} for a piecewise expression.");
+          }
+          if (peek() !== "}") throw new Error("A piecewise fallback must be the last entry.");
+        }
+        if (peek() !== ",") break;
+        take();
+      }
+      expect("}");
+      return { type: "piecewise", branches, fallback };
     }
     const name = token.toLowerCase();
     if (name === "x" || variableNames.includes(name)) {
@@ -380,7 +429,68 @@ function parse(
       const operator = take() as "+" | "-";
       node = { type: "binary", operator, left: node, right: product() };
     }
+    while (peek() === "{") {
+      take();
+      node = { type: "restricted", value: node, condition: conditionOr() };
+      expect("}");
+    }
     return node;
+  }
+
+  function isComparison(token: string | undefined): token is Comparison {
+    return token !== undefined && ["<", "<=", ">", ">=", "=", "!="].includes(token);
+  }
+
+  function comparison(): Condition {
+    if (peek() === "(") {
+      let depth = 0;
+      let braces = 0;
+      let grouped = false;
+      for (let index = position; index < tokens.length; index += 1) {
+        const token = tokens[index];
+        if (token === "(") depth += 1;
+        if (token === ")") depth -= 1;
+        if (token === "{") braces += 1;
+        if (token === "}") braces -= 1;
+        if (depth === 0) break;
+        if (braces === 0 && isComparison(token)) grouped = true;
+      }
+      if (grouped) {
+        take();
+        const condition = conditionOr();
+        expect(")");
+        return condition;
+      }
+    }
+    let left = sum();
+    if (!isComparison(peek())) throw new Error("Conditions need a comparison, such as x < 2.");
+    let result: Condition | undefined;
+    while (isComparison(peek())) {
+      const operator = take() as Comparison;
+      const right = sum();
+      const part: Condition = { type: "comparison", operator, left, right };
+      result = result ? { type: "logical", operator: "and", left: result, right: part } : part;
+      left = right;
+    }
+    return result!;
+  }
+
+  function conditionAnd(): Condition {
+    let condition = comparison();
+    while (peek() === "and") {
+      take();
+      condition = { type: "logical", operator: "and", left: condition, right: comparison() };
+    }
+    return condition;
+  }
+
+  function conditionOr(): Condition {
+    let condition = conditionAnd();
+    while (peek() === "or" || peek() === ",") {
+      take();
+      condition = { type: "logical", operator: "or", left: condition, right: conditionAnd() };
+    }
+    return condition;
   }
 
   const result = sum();
@@ -393,6 +503,12 @@ function parse(
 const constantNodes = new WeakMap<Node, boolean>();
 const constantValues = new WeakMap<Node, { precision: number; value: Value }>();
 
+function conditionIsConstant(condition: Condition): boolean {
+  return condition.type === "logical"
+    ? conditionIsConstant(condition.left) && conditionIsConstant(condition.right)
+    : isConstantExpression(condition.left) && isConstantExpression(condition.right);
+}
+
 function isConstantExpression(node: Node): boolean {
   const cached = constantNodes.get(node);
   if (cached !== undefined) return cached;
@@ -400,7 +516,11 @@ function isConstantExpression(node: Node): boolean {
     : node.type === "unary" ? isConstantExpression(node.operand)
       : node.type === "binary" ? isConstantExpression(node.left) && isConstantExpression(node.right)
         : node.type === "call" ? isConstantExpression(node.argument)
-          : true;
+          : node.type === "restricted" ? isConstantExpression(node.value) && conditionIsConstant(node.condition)
+            : node.type === "piecewise" ? node.branches.every((branch) =>
+              conditionIsConstant(branch.condition) && isConstantExpression(branch.value)) &&
+              (!node.fallback || isConstantExpression(node.fallback))
+              : true;
   constantNodes.set(node, constant);
   return constant;
 }
@@ -416,6 +536,17 @@ function evaluate(node: Node, x: Decimal, y?: Decimal, variables: Record<string,
 
 function evaluateNode(node: Node, x: Decimal, y: Decimal | undefined, variables: Record<string, number>): Value {
   switch (node.type) {
+    case "restricted":
+      if (!evaluateCondition(node.condition, x, y, variables)) throw new UndefinedPointError();
+      return evaluate(node.value, x, y, variables);
+    case "piecewise":
+      for (const branch of node.branches) {
+        if (evaluateCondition(branch.condition, x, y, variables)) {
+          return evaluate(branch.value, x, y, variables);
+        }
+      }
+      if (node.fallback) return evaluate(node.fallback, x, y, variables);
+      throw new UndefinedPointError();
     case "number":
       return node.value;
     case "variable":
@@ -574,6 +705,49 @@ function evaluateNode(node: Node, x: Decimal, y: Decimal | undefined, variables:
 
 type FastEvaluator = (x: number, y?: number) => number;
 
+function compareValues(operator: Comparison, comparison: number): boolean {
+  switch (operator) {
+    case "<": return comparison < 0;
+    case "<=": return comparison <= 0;
+    case ">": return comparison > 0;
+    case ">=": return comparison >= 0;
+    case "=": return comparison === 0;
+    case "!=": return comparison !== 0;
+  }
+}
+
+function evaluateCondition(
+  condition: Condition, x: Decimal, y: Decimal | undefined, variables: Record<string, number>,
+): boolean {
+  if (condition.type === "logical") {
+    return condition.operator === "and"
+      ? evaluateCondition(condition.left, x, y, variables) && evaluateCondition(condition.right, x, y, variables)
+      : evaluateCondition(condition.left, x, y, variables) || evaluateCondition(condition.right, x, y, variables);
+  }
+  const left = evaluate(condition.left, x, y, variables);
+  const right = evaluate(condition.right, x, y, variables);
+  if (left.kind === "rational" && right.kind === "rational") {
+    const difference = left.numerator * right.denominator - right.numerator * left.denominator;
+    return compareValues(condition.operator, difference < 0n ? -1 : difference > 0n ? 1 : 0);
+  }
+  return compareValues(condition.operator, asDecimal(left).comparedTo(asDecimal(right)));
+}
+
+function compileFastCondition(condition: Condition, variables: Record<string, number>): (x: number, y?: number) => boolean {
+  if (condition.type === "logical") {
+    const left = compileFastCondition(condition.left, variables);
+    const right = compileFastCondition(condition.right, variables);
+    return condition.operator === "and" ? (x, y) => left(x, y) && right(x, y) : (x, y) => left(x, y) || right(x, y);
+  }
+  const left = compileFastEvaluator(condition.left, variables);
+  const right = compileFastEvaluator(condition.right, variables);
+  return (x, y) => {
+    const a = assertFiniteFastResult(left(x, y));
+    const b = assertFiniteFastResult(right(x, y));
+    return compareValues(condition.operator, a < b ? -1 : a > b ? 1 : 0);
+  };
+}
+
 function compileFastEvaluator(node: Node, variables: Record<string, number>): FastEvaluator {
   const evaluator = compileFastEvaluatorNode(node, variables);
   if (!isConstantExpression(node)) return evaluator;
@@ -586,6 +760,26 @@ function compileFastEvaluator(node: Node, variables: Record<string, number>): Fa
 
 function compileFastEvaluatorNode(node: Node, variables: Record<string, number>): FastEvaluator {
   switch (node.type) {
+    case "restricted": {
+      const condition = compileFastCondition(node.condition, variables);
+      const value = compileFastEvaluator(node.value, variables);
+      return (x, y) => {
+        if (!condition(x, y)) throw new UndefinedPointError();
+        return value(x, y);
+      };
+    }
+    case "piecewise": {
+      const branches = node.branches.map((branch) => ({
+        condition: compileFastCondition(branch.condition, variables),
+        value: compileFastEvaluator(branch.value, variables),
+      }));
+      const fallback = node.fallback && compileFastEvaluator(node.fallback, variables);
+      return (x, y) => {
+        for (const branch of branches) if (branch.condition(x, y)) return branch.value(x, y);
+        if (fallback) return fallback(x, y);
+        throw new UndefinedPointError();
+      };
+    }
     case "number": {
       const { numerator, denominator } = node.value;
       const value = roundFast(Number(numerator) / Number(denominator));
@@ -794,6 +988,9 @@ function affineInVariable(node: Node, variable: "x" | "y"): AffineExpression | u
       ? undefined
       : { coefficient: zeroNode(), constant: node };
   }
+  if (node.type === "piecewise" || node.type === "restricted") {
+    return containsVariable(node, variable) ? undefined : { coefficient: zeroNode(), constant: node };
+  }
   if (node.type !== "binary") {
     return undefined;
   }
@@ -834,6 +1031,12 @@ function affineInVariable(node: Node, variable: "x" | "y"): AffineExpression | u
 
 function containsVariable(node: Node, variable: "x" | "y"): boolean {
   switch (node.type) {
+    case "restricted":
+      return containsVariable(node.value, variable) || conditionContainsVariable(node.condition, variable);
+    case "piecewise":
+      return node.branches.some((branch) => containsVariable(branch.value, variable) ||
+        conditionContainsVariable(branch.condition, variable)) ||
+        Boolean(node.fallback && containsVariable(node.fallback, variable));
     case "variable":
       return node.name === variable;
     case "unary":
@@ -845,6 +1048,58 @@ function containsVariable(node: Node, variable: "x" | "y"): boolean {
     default:
       return false;
   }
+}
+
+function conditionContainsVariable(condition: Condition, variable: "x" | "y"): boolean {
+  return condition.type === "logical"
+    ? conditionContainsVariable(condition.left, variable) || conditionContainsVariable(condition.right, variable)
+    : containsVariable(condition.left, variable) || containsVariable(condition.right, variable);
+}
+
+function compileCoordinateRegion(
+  node: Node, variables: Record<string, number>, fast: boolean,
+): ((x: number, y?: number) => string) | undefined {
+  const check = (condition: Condition) => fast ? compileFastCondition(condition, variables)
+    : (x: number, y?: number) => evaluateCondition(condition, new Decimal(x),
+      y === undefined ? undefined : new Decimal(y), variables);
+  const build = (tree: Node): ((x: number, y?: number) => string) | undefined => {
+    if (tree.type === "piecewise") {
+      const branches = tree.branches.map((branch) => ({
+        condition: check(branch.condition), value: build(branch.value),
+      }));
+      const fallback = tree.fallback && build(tree.fallback);
+      return (x, y) => {
+        for (const [index, branch] of branches.entries()) {
+          if (branch.condition(x, y)) return `${index}:${branch.value?.(x, y) ?? ""}`;
+        }
+        if (tree.fallback) return `fallback:${fallback?.(x, y) ?? ""}`;
+        throw new UndefinedPointError();
+      };
+    }
+    if (tree.type === "restricted") {
+      const condition = check(tree.condition);
+      const value = build(tree.value);
+      return (x, y) => {
+        if (!condition(x, y)) throw new UndefinedPointError();
+        return value?.(x, y) ?? "";
+      };
+    }
+    if (tree.type === "unary") return build(tree.operand);
+    if (tree.type === "call") return build(tree.argument);
+    if (tree.type !== "binary") return undefined;
+    const left = build(tree.left);
+    const right = build(tree.right);
+    if (!left && !right) return undefined;
+    return (x, y) => `${left?.(x, y) ?? ""}|${right?.(x, y) ?? ""}`;
+  };
+  return build(node);
+}
+
+function compileRegion(
+  node: Node, variables: Record<string, number>, fast: boolean, sideways = false,
+): ((parameter: number) => string) | undefined {
+  const region = compileCoordinateRegion(node, variables, fast);
+  return region && ((parameter) => sideways ? region(0, parameter) : region(parameter));
 }
 
 function tangentParameters(
@@ -882,6 +1137,7 @@ function compileAffineEquation(
   const solution = binaryNode("/", negateNode(constant), coefficient);
   const kind = solveFor === "x" ? "sideways" : "explicit";
   const tangent = tangentParameters(solution, parameter, variables);
+  const region = compileRegion(solution, variables, fast, solveFor === "x");
 
   if (fast) {
     const evaluateCoefficient = compileFastEvaluator(coefficient, variables);
@@ -890,6 +1146,7 @@ function compileAffineEquation(
     return {
       kind,
       tangent,
+      region,
       evaluate: (value: number) => {
         if (!Number.isFinite(value)) {
           throw new Error(`${parameter} must be a finite number`);
@@ -917,6 +1174,7 @@ function compileAffineEquation(
   return {
     kind,
     tangent,
+    region,
     evaluate: (value: number) => {
       if (!Number.isFinite(value)) {
         throw new Error(`${parameter} must be a finite number`);
@@ -1456,11 +1714,11 @@ export function compileImplicitEquation(
   source: string,
   variables: Record<string, number> = {},
 ): PreciseImplicitEvaluation {
-  const equals = [...source.matchAll(/=/g)];
-  if (equals.length !== 1) {
+  const relation = graphRelation(source);
+  if (relation?.operator !== "=" || graphRelation(source.slice(relation.index + 1))) {
     throw new Error("Implicit equations must contain exactly one equals sign, for example x^2 + y^2 = 4");
   }
-  const splitAt = equals[0]!.index!;
+  const splitAt = relation.index;
   const leftSource = source.slice(0, splitAt);
   const rightSource = source.slice(splitAt + 1);
   if (!leftSource.trim() || !rightSource.trim()) {
@@ -1488,8 +1746,8 @@ function splitCallArguments(source: string): string[] {
   let depth = 0;
   let start = 0;
   for (let index = 0; index < source.length; index += 1) {
-    if (source[index] === "(") depth += 1;
-    if (source[index] === ")") depth -= 1;
+    if (source[index] === "(" || source[index] === "{") depth += 1;
+    if (source[index] === ")" || source[index] === "}") depth -= 1;
     if (source[index] === "," && depth === 0) {
       result.push(source.slice(start, index).trim());
       start = index + 1;
@@ -1499,17 +1757,133 @@ function splitCallArguments(source: string): string[] {
   return result;
 }
 
+export function graphRelation(source: string): { index: number; operator: Comparison } | undefined {
+  let depth = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "(" || char === "{") depth += 1;
+    if (char === ")" || char === "}") depth -= 1;
+    if (depth !== 0) continue;
+    const match = /^(<=|>=|!=|[<>=≤≥≠])/.exec(source.slice(index));
+    if (match) {
+      const operator = match[0] === "≤" ? "<=" : match[0] === "≥" ? ">=" :
+        match[0] === "≠" ? "!=" : match[0] as Comparison;
+      return { index, operator };
+    }
+  }
+  return undefined;
+}
+
+function compileRestrictedGraph(
+  source: string, variables: Record<string, number>, fast: boolean,
+): GraphExpression | undefined {
+  let depth = 0;
+  let start = -1;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "{" && depth === 0 && index > 0 &&
+        !/[+\-*/^(:,=<>]$/.test(source.slice(0, index).trim())) {
+      start = index;
+      break;
+    }
+    if (char === "(" || char === "{") depth += 1;
+    if (char === ")" || char === "}") depth -= 1;
+  }
+  if (start < 0) return undefined;
+  const suffix = source.slice(start);
+  let braceDepth = 0;
+  for (const char of suffix) {
+    if (braceDepth === 0 && char !== "{" && !/\s/.test(char)) {
+      throw new Error("Restrictions must follow the complete graph expression.");
+    }
+    if (char === "{") braceDepth += 1;
+    if (char === "}") braceDepth -= 1;
+    if (braceDepth < 0) throw new Error("Unexpected closing restriction bracket.");
+  }
+  if (braceDepth !== 0) throw new Error("Missing closing restriction bracket.");
+  // A postfix restriction must consist entirely of trailing condition groups.
+  const restricted = parse(`1${suffix}`, true, false, Object.keys(variables));
+  if (restricted.type !== "restricted") throw new Error("Restrictions must follow the complete graph expression.");
+  const base = source.slice(0, start).trim();
+  const graph = fast ? compileFastGraphExpression(base, variables) : compileGraphExpression(base, variables);
+  const condition = fast ? compileFastEvaluator(restricted, variables) : undefined;
+  const check = (x: number, y: number) => {
+    if (condition) condition(x, y);
+    else evaluate(restricted, new Decimal(x), new Decimal(y), variables);
+  };
+  if (graph.kind === "explicit" || graph.kind === "sideways") {
+    return {
+      kind: graph.kind,
+      region: graph.region,
+      evaluate: (parameter: number) => {
+        const result = graph.evaluate(parameter);
+        const output = typeof result === "number" ? result : result.value.toNumber();
+        check(graph.kind === "sideways" ? output : parameter, graph.kind === "sideways" ? parameter : output);
+        return result;
+      },
+    };
+  }
+  if (graph.kind === "implicit" || graph.kind === "inequality") {
+    return {
+      ...graph,
+      evaluate: (x, y) => {
+        check(x, y);
+        return graph.evaluate(x, y);
+      },
+    };
+  }
+  if (graph.kind === "point") {
+    return {
+      ...graph,
+      evaluate: () => {
+        const point = graph.evaluate();
+        check(...point);
+        return point;
+      },
+    };
+  }
+  if (graph.kind === "parametric") {
+    return {
+      ...graph,
+      evaluate: (parameter: number) => {
+        const point = graph.evaluate(parameter);
+        check(...point);
+        return point;
+      },
+    };
+  }
+  return {
+    ...graph,
+    evaluate: () => graph.evaluate().map((value, index) => {
+      if (value === undefined) return undefined;
+      try {
+        check(index + 1, value);
+        return value;
+      } catch (reason) {
+        if (reason instanceof UndefinedPointError) return undefined;
+        throw reason;
+      }
+    }),
+  };
+}
+
 function compileInequality(
   source: string,
   variables: Record<string, number>,
   fast: boolean,
 ): Extract<GraphExpression, { kind: "inequality" }> {
-  const match = /^(.*?)(<=|>=|<|>)(.*)$/.exec(source);
-  if (!match || !match[1]!.trim() || !match[3]!.trim()) {
+  const comparison = graphRelation(source);
+  if (!comparison || !["<", "<=", ">", ">="].includes(comparison.operator)) {
     throw new Error("Inequalities need an expression on both sides, such as y > x^2");
   }
-  const [, leftSource, relation, rightSource] = match;
-  if (/[<>]=?/.test(rightSource!)) {
+  const leftSource = source.slice(0, comparison.index);
+  const symbolLength = /[≤≥]/.test(source[comparison.index]!) ? 1 : comparison.operator.length;
+  const rightSource = source.slice(comparison.index + symbolLength);
+  if (!leftSource.trim() || !rightSource.trim()) {
+    throw new Error("Inequalities need an expression on both sides, such as y > x^2");
+  }
+  const relation = comparison.operator;
+  if (graphRelation(rightSource)) {
     throw new Error("Use one comparison operator per inequality");
   }
   const left = parse(leftSource!, true, false, Object.keys(variables));
@@ -1523,6 +1897,7 @@ function compileInequality(
   return {
     kind: "inequality",
     relation: relation as "<" | "<=" | ">" | ">=",
+    region: compileCoordinateRegion(binaryNode("-", left, right), variables, fast),
     evaluate: (x, y) => {
       if (evaluateFastDifference) return assertFiniteFastResult(evaluateFastDifference(x, y));
       return asDecimal(evaluate(left, new Decimal(x.toString()), new Decimal(y.toString()), variables))
@@ -1550,6 +1925,8 @@ function compileParametric(
   const values = { ...variables, t: 0 };
   const first = compileExpression(args[0]!, values);
   const second = polar ? undefined : compileExpression(args[1]!, values);
+  const firstRegion = compileRegion(parse(args[0]!, false, true, Object.keys(values)), values, false);
+  const secondRegion = polar ? undefined : compileRegion(parse(args[1]!, false, true, Object.keys(values)), values, false);
   const start = compileExpression(args[polar ? 1 : 2]!, variables)(0).value.toNumber();
   const end = compileExpression(args[polar ? 2 : 3]!, variables)(0).value.toNumber();
   if (!Number.isFinite(start) || !Number.isFinite(end) || start === end) {
@@ -1559,6 +1936,10 @@ function compileParametric(
     kind: "parametric",
     start,
     end,
+    region: firstRegion || secondRegion ? (parameter) => {
+      values.t = parameter;
+      return `${firstRegion?.(parameter) ?? ""}|${secondRegion?.(parameter) ?? ""}`;
+    } : undefined,
     evaluate: (parameter) => {
       values.t = parameter;
       const firstValue = first(parameter).value.toNumber();
@@ -1661,7 +2042,7 @@ function compilePointGraph(
   const variablesInCoordinate = (coordinate: string): string[] => {
     const identifiers = coordinate.match(/[a-z]+(?:_[a-z0-9]+)?/gi)?.map((name) => name.toLowerCase()) ?? [];
     const sliderVariables = [...new Set(identifiers.filter((name) =>
-      name !== "pi" && name !== "e" && !functions.has(name)))];
+      name !== "pi" && name !== "e" && name !== "and" && name !== "or" && !functions.has(name)))];
     if (sliderVariables.some((name) =>
       !/^[a-z](?:_[a-z0-9]+)?$/.test(name) || POINT_NON_SLIDER_VARIABLES.has(name))) {
       throw new Error("Draggable point coordinates must use slider variables and supported math operations");
@@ -1748,7 +2129,11 @@ export function compileGraphExpression(
   variables: Record<string, number> = {},
 ):
   GraphExpression {
+  if (source.length > MAX_EXPRESSION_LENGTH) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
   const trimmed = source.trim();
+  const restricted = compileRestrictedGraph(trimmed, variables, false);
+  if (restricted) return restricted;
+  const relation = graphRelation(trimmed);
   const point = compilePointGraph(trimmed, variables);
   if (point) return point;
   if (/^list\s*\(/i.test(trimmed)) {
@@ -1769,31 +2154,37 @@ export function compileGraphExpression(
   if (/^polar\s*\(/i.test(trimmed)) {
     return compileParametric(trimmed, variables, true);
   }
-  if (/[<>]=?/.test(trimmed)) {
+  if (relation && relation.operator !== "=") {
     return compileInequality(trimmed, variables, false);
   }
   if (/^\s*y\s*=/i.test(source)) {
+    const tree = parse(source, false, true, Object.keys(variables));
     return {
       kind: "explicit", evaluate: compileExpression(source, variables),
-      tangent: tangentParameters(parse(source, false, true, Object.keys(variables)), "x", variables),
+      tangent: tangentParameters(tree, "x", variables),
+      region: compileRegion(tree, variables, false),
     };
   }
-  if (source.includes("=")) {
-    const equals = [...source.matchAll(/=/g)];
-    if (equals.length === 1) {
-      const splitAt = equals[0]!.index!;
+  if (relation?.operator === "=") {
+    if (!graphRelation(source.slice(relation.index + 1))) {
+      const splitAt = relation.index;
       const variableNames = Object.keys(variables);
       const left = parse(source.slice(0, splitAt), true, false, variableNames);
       const right = parse(source.slice(splitAt + 1), true, false, variableNames);
       const explicit = compileAffineEquation(left, right, variables, false, "y") ??
         compileAffineEquation(left, right, variables, false, "x");
       if (explicit) return explicit;
+      return {
+        kind: "implicit", evaluate: compileImplicitEquation(source, variables),
+        region: compileCoordinateRegion(binaryNode("-", left, right), variables, false),
+      };
     }
     return { kind: "implicit", evaluate: compileImplicitEquation(source, variables) };
   }
   return {
     kind: "explicit", evaluate: compileExpression(source, variables),
     tangent: tangentParameters(parse(source, false, true, Object.keys(variables)), "x", variables),
+    region: compileRegion(parse(source, false, true, Object.keys(variables)), variables, false),
   };
 }
 
@@ -1801,7 +2192,11 @@ export function compileFastGraphExpression(
   source: string,
   variables: Record<string, number> = {},
 ): GraphExpression {
+  if (source.length > MAX_EXPRESSION_LENGTH) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
   const trimmed = source.trim();
+  const restricted = compileRestrictedGraph(trimmed, variables, true);
+  if (restricted) return restricted;
+  const relation = graphRelation(trimmed);
   const point = compilePointGraph(trimmed, variables);
   if (point) return point;
   if (/^(?:list|sum|product|min|max|mean|median|variance|stdev|factorial)\s*\(/i.test(trimmed)) {
@@ -1813,15 +2208,16 @@ export function compileFastGraphExpression(
   if (/^(?:parametric|polar)\s*\(/i.test(trimmed)) {
     return compileGraphExpression(trimmed, variables);
   }
-  if (/[<>]=?/.test(trimmed)) {
+  if (relation && relation.operator !== "=") {
     return compileInequality(trimmed, variables, true);
   }
-  if (/^\s*y\s*=/i.test(source) || !source.includes("=")) {
+  if (/^\s*y\s*=/i.test(source) || !relation) {
     const tree = parse(source, false, true, Object.keys(variables));
     const evaluate = compileFastEvaluator(tree, variables);
     return {
       kind: "explicit",
       tangent: tangentParameters(tree, "x", variables),
+      region: compileRegion(tree, variables, true),
       evaluate: (x: number) => {
         if (!Number.isFinite(x)) {
           throw new Error("x must be a finite number");
@@ -1831,11 +2227,10 @@ export function compileFastGraphExpression(
     };
   }
 
-  const equals = [...source.matchAll(/=/g)];
-  if (equals.length !== 1) {
+  if (!relation || relation.operator !== "=" || graphRelation(source.slice(relation.index + 1))) {
     throw new Error("Implicit equations must contain exactly one equals sign, for example x^2 + y^2 = 4");
   }
-  const splitAt = equals[0]!.index!;
+  const splitAt = relation.index;
   const leftSource = source.slice(0, splitAt);
   const rightSource = source.slice(splitAt + 1);
   if (!leftSource.trim() || !rightSource.trim()) {
@@ -1851,6 +2246,7 @@ export function compileFastGraphExpression(
   const evaluateRightFast = compileFastEvaluator(right, variables);
   return {
     kind: "implicit",
+    region: compileCoordinateRegion(binaryNode("-", left, right), variables, true),
     evaluate: (x: number, y: number) => {
       if (!Number.isFinite(x) || !Number.isFinite(y)) {
         throw new Error("x and y must be finite numbers");

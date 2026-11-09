@@ -27,7 +27,37 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$GITHUB_REF_NAME" = "v2.14.0" ]; then
+          if [ "$GITHUB_REF_NAME" = "v3.0.0" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
+              --title "Better Desmos 3.0 — Photos, restrictions, and piecewise functions" \
+              --notes-file - <<'NOTES'
+          ## What's new
+
+          - **Photos in the workspace:** Import local PNG, JPEG, WebP, or GIF images. Set center X/Y, rotation in radians or degrees, opacity, and independent X/Y scale formulas.
+          - **Relative photo scaling:** Both scales start at 1 and multiply the original inserted size. The initial dimensions are persisted in saved and exported projects.
+          - **Integrated photo behavior:** Photos follow workspace layering, folders, hide/show, undo/redo, pan, zoom, and progressive viewport refinement. Image data is embedded for offline use.
+          - **Domain and range restrictions:** Clip explicit, sideways, implicit, inequality, parametric/polar, point, and list graphs with parsed brace conditions.
+          - **Piecewise expressions:** First-matching, lazily evaluated branches support nested math, sliders, user functions, comparisons, and logical conditions in both math modes.
+          - **Branch-aware rendering:** Separate piecewise branches are not joined by false lines or implicit contours across discontinuities.
+          - **Consistent version labels:** The calculator badge, accessible brand, title, and package metadata show 3.0 / 3.0.0.
+
+          ## Download and run
+
+          Download **better-desmos.html** below and open it in your browser. It is self-contained and needs no installation or server.
+
+          ## Validation
+
+          - All 55 tests passed; TypeScript checks, production build, and whitespace checks passed.
+          - Browser checks verified photo scaling, rotation, opacity, layering, folders, undo, export/import, invalid data, and sharper zoom previews.
+          - Fast and precise browser pixel checks verified allowed curves, restriction clipping, piecewise gaps, and live slider results.
+
+          ## Scope and limitations
+
+          This release publishes the completed photos and restrictions/piecewise stage, not full Desmos parity. Advanced lists/functions, polygons/labels, expanded tables/statistics, custom regressions, clickable actions, direct photo editing, PNG export, complex mode, formatted math input, and audio trace are not included.
+
+          Photos have file, decoded-pixel, and project-size limits; animated formats render a static frame. Graphs remain sampled approximations and may miss narrow regions or isolated equality points. Open/closed endpoint markers are not automatic. Restricted tangent curves use the general numerical sampler. Rendering remains synchronous and viewport refinement is memory/time bounded.
+          NOTES
+          elif [ "$GITHUB_REF_NAME" = "v2.14.0" ]; then
             gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
               --title "Better Desmos 2.14 — Progressive high-resolution zoom previews" \
               --notes-file - <<'NOTES'
