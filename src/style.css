@@ -81,8 +81,9 @@ button { color: inherit; }
 .workspace-add-control::after { position: absolute; inset: 0; border: 1px solid var(--border-strong); border-radius: 7px; color: var(--text-secondary); background-color: var(--raised-bg); background-image: linear-gradient(currentColor, currentColor), linear-gradient(currentColor, currentColor); background-position: center; background-repeat: no-repeat; background-size: 14px 2px, 2px 14px; content: ""; pointer-events: none; }
 .workspace-add-control:hover::after { border-color: var(--muted-hover); color: var(--text-strong); }
 .workspace-add-control:focus-within::after { outline: 2px solid var(--accent); outline-offset: 2px; }
-.workspace-add-control select { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; padding: 0; border: 0; opacity: 0; cursor: pointer; }
-.workspace-add-control select option { color: var(--text); background: var(--raised-bg); font-size: 12px; }
+.workspace-add-control .themed-select { position: absolute; inset: 0; z-index: 1; }
+.workspace-add-control .themed-select-trigger { width: 100%; height: 100%; min-height: 0; padding: 0; border: 0; background: transparent; font-size: 0; }
+.workspace-add-control .themed-select-trigger::after { display: none; }
 .remove-button:hover { border-color: var(--muted-hover); color: var(--text-strong); }
 .sidebar-scroll { flex: 1; min-height: 0; overflow-y: auto; }
 .workspace-items { display: flex; flex-direction: column; gap: 5px; padding: 0 12px 10px; }
@@ -249,6 +250,25 @@ button { color: inherit; }
 code { color: var(--accent-soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 .theme-settings .setting-control select { width: 100%; }
+.themed-select { display: inline-block; min-width: 0; max-width: 100%; vertical-align: middle; }
+.themed-select > select[hidden] { display: none; }
+.themed-select-trigger { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--border-medium); border-radius: 5px; color: var(--text); background: var(--input-bg); font: inherit; font-size: 11px; text-align: left; cursor: pointer; }
+.themed-select-trigger::after { flex: 0 0 auto; width: 6px; height: 6px; margin: -3px 2px 0 0; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); content: ""; }
+.themed-select-trigger:hover, .themed-select-trigger[aria-expanded="true"] { border-color: var(--accent); }
+.themed-select-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.themed-select-trigger:disabled { opacity: .5; cursor: default; }
+.setting-control .themed-select { min-width: 180px; }
+.theme-settings .themed-select { width: 100%; }
+.table-regression .themed-select-trigger { padding: 5px 6px; }
+.ticker-content > .themed-select, .photo-field > .themed-select { display: block; width: 100%; }
+.ticker-content > .themed-select .themed-select-trigger, .photo-field .themed-select-trigger { min-height: 36px; padding: 7px; font-size: 13px; }
+.dropdown-popup { position: fixed; inset: auto; margin: 0; padding: 4px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--border-medium); border-radius: 6px; color: var(--text); background: var(--raised-bg); box-shadow: 0 4px 12px #0006; font: 12px ui-sans-serif, system-ui, sans-serif; text-align: left; }
+.dropdown-popup::backdrop { background: transparent; }
+.dropdown-group { padding: 7px 9px 4px; color: var(--muted-text); font-size: 10px; font-weight: 600; }
+.dropdown-option { position: relative; padding: 8px 26px 8px 9px; border-radius: 4px; overflow-wrap: anywhere; cursor: pointer; }
+.dropdown-option[aria-selected="true"]::after { position: absolute; right: 10px; top: 10px; width: 5px; height: 9px; border-right: 2px solid var(--accent); border-bottom: 2px solid var(--accent); transform: rotate(45deg); content: ""; }
+.dropdown-option.dropdown-active { color: var(--text-strong); background: var(--drop-bg); outline: 1px solid var(--border-contrast); outline-offset: -1px; }
+.dropdown-option[aria-disabled="true"] { color: var(--muted-text); opacity: .5; cursor: default; }
 .theme-actions { display: flex; flex-wrap: wrap; gap: 7px; padding: 8px 12px 12px; }
 .theme-actions button { padding: 6px 9px; border: 1px solid var(--border-medium); border-radius: 5px; color: var(--text-secondary); background: var(--raised-bg); font-size: 11px; cursor: pointer; }
 .theme-actions button:hover, .theme-actions button:focus-visible { border-color: var(--accent); color: var(--text-strong); }

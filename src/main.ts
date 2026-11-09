@@ -33,6 +33,7 @@ import {
 import { BoundedCache, referencedVariableSignature, SegmentIndex, selectHoverPoint, tangentBranchRange, tangentPixelCoverage, refinementLevels, isFlatOffscreenInterval } from "./performance";
 import { expandCollections, hasCollections, COLLECTION_FUNCTIONS, type StatisticsMode } from "./collections";
 import { imageExportSize } from "./image-export";
+import { refreshDropdowns } from "./dropdowns";
 import { tableColumns, tableColumnName, tableRowSource, validateTableColumnName, evaluateTableColumn, type TableColumn } from "./tables";
 import { expandNamedPoints, pointSources, dynamicLabel, type PointSources } from "./geometry";
 import { parsePhotos, evaluatePhotoTransform, photoMatrix, PHOTO_FIELDS, PHOTO_TYPES, MAX_PHOTO_BYTES, MAX_PHOTO_PIXELS, MAX_TOTAL_PHOTO_PIXELS, type Photo } from "./photos";
@@ -913,7 +914,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 3.2 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">3.2</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 3.3 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">3.3</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -940,7 +941,7 @@ app.innerHTML = `
           <label class="workspace-add-control">
             <span class="visually-hidden">Add to workspace</span>
             <select id="workspace-add" aria-label="Add to workspace">
-              <option value="" selected></option>
+              <option value="" selected hidden></option>
               <option value="expression">Add expression</option>
               <option value="table">Add table</option>
               <option value="text">Add text</option>
@@ -4326,6 +4327,7 @@ function renderWorkspaceItems(): void {
     const node = nodes.get(block.key);
     if (node) workspaceList.append(node);
   }
+  refreshDropdowns();
 }
 
 function reorderWorkspaceBlock(
@@ -6323,6 +6325,7 @@ function updateColorSchemeControls(): void {
   document.querySelector<HTMLButtonElement>("#delete-color-scheme")!.hidden = !isCustom;
   document.querySelector<HTMLButtonElement>("#new-color-scheme")!.textContent =
     isCustom ? "Edit selected custom scheme" : "Create custom scheme";
+  refreshDropdowns();
 }
 
 updateColorSchemeControls();
@@ -6410,6 +6413,7 @@ function updateGraphOptionControls(): void {
   document.querySelector<HTMLSelectElement>("#aspect-ratio-setting")!.value =
     String(graphOptions.aspectRatio);
   document.querySelector<HTMLSelectElement>("#statistics-mode-setting")!.value = graphOptions.statisticsMode;
+  refreshDropdowns();
 }
 updateGraphOptionControls();
 

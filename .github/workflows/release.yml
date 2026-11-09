@@ -27,7 +27,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$GITHUB_REF_NAME" = "v3.2.0" ]; then
+          if [ "$GITHUB_REF_NAME" = "v3.3.0" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
+              --title "Better Desmos 3.3 — Theme-aware dropdown menus" \
+              --notes-file - <<'NOTES'
+          ## What's new
+
+          - **Custom dropdowns:** Replace native operating-system menus across workspace additions, settings, table regressions, photo rotation units, ticker modes, and PNG resolution.
+          - **Theme matching:** Menu surfaces, text, borders, active options, and selection marks follow the selected built-in or custom color scheme.
+          - **Keyboard controls:** Arrow keys, Home/End, and typeahead navigate without changing the setting; Enter/Space selects, Escape cancels, and Tab or outside clicks dismiss.
+          - **Viewport-aware placement:** Menus fit above or below their controls and display over scrolling panels and dialogs, without animations.
+          - **Version 3.3:** Calculator badge, accessible brand, page title, and package metadata are updated.
+
+          ## Download and run
+
+          Download **better-desmos.html** below and open it in your browser. It is self-contained and needs no installation or server.
+
+          ## Validation
+
+          All 82 tests, TypeScript checks, production build, and whitespace checks passed. Browser checks covered built-in and custom themes, keyboard navigation, dismissal, settings dialogs, table regressions, photo units, ticker modes, PNG resolution, and project restoration.
+
+          Mathematical behavior and existing graphing limitations are unchanged. See the README for supported syntax and limitations.
+          NOTES
+          elif [ "$GITHUB_REF_NAME" = "v3.2.0" ]; then
             gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
               --title "Better Desmos 3.2 — Formula tables and smoother animation" \
               --notes-file - <<'NOTES'

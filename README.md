@@ -4,9 +4,9 @@ A browser-based graphing calculator built with TypeScript and Vite. Its small st
 
 ## Versioning
 
-The current app version is **3.2**. Keep the package version in `package.json` in sync as `3.2.0`.
+The current app version is **3.3**. Keep the package version in `package.json` in sync as `3.3.0`.
 
-Version 3.0 added embedded photos with relative X/Y scaling, domain/range restrictions, and piecewise expressions. Version 3.1 added multi-input functions, list expansion, named points, polygons, persistent labels, selectable-resolution PNG export, and saved sample/population statistics conventions. The workspace toolbar has a wrench dropdown on the left, Undo/Redo arrows in the center, and the add menu on the right. Version 3.2 adds renameable table columns available as expression lists, formula cells and whole-column formulas, faster animated regressions, and stable panning during playback.
+Version 3.0 added embedded photos with relative X/Y scaling, domain/range restrictions, and piecewise expressions. Version 3.1 added multi-input functions, list expansion, named points, polygons, persistent labels, selectable-resolution PNG export, and saved sample/population statistics conventions. The workspace toolbar has a wrench dropdown on the left, Undo/Redo arrows in the center, and the add menu on the right. Version 3.2 added renameable table columns available as expression lists, formula cells and whole-column formulas, faster animated regressions, and stable panning during playback. Version 3.3 replaces operating-system dropdowns with keyboard-operable menus that follow the selected color scheme, including custom themes.
 
 Full Desmos parity remains unfinished. Remaining work includes general list/vector conditions and operations, expanded formula-driven tables, custom regressions, probability distributions and statistical visualizations/inference, clickable actions, direct photo manipulation, complex mode, a formatted math editor/keypad, and audio trace.
 
@@ -143,6 +143,8 @@ Expressions are parsed once and reused until edited. Use a pair of slider variab
 ## Accuracy and performance controls
 
 Open **Settings** to choose a color scheme. Dark is the default, with Light, Ocean, Forest, Sunset, Rose, Lavender, and High contrast also included. Create and save custom schemes by choosing colors for the graph background, workspace surfaces, text, accent, and borders. The selected scheme and custom schemes are saved in this browser, separately from project files.
+
+Dropdowns use the calculator's selected color scheme instead of operating-system menus, including workspace additions, table regressions, photo rotation units, ticker modes, settings, and PNG resolution. Menus open above or below the control to fit the viewport and appear over scrolling panels and dialogs. Use arrow keys, Home/End, or type an option's name to navigate; Enter/Space selects, Escape cancels, and Tab or clicking elsewhere dismisses the menu. Highlighting an option does not change the setting until it is selected. Theme changes apply to menu backgrounds, text, borders, highlights, and selection marks immediately, including custom schemes.
 
 Open **Settings** and expand **Accuracy & performance** to adjust:
 
