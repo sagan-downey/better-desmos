@@ -4,6 +4,7 @@ import {
   UndefinedPointError,
   compileFastGraphExpression,
   compileGraphExpression,
+  compileCollectionGraph,
   compileTickerAction,
   fitPolynomialRegression,
   fitLogarithmicRegression,
@@ -18,6 +19,7 @@ import {
   getPrecisionDigits,
   setPrecisionDigits,
   expandUserFunctions,
+  functionParameters,
   type Evaluation,
   type GraphExpression,
   type ImplicitEvaluation,
@@ -29,6 +31,9 @@ import {
   type TrigonometricRegression,
 } from "./math";
 import { BoundedCache, referencedVariableSignature, SegmentIndex, selectHoverPoint, tangentBranchRange, tangentPixelCoverage, refinementLevels } from "./performance";
+import { expandCollections, hasCollections, COLLECTION_FUNCTIONS, type StatisticsMode } from "./collections";
+import { imageExportSize } from "./image-export";
+import { expandNamedPoints, pointSources, dynamicLabel, type PointSources } from "./geometry";
 import { parsePhotos, evaluatePhotoTransform, photoMatrix, PHOTO_FIELDS, PHOTO_TYPES, MAX_PHOTO_BYTES, MAX_PHOTO_PIXELS, MAX_TOTAL_PHOTO_PIXELS, type Photo } from "./photos";
 import "./style.css";
 
@@ -56,12 +61,17 @@ interface Expression {
   folderId?: number;
   note?: string;
   hidden?: boolean;
+  label?: string;
+  labelX?: string;
+  labelY?: string;
+  labelError?: string;
   hsv?: HSVFormulas;
   compiledHsv?: CompiledChannels;
   compiledHsvKey?: string;
   colorError?: string;
   parsedText?: string;
   parsedFunctionSignature?: string;
+  parsedCollectionSignature?: string;
   compiledMode?: "precise" | "desmos";
   compiled?: CompiledGraph;
   compileError?: string;
@@ -74,7 +84,7 @@ interface Expression {
     display?: string;
     error?: string;
     evaluatorKey?: string;
-    evaluator?: (x: number) => Evaluation;
+    evaluator?: (x: number) => Evaluation | number;
   } | null;
   scalarText?: string;
   scalarEvaluator?: () => Evaluation | number;
@@ -149,6 +159,7 @@ interface GraphOptions {
   showYAxis: boolean;
   showLabels: boolean;
   aspectRatio: 0.5 | 1 | 2;
+  statisticsMode: StatisticsMode;
 }
 
 interface WorkspaceItem {
@@ -406,6 +417,7 @@ function parseProjectState(text: string): ProjectState {
         typeof graphOptions.showXAxis !== "boolean" ||
         typeof graphOptions.showYAxis !== "boolean" ||
         typeof graphOptions.showLabels !== "boolean" ||
+        (graphOptions.statisticsMode !== undefined && !["population", "sample"].includes(String(graphOptions.statisticsMode))) ||
         ![0.5, 1, 2].includes(Number(graphOptions.aspectRatio)))) {
     throw new Error("Project contains invalid graph settings.");
   }
@@ -424,6 +436,8 @@ function parseProjectState(text: string): ProjectState {
         (item.folderId !== undefined && !Number.isInteger(item.folderId)) ||
         (item.note !== undefined && (typeof item.note !== "string" || item.note.length > 10_000)) ||
         (item.hidden !== undefined && typeof item.hidden !== "boolean") ||
+        (["label", "labelX", "labelY"].some((key) => item[key] !== undefined &&
+          (typeof item[key] !== "string" || item[key].length > 512))) ||
         (item.draggable !== undefined && typeof item.draggable !== "boolean") ||
         (hsv !== undefined && !isHSVFormulas(hsv))) {
       throw new Error("Project contains an invalid expression.");
@@ -437,6 +451,9 @@ function parseProjectState(text: string): ProjectState {
       folderId: item.folderId as number | undefined,
       note: item.note as string | undefined,
       hidden: item.hidden as boolean | undefined,
+      label: item.label as string | undefined,
+      labelX: item.labelX as string | undefined,
+      labelY: item.labelY as string | undefined,
       draggable: item.draggable as boolean | undefined,
       hsv: hsv === undefined ? undefined : {
         hue: hsv.hue,
@@ -689,6 +706,7 @@ function parseProjectState(text: string): ProjectState {
       showYAxis: graphOptions.showYAxis as boolean,
       showLabels: graphOptions.showLabels as boolean,
       aspectRatio: Number(graphOptions.aspectRatio) as GraphOptions["aspectRatio"],
+      statisticsMode: graphOptions.statisticsMode === "sample" ? "sample" : "population",
     },
   };
 }
@@ -754,6 +772,8 @@ let workspaceOrder: WorkspaceItem[] = initialProject?.workspaceOrder ?? [
   ...folders.map(({ id }): WorkspaceItem => ({ type: "folder", id })),
 ];
 const sliderValues: Record<string, number> = initialProject?.sliders ?? {};
+let collectionValues: Record<string, string[]> = {};
+let pointValues: Record<string, PointSources> = {};
 const sliderOptions: Record<string, SliderOptions> = initialProject?.sliderOptions ?? {};
 interface SliderAnimation {
   direction: 1 | -1;
@@ -851,6 +871,7 @@ const graphOptions: GraphOptions = initialProject?.graphOptions ?? {
   showYAxis: true,
   showLabels: true,
   aspectRatio: 1,
+  statisticsMode: initialProject ? "population" : "sample",
 };
 const graphSettings = {
   precisionDigits: getPrecisionDigits(),
@@ -880,16 +901,30 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 3.0 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">3.0</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 3.1 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">3.1</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
-          <button type="button" id="save-project">Save</button>
-          <button type="button" id="export-project">Export</button>
-          <button type="button" id="import-project">Import</button>
-          <button type="button" id="share-project">Share</button>
-          <button type="button" id="undo-project" aria-label="Undo" title="Undo">Undo</button>
-          <button type="button" id="redo-project" aria-label="Redo" title="Redo">Redo</button>
+          <div class="project-tools">
+            <button type="button" class="icon-control" id="project-tools-toggle" aria-label="Project tools" title="Project tools" aria-expanded="false" aria-controls="project-tools-dropdown">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 6.5a5 5 0 0 0-6.3 6.3L3 18a2.1 2.1 0 0 0 3 3l5.2-5.2a5 5 0 0 0 6.3-6.3L14 13l-3-3 3.5-3.5Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+            </button>
+            <div id="project-tools-dropdown" class="project-tools-dropdown" hidden>
+              <button type="button" id="save-project" aria-haspopup="dialog">Save</button>
+              <button type="button" id="export-project">Export</button>
+              <button type="button" id="export-image" aria-haspopup="dialog">PNG</button>
+              <button type="button" id="import-project">Import</button>
+              <button type="button" id="share-project">Share</button>
+            </div>
+          </div>
+          <div class="project-history">
+            <button type="button" class="icon-control" id="undo-project" aria-label="Undo" title="Undo">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5-6 6 6 6M3 11h10a7 7 0 0 1 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <button type="button" class="icon-control" id="redo-project" aria-label="Redo" title="Redo">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5 6 6-6 6m6-6H11a7 7 0 0 0-7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
           <label class="workspace-add-control">
             <span class="visually-hidden">Add to workspace</span>
             <select id="workspace-add" aria-label="Add to workspace">
@@ -932,6 +967,25 @@ app.innerHTML = `
       <div class="canvas-wrap"><canvas id="graph" aria-label="Graph of the entered expressions"></canvas><canvas id="graph-detail" aria-hidden="true" hidden></canvas><canvas id="graph-grid" aria-hidden="true"></canvas><canvas id="graph-points" aria-hidden="true"></canvas></div>
     </section>
   </main>
+  <dialog class="settings-dialog" id="image-export-dialog" aria-labelledby="image-export-title">
+    <form id="image-export-form">
+      <div class="settings-dialog-heading"><h2 id="image-export-title">Export graph as PNG</h2></div>
+      <div class="setting-control">
+        <label for="image-export-resolution">Resolution</label>
+        <select id="image-export-resolution">
+          <option value="1">1x visible graph size</option>
+          <option value="2" selected>2x visible graph size</option>
+          <option value="3">3x visible graph size</option>
+          <option value="4">4x visible graph size</option>
+        </select>
+      </div>
+      <p>Renders the current view with photos, grid, and axis numbers. Maximum 16 million pixels. Higher resolutions may take longer.</p>
+      <div class="theme-actions">
+        <button type="button" id="cancel-image-export">Cancel</button>
+        <button type="submit" id="download-image">Download PNG</button>
+      </div>
+    </form>
+  </dialog>
   <dialog class="settings-dialog" id="settings-dialog" aria-labelledby="settings-title">
     <div class="settings-dialog-heading">
       <h2 id="settings-title">Settings</h2>
@@ -969,6 +1023,14 @@ app.innerHTML = `
       <label class="setting-check" for="show-x-axis-setting"><span>Show x-axis</span><input id="show-x-axis-setting" type="checkbox" /></label>
       <label class="setting-check" for="show-y-axis-setting"><span>Show y-axis</span><input id="show-y-axis-setting" type="checkbox" /></label>
       <label class="setting-check" for="show-labels-setting"><span>Show axis numbers</span><input id="show-labels-setting" type="checkbox" /></label>
+      <div class="setting-control">
+        <label for="statistics-mode-setting">Statistics convention</label>
+        <select id="statistics-mode-setting">
+          <option value="sample">Sample (Desmos-style, n−1)</option>
+          <option value="population">Population (legacy, n)</option>
+        </select>
+        <p>Controls variance and stdev. Older projects keep population statistics; new projects use sample statistics. variancep and stdevp always use population statistics.</p>
+      </div>
       <div class="setting-control">
         <label for="aspect-ratio-setting">Axis scale ratio</label>
         <select id="aspect-ratio-setting">
@@ -1037,6 +1099,37 @@ const tickerList = document.createElement("div");
 tickerList.className = "tickers-panel";
 const photoList = document.createElement("div");
 const workspaceAdd = document.querySelector<HTMLSelectElement>("#workspace-add")!;
+const projectTools = document.querySelector<HTMLDivElement>(".project-tools")!;
+const projectToolsToggle = document.querySelector<HTMLButtonElement>("#project-tools-toggle")!;
+const projectToolsDropdown = document.querySelector<HTMLDivElement>("#project-tools-dropdown")!;
+function setProjectToolsOpen(open: boolean): void {
+  projectToolsDropdown.hidden = !open;
+  projectToolsToggle.setAttribute("aria-expanded", String(open));
+}
+projectToolsToggle.addEventListener("click", () => setProjectToolsOpen(projectToolsDropdown.hidden));
+projectToolsDropdown.addEventListener("click", (event) => {
+  if (event.target instanceof Element && event.target.closest("button")) {
+    setProjectToolsOpen(false);
+    if (!document.querySelector("dialog[open]")) projectToolsToggle.focus();
+  }
+});
+document.addEventListener("pointerdown", (event) => {
+  if (event.target instanceof Node && !projectTools.contains(event.target)) setProjectToolsOpen(false);
+});
+projectTools.addEventListener("focusout", (event) => {
+  if (!(event.relatedTarget instanceof Node) || !projectTools.contains(event.relatedTarget)) setProjectToolsOpen(false);
+});
+projectTools.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !projectToolsDropdown.hidden) {
+    event.preventDefault();
+    setProjectToolsOpen(false);
+    projectToolsToggle.focus();
+  } else if (event.key === "ArrowDown" && event.target === projectToolsToggle) {
+    event.preventDefault();
+    setProjectToolsOpen(true);
+    projectToolsDropdown.querySelector<HTMLButtonElement>("button")!.focus();
+  }
+});
 const canvas = document.querySelector<HTMLCanvasElement>("#graph")!;
 let context = canvas.getContext("2d")!;
 const detailCanvas = document.querySelector<HTMLCanvasElement>("#graph-detail")!;
@@ -1162,18 +1255,19 @@ function alignCanvasStrokeCenter(coordinate: number, dpr: number, lineWidth: num
   return (Math.round(coordinate * dpr) + halfPixel) / dpr;
 }
 
-function drawGrid(): void {
+function drawGrid(target = gridCanvas, exportWidth?: number, exportHeight?: number, exportDpr?: number): void {
   const bounds = canvasWrap.getBoundingClientRect();
-  const width = Math.max(1, bounds.width);
-  const height = Math.max(1, bounds.height);
-  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(1, exportWidth ?? bounds.width);
+  const height = Math.max(1, exportHeight ?? bounds.height);
+  const dpr = exportDpr ?? (window.devicePixelRatio || 1);
   const pixelWidth = Math.max(1, Math.round(width * dpr));
   const pixelHeight = Math.max(1, Math.round(height * dpr));
-  if (gridCanvas.width !== pixelWidth || gridCanvas.height !== pixelHeight) {
-    gridCanvas.width = pixelWidth;
-    gridCanvas.height = pixelHeight;
+  if (target.width !== pixelWidth || target.height !== pixelHeight) {
+    target.width = pixelWidth;
+    target.height = pixelHeight;
   }
-  const context = gridContext;
+  const context = target === gridCanvas ? gridContext : target.getContext("2d");
+  if (!context) throw new Error("Could not create the grid canvas.");
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   context.clearRect(0, 0, width, height);
   const yScale = verticalScale();
@@ -1255,7 +1349,7 @@ function drawGrid(): void {
 function compileSpatialColor(expression: Expression): ((x: number, y: number) => string) | undefined {
   const hsv = expression.hsv;
   if (hsv) {
-    const key = `${graphMode}:${userFunctionSignature()}:${hsv.hue}\u0000${hsv.saturation}\u0000${hsv.value}`;
+    const key = `${graphMode}:${userFunctionSignature()}:${JSON.stringify(pointValues)}:${hsv.hue}\u0000${hsv.saturation}\u0000${hsv.value}`;
     if (expression.compiledHsvKey !== key) {
       expression.compiledHsvKey = key;
       expression.compiledHsv = undefined;
@@ -1570,7 +1664,7 @@ function drawExplicitCurve(
   regionAt?: (parameter: number) => string,
 ): ExplicitCurveData {
   const source = expression ? expandFunctions(expression.text) : "";
-  const cacheKey = expression ? `${graphMode}:${getPrecisionDigits()}:${source}:${
+  const cacheKey = expression ? `${graphMode}:${getPrecisionDigits()}:${source}:${collectionSignature(source)}:${
     referencedVariableSignature(source, sliderValues)
   }:${centerX}:${centerY}:${scale}:${graphOptions.aspectRatio}:${width}:${height}:${
     graphSettings.explicitSampleSpacing
@@ -2181,18 +2275,20 @@ function addGraphPointAt(screenX: number, screenY: number): void {
   const nearest = selectHoverPoint(
     hoverSegmentIndex.nearby(screenX, screenY, 10), screenX, screenY,
     (curve) => curve.id.startsWith("expression-")
-      ? priorities.get(curve.id) ?? Infinity : Infinity,
+      ? priorities.get(curve.id.split(":")[0]!) ?? Infinity : Infinity,
   );
   if (!nearest) {
     return;
   }
 
-  const expressionId = Number(nearest.curve.id.slice("expression-".length));
+  const [expressionPart, memberPart] = nearest.curve.id.slice("expression-".length).split(":");
+  const expressionId = Number(expressionPart);
   const expression = expressions.find((entry) => entry.id === expressionId);
   if (!expression) {
     return;
   }
-  const graph = getCompiled(expression);
+  const compiled = getCompiled(expression);
+  const graph = compiled?.kind === "collection" ? compiled.graphs[Number(memberPart)] : compiled;
   if (!graph || (graph.kind !== "explicit" && graph.kind !== "sideways" &&
       graph.kind !== "parametric")) {
     return;
@@ -2291,7 +2387,7 @@ function drawHoverOverlay(buildIndex = true): void {
   const priorities = hoverCurvePriorities();
   const nearest = selectHoverPoint(
     hoverSegmentsNear(hoverPosition.x, hoverPosition.y, buildIndex),
-    hoverPosition.x, hoverPosition.y, (curve) => priorities.get(curve.id) ?? Infinity,
+    hoverPosition.x, hoverPosition.y, (curve) => priorities.get(curve.id.split(":")[0]!) ?? Infinity,
   );
 
   const activeIds = new Set(nearest ? [nearest.curve.id] : []);
@@ -2480,6 +2576,63 @@ function drawInequality(
   return drawImplicit(evaluate, width, height, id, color, colorAt, lineWidth, opacity, regionAt);
 }
 
+function drawExpressionLabel(expression: Expression, width: number, height: number): void {
+  const error = workspaceList.querySelector<HTMLElement>(`[data-label-error-id="${expression.id}"]`);
+  const fields = workspaceList.querySelectorAll<HTMLInputElement>(`[data-expression-id="${expression.id}"] [data-label-field]`);
+  expression.labelError = undefined;
+  if (error) error.textContent = "";
+  for (const field of fields) field.setAttribute("aria-invalid", "false");
+  if (!expression.label?.trim()) return;
+  try {
+    const compiled = getCompiled(expression);
+    const graph = compiled?.kind === "collection" ? compiled.graphs[0] : compiled;
+    if (!graph) return;
+    let anchor: [number, number] = [0, 0];
+    if (!expression.labelX?.trim() || !expression.labelY?.trim()) {
+      if (graph.kind === "point") anchor = graph.evaluate();
+      else if (graph.kind === "explicit" || graph.kind === "sideways") {
+        const value = graph.evaluate(0);
+        const coordinate = typeof value === "number" ? value : value.value.toNumber();
+        anchor = graph.kind === "explicit" ? [0, coordinate] : [coordinate, 0];
+      } else if (graph.kind === "parametric") anchor = graph.evaluate(graph.start);
+      else if (graph.kind === "polygon") {
+        const vertices = graph.evaluate();
+        anchor = [vertices.reduce((total, point) => total + point[0], 0) / vertices.length,
+          vertices.reduce((total, point) => total + point[1], 0) / vertices.length];
+      }
+    }
+    const evaluate = (source: string): number => {
+      const evaluateScalar = (item: string) => compileColorExpression(item, sliderValues)(anchor[0], anchor[1]);
+      const collection = expandCollections(expandFunctions(source), evaluateScalar, collectionValues, graphOptions.statisticsMode);
+      if (collection.list) throw new Error("Label formulas must produce scalar numbers, not lists.");
+      return evaluateScalar(collection.items[0]!);
+    };
+    const x = expression.labelX?.trim() ? evaluate(expression.labelX) : anchor[0];
+    const y = expression.labelY?.trim() ? evaluate(expression.labelY) : anchor[1];
+    if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("Label coordinates must be finite.");
+    const label = dynamicLabel(expression.label, evaluate);
+    context.save();
+    try {
+      context.globalAlpha = expression.opacity ?? 1;
+      context.font = "14px Inter, ui-sans-serif, system-ui, sans-serif";
+      context.lineJoin = "round";
+      context.lineWidth = 4;
+      context.strokeStyle = currentThemeColor("app-bg");
+      context.fillStyle = expression.color;
+      const sx = width / 2 + (x - centerX) * scale + 10;
+      const sy = height / 2 - (y - centerY) * verticalScale() - 10;
+      context.strokeText(label, sx, sy);
+      context.fillText(label, sx, sy);
+    } finally {
+      context.restore();
+    }
+  } catch (reason) {
+    expression.labelError = reason instanceof Error ? reason.message : "Could not draw label.";
+  }
+  if (error) error.textContent = expression.labelError ?? "";
+  for (const field of fields) field.setAttribute("aria-invalid", String(Boolean(expression.labelError)));
+}
+
 function draw(): void {
   cancelRefinement();
   detailCanvas.hidden = true;
@@ -2536,16 +2689,76 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
     for (const expression of entry ? [entry] : []) {
       if(expression.hidden) continue;
       if(updateScalarResult(expression)) continue;
-      const graph=getCompiled(expression);
-      if(!graph) {
+      const compiled=getCompiled(expression);
+      if(!compiled) {
         continue;
       }
-      const graphId=graph.kind==="implicit"
+      const graphs = compiled.kind === "collection" ? compiled.graphs : [compiled];
+      const evaluationErrors = new Set<string>();
+      for (const [memberIndex, graph] of graphs.entries()) {
+      expression.evaluationError = undefined;
+      try {
+      if (graph.kind === "collection") throw new Error("Nested graph collections are not supported.");
+      const graphId=(graph.kind==="implicit"
         ? `implicit-${expression.id}`
-        :`expression-${expression.id}`;
+        :`expression-${expression.id}`) + (compiled.kind === "collection" ? `:${memberIndex}` : "");
       const colorAt=compileSpatialColor(expression);
       const lineWidth=expression.lineWidth??2;
       const opacity=expression.opacity??1;
+      if (graph.kind === "polygon") {
+        try {
+          const vertices = graph.evaluate();
+          const path = new Path2D();
+          const geometry: CurveGeometry = { id: graphId, color: expression.color, segments: [] };
+          const screen = vertices.map(([x, y]) => [width / 2 + (x - centerX) * scale, height / 2 - (y - centerY) * verticalScale()]);
+          for (const [index, vertex] of screen.entries()) {
+            if (index === 0) path.moveTo(vertex[0]!, vertex[1]!);
+            else path.lineTo(vertex[0]!, vertex[1]!);
+            const next = screen[(index + 1) % screen.length]!;
+            geometry.segments.push(vertex[0]!, vertex[1]!, next[0]!, next[1]!);
+          }
+          path.closePath();
+          context.save();
+          try {
+            context.globalAlpha = opacity * 0.18;
+            if (colorAt) {
+              context.clip(path, "evenodd");
+              const step = 4 / renderDetailFactor;
+              const minX = Math.max(0, Math.min(...screen.map((point) => point[0]!)));
+              const maxX = Math.min(width, Math.max(...screen.map((point) => point[0]!)));
+              const minY = Math.max(0, Math.min(...screen.map((point) => point[1]!)));
+              const maxY = Math.min(height, Math.max(...screen.map((point) => point[1]!)));
+              for (let sy = minY; sy < maxY; sy += step) {
+                for (let sx = minX; sx < maxX; sx += step) {
+                  context.fillStyle = colorAt((sx + step / 2 - width / 2) / scale + centerX,
+                    (height / 2 - sy - step / 2) / verticalScale() + centerY);
+                  context.fillRect(sx, sy, step, step);
+                }
+              }
+            } else {
+              context.fillStyle = expression.color;
+              context.fill(path, "evenodd");
+            }
+          } finally {
+            context.restore();
+          }
+          if (colorAt) strokeColoredSegments(geometry, colorAt, width, height, lineWidth, opacity);
+          else {
+            context.save();
+            context.globalAlpha = opacity;
+            context.strokeStyle = expression.color;
+            context.lineWidth = lineWidth;
+            context.stroke(path);
+            context.restore();
+          }
+          implicitCurves.push(geometry);
+          expression.evaluationError = undefined;
+        } catch (reason) {
+          expression.evaluationError = reason instanceof Error ? reason.message : "Could not render polygon.";
+        }
+        updateExpressionErrorDisplay(expression);
+        continue;
+      }
       if(graph.kind==="point") {
         try {
           const [x,y]=graph.evaluate();
@@ -2568,6 +2781,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
           nextDraggableGraphPoints.push({
             expressionId: expression.id,
             draggable: expression.draggable!==false&&
+              !xVariables.some((name) => yVariables.includes(name)) &&
               (xVariables.length>0||yVariables.length>0),
             xVariables,
             yVariables,
@@ -2579,7 +2793,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
             opacity,
           });
           addPointCandidate(
-            candidates,x,y,"draggable point",[graphId],pointColor,width,height,
+            candidates,x,y,xVariables.length || yVariables.length ? "draggable point" : "point",[graphId],pointColor,width,height,
           );
           expression.evaluationError=undefined;
         } catch(reason) {
@@ -2591,13 +2805,14 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
         continue;
       }
       if(graph.kind==="sideways") {
-        const evaluate=cachedExplicitEvaluator(expression,(y: number) => {
+        const evaluateSource=(y: number) => {
           const result=graph.evaluate(y);
           return typeof result==="number"? result:result.value.toNumber();
-        });
+        };
+        const evaluate = graphs.length === 1 ? cachedExplicitEvaluator(expression, evaluateSource) : evaluateSource;
         try {
           const curve=drawExplicitCurve(
-            graphId,expression.color,evaluate,width,height,colorAt,lineWidth,opacity,true,expression,graph.tangent,graph.region,
+            graphId,expression.color,evaluate,width,height,colorAt,lineWidth,opacity,true,graphs.length === 1 ? expression : undefined,graph.tangent,graph.region,
           );
           implicitCurves.push(curve);
           if (renderDetailFactor === 1) detectExplicitPoints(curve,evaluate,candidates,width,height,true);
@@ -2672,13 +2887,14 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
         }
         continue;
       }
-      const evaluate=cachedExplicitEvaluator(expression,(x: number) => {
+      const evaluateSource=(x: number) => {
         const result=graph.evaluate(x);
         return typeof result==="number"? result:result.value.toNumber();
-      });
+      };
+      const evaluate = graphs.length === 1 ? cachedExplicitEvaluator(expression, evaluateSource) : evaluateSource;
       try {
         const curve=drawExplicitCurve(
-          graphId,expression.color,evaluate,width,height,colorAt,lineWidth,opacity,false,expression,graph.tangent,graph.region,
+          graphId,expression.color,evaluate,width,height,colorAt,lineWidth,opacity,false,graphs.length === 1 ? expression : undefined,graph.tangent,graph.region,
         );
         explicitCurves.push(curve);
         if (renderDetailFactor === 1) detectExplicitPoints(curve,evaluate,candidates,width,height);
@@ -2686,6 +2902,12 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
       } catch (reason) {
         expression.evaluationError = reason instanceof Error ? reason.message : "Could not render curve.";
       }
+      updateExpressionErrorDisplay(expression);
+      } finally {
+        if (expression.evaluationError) evaluationErrors.add(expression.evaluationError);
+      }
+      }
+      expression.evaluationError = [...evaluationErrors].join("\n") || undefined;
       updateExpressionErrorDisplay(expression);
     }
 
@@ -2762,12 +2984,14 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
         context.stroke();
       }
     }
+    if (entry && !entry.hidden) drawExpressionLabel(entry, width, height);
     allDraggableGraphPoints.push(...nextDraggableGraphPoints);
   };
   const allDraggableGraphPoints: DraggableGraphPoint[] = [];
   for (const item of workspaceBlocks().flatMap((block) => block.items).reverse()) {
     drawWorkspaceItem(item);
   }
+
   if (renderDetailFactor !== 1) return;
   for (let first = 0; first < explicitCurves.length; first += 1) {
     for (let second = first + 1; second < explicitCurves.length; second += 1) {
@@ -2892,8 +3116,8 @@ function updateScalarResult(expression: Expression): boolean {
     }
   };
   const source = expression.text.trim();
-  const scalarKey = `${source}\u0000${userFunctionSignature()}`;
-  const tokens = source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [];
+  const scalarKey = `${source}\u0000${userFunctionSignature()}\u0000${collectionSignature(source)}`;
+  const tokens = source.replace(/([a-z](?:_[a-z0-9]+)?)\.[xy]\b/gi, "$1").match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [];
   if (!source || graphRelation(source) ||
       /^(?:list|derivative|integral|parametric|polar)\s*\(/i.test(source) ||
       tokens.some((name) => ["x", "y", "t"].includes(name.toLowerCase()))) {
@@ -2905,13 +3129,28 @@ function updateScalarResult(expression: Expression): boolean {
   if (expression.scalarText !== scalarKey || !expression.scalarEvaluator) {
     expression.scalarText = scalarKey;
     expression.scalarEvaluator = undefined;
+    let expandedSource: string | undefined;
     try {
-      const expandedSource = expandFunctions(source);
+      expandedSource = expandFunctions(source);
+      let approximate = false;
+      if (hasCollections(expandedSource, collectionValues)) {
+        const collection = expandCollections(expandedSource,
+          (item) => compileExpression(item, sliderValues)(0).value.toNumber(), collectionValues, graphOptions.statisticsMode);
+        if (collection.list) {
+          if (resultElement) resultElement.hidden = true;
+          return false;
+        }
+        expandedSource = collection.items[0]!;
+        approximate = collection.approximate ?? false;
+      }
       const evaluate = compileExpression(expandedSource, sliderValues);
-      expression.scalarEvaluator = () => evaluate(0);
+      expression.scalarEvaluator = () => {
+        const value = evaluate(0);
+        return approximate ? { ...value, exact: false } : value;
+      };
     } catch {
       try {
-        const graph = compileGraphExpression(expandFunctions(source), sliderValues);
+        const graph = compileGraphExpression(expandedSource ?? expandFunctions(source), sliderValues, graphOptions.statisticsMode);
         if (graph.kind !== "explicit") return false;
         expression.scalarEvaluator = () => graph.evaluate(0);
       } catch {
@@ -2948,14 +3187,24 @@ function updateScalarResult(expression: Expression): boolean {
   }
 }
 
+function collectionSignature(source: string): string {
+  return hasCollections(source, collectionValues) ||
+    getUserFunctionDefinitions().some(({ definition }) => hasCollections(definition.body, collectionValues))
+    ? JSON.stringify([collectionValues, pointValues, sliderValues, graphOptions.statisticsMode]) :
+      JSON.stringify([pointValues, graphOptions.statisticsMode]);
+}
+
 function getCompiled(expression: Expression): CompiledGraph | undefined {
   const functionStates = getUserFunctionDefinitions();
   const functionSignature = userFunctionSignature(functionStates);
+  const collectionsKey = collectionSignature(expression.text);
   if (expression.parsedText !== expression.text ||
       expression.parsedFunctionSignature !== functionSignature ||
+      expression.parsedCollectionSignature !== collectionsKey ||
       expression.compiledMode !== graphMode) {
     expression.parsedText = expression.text;
     expression.parsedFunctionSignature = functionSignature;
+    expression.parsedCollectionSignature = collectionsKey;
     expression.compiledMode = graphMode;
     expression.compiled = undefined;
     expression.compileError = undefined;
@@ -2966,9 +3215,10 @@ function getCompiled(expression: Expression): CompiledGraph | undefined {
       if (!expression.compileError) {
         try {
           const expandedSource = expandFunctions(
-            `${functionDefinition.definition.name}(0)`,
+            `${functionDefinition.definition.name}(${functionParameters(functionDefinition.definition).map(() => "0").join(",")})`,
           );
-          compileExpression(expandedSource, sliderValues);
+          compileCollectionGraph(expandedSource, sliderValues, collectionValues, false, graphOptions.statisticsMode) ??
+            compileGraphExpression(expandedSource, sliderValues, graphOptions.statisticsMode);
         } catch (reason) {
           expression.compileError = reason instanceof Error ? reason.message : "Invalid function";
         }
@@ -2979,14 +3229,21 @@ function getCompiled(expression: Expression): CompiledGraph | undefined {
     const definition = getVariableDefinition(expression);
     if (definition) {
       expression.compileError = definition.error;
+      if (!definition.error && Object.hasOwn(pointValues, definition.target)) {
+        try {
+          expression.compiled = compileGraphExpression(expandFunctions(definition.target), sliderValues);
+        } catch (reason) {
+          expression.compileError = reason instanceof Error ? reason.message : "Invalid named point.";
+        }
+      }
       updateExpressionErrorDisplay(expression);
-      return undefined;
+      return expression.compiled;
     }
     try {
       const source = expandFunctions(expression.text);
-      expression.compiled = graphMode === "desmos"
-        ? compileFastGraphExpression(source, sliderValues)
-        : compileGraphExpression(source, sliderValues);
+      expression.compiled = compileCollectionGraph(source, sliderValues, collectionValues, graphMode === "desmos", graphOptions.statisticsMode) ?? (graphMode === "desmos"
+        ? compileFastGraphExpression(source, sliderValues, graphOptions.statisticsMode)
+        : compileGraphExpression(source, sliderValues, graphOptions.statisticsMode));
     } catch (reason) {
       expression.compileError = reason instanceof Error ? reason.message : "Invalid expression";
     }
@@ -3033,25 +3290,30 @@ function getUserFunctionDefinitions(): FunctionState[] {
   }
   const found: FunctionState[] = [];
   for (const expression of expressions) {
-    const match = /^\s*([a-z])\s*\(([^)]*)\)\s*=\s*(.*)\s*$/i.exec(expression.text);
+    const match = /^\s*([a-z](?:_[a-z0-9]+)?)\s*\(([^)]*)\)\s*=\s*(.*)\s*$/i.exec(expression.text);
     if (!match) continue;
     const name = match[1]!.toLowerCase();
     const parameter = match[2]!.trim().toLowerCase();
     const definition: UserFunctionDefinition = {
       name,
       parameter,
+      parameters: parameter.split(",").map((name) => name.trim()),
       body: match[3]!.trim(),
     };
     const state: (typeof found)[number] = { expression, definition };
-    if (parameter !== "x") {
-      state.error = "A function must use x as its input, such as f(x).";
-    } else if (!definition.body) {
+    try {
+      functionParameters(definition);
+    } catch (reason) {
+      state.error = reason instanceof Error ? reason.message : "Invalid function parameters.";
+    }
+    if (!state.error && !definition.body) {
       state.error = "Enter a function body after the equals sign.";
-    } else if ([
+    } else if (!state.error && [
       "x", "y", "t", "pi", "e", "sqrt", "sin", "cos", "tan", "asin", "acos",
       "atan", "ln", "log", "exp", "abs", "floor", "ceil", "parametric", "polar",
       "derivative", "integral", "list", "sum", "product", "min", "max", "mean",
       "median", "variance", "stdev", "factorial",
+      "for", ...COLLECTION_FUNCTIONS,
     ].includes(name)) {
       state.error = `"${name}" is reserved and cannot be defined as a function.`;
     }
@@ -3090,7 +3352,7 @@ function expandFunctions(source: string): string {
     expandedSources = new BoundedCache(1024);
   }
   const cached = expandedSources.get(source);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) return expandNamedPoints(cached, pointValues);
   const invalidDefinition = states.find(({ definition, error }) =>
     error && new RegExp(`\\b${definition.name}\\s*\\(`, "i").test(source));
   if (invalidDefinition) throw new Error(invalidDefinition.error);
@@ -3099,7 +3361,7 @@ function expandFunctions(source: string): string {
     states.filter(({ error }) => !error).map(({ definition }) => definition),
   );
   expandedSources.set(source, expanded);
-  return expanded;
+  return expandNamedPoints(expanded, pointValues);
 }
 
 function getVariableDefinition(
@@ -3128,12 +3390,15 @@ function synchronizeVariableDefinitions(): {
     "atan", "ln", "log", "exp", "abs", "floor", "ceil", "parametric", "polar",
     "derivative", "integral", "list", "sum", "product", "min", "max", "mean",
     "median", "variance", "stdev", "factorial",
+    "for", ...COLLECTION_FUNCTIONS,
     ...functionStates.map(({ definition }) => definition.name),
   ]);
   const definitions = expressions
     .map((expression) => getVariableDefinition(expression))
     .filter((definition): definition is NonNullable<Expression["definition"]> => Boolean(definition));
   const definitionNames = new Set(definitions.map(({ target }) => target));
+  collectionValues = {};
+  pointValues = {};
   const counts = new Map<string, number>();
   for (const { target } of definitions) counts.set(target, (counts.get(target) ?? 0) + 1);
   for (const definition of definitions) {
@@ -3141,7 +3406,9 @@ function synchronizeVariableDefinitions(): {
     definition.display = undefined;
     definition.error = counts.get(definition.target)! > 1
       ? `"${definition.target}" is defined more than once.`
-      : undefined;
+      : functionStates.some(({ definition: fn }) => fn.name === definition.target)
+        ? `"${definition.target}" is already defined as a function.`
+        : undefined;
   }
 
   const functionByExpression = new Map(
@@ -3150,16 +3417,17 @@ function synchronizeVariableDefinitions(): {
   const sources = expressions.flatMap((expression) => {
     const functionDefinition = functionByExpression.get(expression);
     const expressionSource = functionDefinition
-      ? functionDefinition.body.replace(
-        new RegExp(`\\b${functionDefinition.parameter}\\b`, "gi"),
-        "",
-      )
+      ? functionDefinition.body.replace(/[a-z]+(?:_[a-z0-9]+)?/gi, (name) =>
+        (functionDefinition.parameters ?? [functionDefinition.parameter]).includes(name.toLowerCase()) ? "" : name)
       : expression.text;
     return [
       expressionSource,
       expression.hsv?.hue ?? "",
       expression.hsv?.saturation ?? "",
       expression.hsv?.value ?? "",
+      ...[...expression.label?.matchAll(/\$\{([^{}]+)\}/g) ?? []].map((match) => match[1]!),
+      expression.labelX ?? "",
+      expression.labelY ?? "",
     ];
   }).concat(tickers.map((ticker) => ticker.action),
     photos.flatMap((photo) => PHOTO_FIELDS.map(([key]) => photo[key])));
@@ -3167,9 +3435,11 @@ function synchronizeVariableDefinitions(): {
   if (sliderAnalysis?.key !== sliderAnalysisKey) {
     sliderAnalysis = {
       key: sliderAnalysisKey,
-      names: [...new Set(sources.flatMap((source) =>
-        source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? []
-      ).map((name) => name.toLowerCase()).filter((name) =>
+      names: [...new Set(sources.flatMap((source) => {
+        const boundNames = new Set([...source.matchAll(/\b([a-z](?:_[a-z0-9]+)?)\s*=\s*\[/gi)].map((match) => match[1]!.toLowerCase()));
+        return (source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [])
+          .filter((name) => !boundNames.has(name.toLowerCase()));
+      }).map((name) => name.toLowerCase()).filter((name) =>
         /^[a-z](?:_[a-z0-9]+)?$/.test(name) && !reserved.has(name) &&
         !definitionNames.has(name)))].sort(),
     };
@@ -3203,21 +3473,23 @@ function synchronizeVariableDefinitions(): {
       state.set(definition.target, "failed");
       return;
     }
-    const references = (expanded.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [])
+    const boundVariables = new Set([...expanded.matchAll(/\b([a-z](?:_[a-z0-9]+)?)\s*=\s*\[/gi)].map((match) => match[1]!.toLowerCase()));
+    const referenceSource = expanded.replace(/([a-z](?:_[a-z0-9]+)?)\.[xy]\b/gi, "$1");
+    const references = (referenceSource.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [])
       .map((name) => name.toLowerCase());
-    if (references.some((name) => ["x", "y", "t"].includes(name))) {
+    if (references.some((name) => ["x", "y", "t"].includes(name) && !boundVariables.has(name))) {
       definition.error = "Variable definitions must not depend on x, y, or t.";
       state.set(definition.target, "failed");
       return;
     }
-    const unknown = references.find((name) => !reserved.has(name) && !availableNames.includes(name));
+    const unknown = references.find((name) => !reserved.has(name) && !boundVariables.has(name) && !availableNames.includes(name));
     if (unknown) {
       definition.error = `Unknown variable "${unknown}" in definition of "${definition.target}".`;
       state.set(definition.target, "failed");
       return;
     }
     for (const name of references) {
-      const dependency = byName.get(name);
+      const dependency = boundVariables.has(name) ? undefined : byName.get(name);
       if (dependency) {
         evaluateDefinition(dependency);
         if (dependency.error) {
@@ -3230,16 +3502,52 @@ function synchronizeVariableDefinitions(): {
       }
     }
     try {
-      const evaluatorKey = `${expanded}\u0000${availableNames.join(",")}`;
+      expanded = expandFunctions(definition.source);
+      const collection = expandCollections(expanded,
+        (item) => compileExpression(item, sliderValues)(0).value.toNumber(), collectionValues, graphOptions.statisticsMode);
+      const point = !collection.list ? pointSources(collection.items[0]!) : undefined;
+      if (point) {
+        const values = point.map((coordinate) => compileExpression(coordinate, sliderValues)(0).value.toNumber());
+        if (!values.every(Number.isFinite)) throw new Error("Point definitions require finite scalar coordinates.");
+        pointValues[definition.target] = point;
+        delete sliderValues[definition.target];
+        definition.display = `(${values.join(", ")})`;
+        state.set(definition.target, "resolved");
+        return;
+      }
+      if (collection.list) {
+        const display = collection.items.map((item) => {
+          const graph = compileGraphExpression(item, sliderValues, graphOptions.statisticsMode);
+          if (graph.kind === "point") {
+            const point = graph.evaluate();
+            if (!point.every(Number.isFinite)) throw new Error("List points require finite coordinates.");
+            return `(${point.join(", ")})`;
+          }
+          if (graph.kind !== "explicit") throw new Error("List definitions require scalar numbers or points.");
+          const result = graph.evaluate(0);
+          const value = typeof result === "number" ? result : result.value.toNumber();
+          if (!Number.isFinite(value)) throw new Error("List values must be finite.");
+          return String(value);
+        });
+        collectionValues[definition.target] = collection.items;
+        delete sliderValues[definition.target];
+        definition.display = `[${display.join(", ")}]`;
+        state.set(definition.target, "resolved");
+        return;
+      }
+      expanded = collection.items[0]!;
+      const evaluatorKey = `${expanded}\u0000${availableNames.join(",")}\u0000${graphOptions.statisticsMode}`;
       if (definition.evaluatorKey !== evaluatorKey || !definition.evaluator) {
         definition.evaluatorKey = evaluatorKey;
-        definition.evaluator = compileExpression(expanded, sliderValues);
+        const graph = compileGraphExpression(expanded, sliderValues, graphOptions.statisticsMode);
+        if (graph.kind !== "explicit") throw new Error("Definitions require scalar numbers, lists, or points.");
+        definition.evaluator = graph.evaluate;
       }
       const result = definition.evaluator(0);
-      const value = result.value.toNumber();
+      const value = typeof result === "number" ? result : result.value.toNumber();
       if (!Number.isFinite(value)) throw new Error("Definition must produce a finite number.");
       definition.value = value;
-      definition.display = result.value.toString();
+      definition.display = typeof result === "number" ? `≈ ${Number(value.toPrecision(15))}` : result.value.toString();
       sliderValues[definition.target] = value;
       state.set(definition.target, "resolved");
     } catch (reason) {
@@ -3256,7 +3564,7 @@ function synchronizeVariableDefinitions(): {
     const definition = getVariableDefinition(expression);
     if (!definition) continue;
     expression.compileError = definition.error;
-    expression.compiled = undefined;
+    if (!Object.hasOwn(pointValues, definition.target)) expression.compiled = undefined;
     const error = workspaceList.querySelector<HTMLElement>(
       `[data-expression-error-id="${expression.id}"]`,
     );
@@ -3300,7 +3608,7 @@ function cachedExplicitEvaluator(
   }
   const source = expandFunctions(expression.text);
   const sliderSignature = referencedVariableSignature(source, sliderValues);
-  const key = `${graphMode}:${graphSettings.precisionDigits}\u0000${source}\u0000${sliderSignature}`;
+  const key = `${graphMode}:${graphSettings.precisionDigits}\u0000${source}\u0000${sliderSignature}\u0000${collectionSignature(source)}`;
   let cache = explicitEvaluationCaches.get(expression);
   if (!cache || cache.key !== key) {
     cache = { key, values: new BoundedCache(MAX_EXPRESSION_SAMPLE_CACHE_SIZE) };
@@ -4249,6 +4557,34 @@ function renderExpressions(): void {
       appearanceDetails.append(draggableControl);
     }
     appearanceDetails.append(hsvControls);
+    const labelControls = document.createElement("div");
+    labelControls.className = "appearance-hsv-control";
+    const labelHelp = document.createElement("small");
+    labelHelp.textContent = "Persistent graph label. Use ${a} for live values. Optional X/Y formulas position the label; x and y refer to its default anchor.";
+    const labelError = document.createElement("p");
+    labelError.className = "color-formula-error";
+    labelError.dataset.labelErrorId = String(expression.id);
+    for (const [key, title] of [["label", "Label"], ["labelX", "Label X"], ["labelY", "Label Y"]] as const) {
+      const control = document.createElement("label");
+      const field = document.createElement("input");
+      field.type = "text";
+      field.maxLength = 512;
+      field.dataset.labelField = key;
+      field.value = expression[key] ?? "";
+      field.setAttribute("aria-label", `Expression ${index + 1} ${title}`);
+      field.addEventListener("input", () => {
+        expression[key] = field.value || undefined;
+        expression.labelError = undefined;
+        labelError.textContent = "";
+        renderSliders();
+        scheduleDraw();
+        scheduleProjectSave();
+      });
+      control.append(document.createTextNode(title), field);
+      labelControls.append(control);
+    }
+    labelControls.append(labelHelp, labelError);
+    appearanceDetails.append(labelControls);
     row.append(marker, input, visibility, remove, error, result, appearanceDetails);
     container.append(row);
   };
@@ -4378,11 +4714,12 @@ function tableStatistics(table: DataTable): string {
   const median = sorted.length % 2 === 0
     ? (sorted[sorted.length / 2 - 1]! + sorted[sorted.length / 2]!) / 2
     : sorted[Math.floor(sorted.length / 2)]!;
-  const standardDeviation = Math.sqrt(
-    y.reduce((sum, value) => sum + (value - mean) ** 2, 0) / y.length,
-  );
+  const denominator = y.length - (graphOptions.statisticsMode === "sample" ? 1 : 0);
+  const standardDeviation = denominator > 0 ? formatTick(Math.sqrt(
+    y.reduce((sum, value) => sum + (value - mean) ** 2, 0) / denominator,
+  )) : "undefined (n < 2)";
   const meanX = x.reduce((sum, value) => sum + value, 0) / x.length;
-  return `n ${y.length} · x̄ ${formatTick(meanX)} · ȳ ${formatTick(mean)} · median ${formatTick(median)} · SD ${formatTick(standardDeviation)} · range ${formatTick(sorted[0]!)}–${formatTick(sorted[sorted.length - 1]!)}`;
+  return `n ${y.length} · x̄ ${formatTick(meanX)} · ȳ ${formatTick(mean)} · median ${formatTick(median)} · ${graphOptions.statisticsMode} SD ${standardDeviation} · range ${formatTick(sorted[0]!)}–${formatTick(sorted[sorted.length - 1]!)}`;
 }
 
 function polynomialExpression(regression: PolynomialRegression, digits: number): string {
@@ -5264,8 +5601,8 @@ function currentProjectState(): ProjectState {
   return {
     version: 1,
     expressions: expressions.map((
-      { id, text, color, lineWidth, opacity, folderId, hidden, draggable, hsv },
-    ) => ({ id, text, color, lineWidth, opacity, folderId, hidden, draggable, hsv })),
+      { id, text, color, lineWidth, opacity, folderId, hidden, draggable, hsv, label, labelX, labelY },
+    ) => ({ id, text, color, lineWidth, opacity, folderId, hidden, draggable, hsv, label, labelX, labelY })),
     tables: tables.map(({ id, rows, name, collapsed, sourceExpressionId, regressionDegree, regressionKind, color, folderId }) =>
       ({ id, rows, name, collapsed, sourceExpressionId, regressionDegree, regressionKind, color, folderId })),
     texts: textBlocks.map(({ id, text, folderId }) => ({ id, text, folderId })),
@@ -5274,7 +5611,7 @@ function currentProjectState(): ProjectState {
     photos: photos.map((photo) => ({ ...photo })),
     workspaceOrder: [...workspaceOrder],
     folders: folders.map(({ id, name, collapsed }) => ({ id, name, collapsed })),
-    sliders: { ...sliderValues },
+    sliders: Object.fromEntries(Object.entries(sliderValues).filter(([, value]) => Number.isFinite(value))),
     sliderOptions: { ...sliderOptions },
     centerX,
     centerY,
@@ -5403,6 +5740,7 @@ function applyProjectState(project: ProjectState, recordHistory = true): void {
     showYAxis: true,
     showLabels: true,
     aspectRatio: 1,
+    statisticsMode: "population",
   });
   updateGraphOptionControls();
   nextId = expressions.reduce((next, expression) => Math.max(next, expression.id + 1), 1);
@@ -5475,6 +5813,75 @@ document.querySelector<HTMLFormElement>("#save-dialog-form")!.addEventListener("
     setProjectStatus("Saved on this device · auto-save off");
   }
   saveDialog.close();
+});
+const imageExportDialog = document.querySelector<HTMLDialogElement>("#image-export-dialog")!;
+const imageExportButton = document.querySelector<HTMLButtonElement>("#download-image")!;
+document.querySelector("#export-image")!.addEventListener("click", () => imageExportDialog.showModal());
+document.querySelector("#cancel-image-export")!.addEventListener("click", () => imageExportDialog.close());
+document.querySelector("#image-export-form")!.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (imageExportButton.disabled) return;
+  imageExportButton.disabled = true;
+  let target: HTMLCanvasElement | undefined;
+  let grid: HTMLCanvasElement | undefined;
+  try {
+    const bounds = canvasWrap.getBoundingClientRect();
+    const resolution = Number(document.querySelector<HTMLSelectElement>("#image-export-resolution")!.value);
+    const size = imageExportSize(bounds.width, bounds.height, resolution);
+    synchronizeVariableDefinitions();
+    for (const photo of photos.filter((entry) => !entry.hidden)) {
+      const image = ensurePhotoImage(photo);
+      if (image.loading) throw new Error("Photos are still loading. Try exporting again when they appear.");
+      if (image.error) throw new Error(image.error);
+      evaluatePhotoTransform(photo, sliderValues, expandFunctions);
+    }
+    target = document.createElement("canvas");
+    const targetContext = target.getContext("2d");
+    if (!targetContext) throw new Error("Could not create the PNG canvas.");
+    const previousContext = context;
+    const previousFactor = renderDetailFactor;
+    const explicitSpacing = graphSettings.explicitSampleSpacing;
+    const implicitSpacing = graphSettings.implicitSampleSpacing;
+    const profilingEnabled = performanceProfile.enabled;
+    const detailFactor = Math.max(1.5, resolution);
+    cancelRefinement();
+    try {
+      context = targetContext;
+      renderDetailFactor = detailFactor;
+      performanceProfile.enabled = false;
+      graphSettings.explicitSampleSpacing = explicitSpacing / detailFactor;
+      graphSettings.implicitSampleSpacing = implicitSpacing / detailFactor;
+      renderGraph(target, bounds.width, bounds.height, resolution);
+    } finally {
+      context = previousContext;
+      renderDetailFactor = previousFactor;
+      graphSettings.explicitSampleSpacing = explicitSpacing;
+      graphSettings.implicitSampleSpacing = implicitSpacing;
+      performanceProfile.enabled = profilingEnabled;
+      scheduleRefinement();
+    }
+    grid = document.createElement("canvas");
+    drawGrid(grid, bounds.width, bounds.height, resolution);
+    targetContext.setTransform(1, 0, 0, 1, 0, 0);
+    targetContext.drawImage(grid, 0, 0);
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      target!.toBlob((result) => result ? resolve(result) : reject(new Error("Browser could not encode this PNG.")), "image/png");
+    });
+    const objectUrl = URL.createObjectURL(blob);
+    const download = document.createElement("a");
+    download.href = objectUrl;
+    download.download = "better-desmos-graph.png";
+    download.click();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    imageExportDialog.close();
+    setProjectStatus(`Graph exported as PNG (${size.width} × ${size.height})`);
+  } catch (reason) {
+    setProjectStatus(reason instanceof Error ? `PNG export failed: ${reason.message}` : "PNG export failed.");
+  } finally {
+    if (target) { target.width = 1; target.height = 1; }
+    if (grid) { grid.width = 1; grid.height = 1; }
+    imageExportButton.disabled = false;
+  }
 });
 document.querySelector("#export-project")!.addEventListener("click", () => {
   const blob = new Blob([JSON.stringify(currentProjectState(), null, 2)], {
@@ -5832,10 +6239,11 @@ function updateGraphOptionControls(): void {
   document.querySelector<HTMLInputElement>("#show-labels-setting")!.checked = graphOptions.showLabels;
   document.querySelector<HTMLSelectElement>("#aspect-ratio-setting")!.value =
     String(graphOptions.aspectRatio);
+  document.querySelector<HTMLSelectElement>("#statistics-mode-setting")!.value = graphOptions.statisticsMode;
 }
 updateGraphOptionControls();
 
-const graphOptionInputs: Array<[keyof Omit<GraphOptions, "aspectRatio">, string]> = [
+const graphOptionInputs: Array<[keyof Omit<GraphOptions, "aspectRatio" | "statisticsMode">, string]> = [
   ["showGrid", "#show-grid-setting"],
   ["showXAxis", "#show-x-axis-setting"],
   ["showYAxis", "#show-y-axis-setting"],
@@ -5849,6 +6257,14 @@ for (const [option, selector] of graphOptionInputs) {
   });
 }
 const aspectRatioInput = document.querySelector<HTMLSelectElement>("#aspect-ratio-setting")!;
+document.querySelector<HTMLSelectElement>("#statistics-mode-setting")!.addEventListener("change", (event) => {
+  const mode = (event.currentTarget as HTMLSelectElement).value;
+  if (mode !== "sample" && mode !== "population") throw new Error("Unsupported statistics convention.");
+  graphOptions.statisticsMode = mode;
+  renderSliders();
+  renderTables();
+  draw();
+});
 aspectRatioInput.value = String(graphOptions.aspectRatio);
 aspectRatioInput.addEventListener("change", () => {
   const aspectRatio = Number(aspectRatioInput.value);

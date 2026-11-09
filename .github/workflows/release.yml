@@ -27,7 +27,38 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$GITHUB_REF_NAME" = "v3.0.0" ]; then
+          if [ "$GITHUB_REF_NAME" = "v3.1.0" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
+              --title "Better Desmos 3.1 — Lists, geometry, labels, and PNG export" \
+              --notes-file - <<'NOTES'
+          ## What's new
+
+          - **Multi-input functions:** Safe parsed functions accept 1–8 distinct parameters, including subscripted names.
+          - **Lists and curve families:** Named number/point lists, ranges, one-based indexing, basic filters, scalar broadcasting, zipped lists, Cartesian comprehensions, and list reductions.
+          - **Geometry:** Fixed and named points, point-coordinate references, and filled polygons with existing appearance and spatial HSV settings.
+          - **Persistent labels:** Saved plain-text graph labels support live formula values and optional position formulas.
+          - **PNG export:** Render the visible graph at 1x–4x resolution, including photos, labels, grid, and axes, with a 16-million-pixel safety limit.
+          - **Statistics compatibility:** New projects use sample statistics; older projects retain population statistics. The saved setting controls expressions and table standard deviation.
+          - **Compact workspace toolbar:** Wrench dropdown on the left for Save, Export, PNG, Import, and Share; Undo/Redo arrows centered; plus menu on the right. Keyboard navigation and accessible labels are preserved.
+          - **Consistent version labels:** The calculator badge, accessible brand, title, and package metadata show 3.1 / 3.1.0.
+
+          ## Download and run
+
+          Download **better-desmos.html** below and open it in your browser. It is self-contained and needs no installation or server.
+
+          ## Validation
+
+          - All 73 tests passed; TypeScript checks, production build, and whitespace checks passed.
+          - Browser checks verified curve-family pixels and point capture, named points, live labels, polygons, list errors, statistics compatibility, JSON persistence, and 4x PNG exports containing photos.
+          - Toolbar positioning, dropdown keyboard navigation/dismissal, dialogs, and Undo/Redo behavior were verified.
+
+          ## Scope and limitations
+
+          This is not full Desmos parity. General vector/list operations, formula-driven tables, custom regressions, distributions/statistical visualization and inference, clickable actions, direct photo editing, complex mode, a formatted editor/keypad, and audio trace remain unfinished.
+
+          Lists and expansions are bounded; generated expressions retain the safe parser's length limit. Basic filters and ordering use finite floating-point values. Polygons use even-odd fill. Shared-variable points cannot be dragged directly. Rendering and PNG exports remain synchronous, and graphs remain sampled numerical approximations. See the README for detailed limitations.
+          NOTES
+          elif [ "$GITHUB_REF_NAME" = "v3.0.0" ]; then
             gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
               --title "Better Desmos 3.0 — Photos, restrictions, and piecewise functions" \
               --notes-file - <<'NOTES'

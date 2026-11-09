@@ -1,4 +1,6 @@
 import Decimal from "decimal.js";
+import { expandCollections, hasCollections, splitCollectionParts, type StatisticsMode } from "./collections";
+import { pointSources } from "./geometry";
 
 const DEFAULT_PRECISION_DIGITS = 50;
 export const FAST_MODE_PRECISION_DIGITS = 10;
@@ -55,19 +57,32 @@ export interface Evaluation {
 export interface UserFunctionDefinition {
   name: string;
   parameter: string;
+  parameters?: string[];
   body: string;
+}
+
+export function functionParameters(definition: UserFunctionDefinition): string[] {
+  const parameters = (definition.parameters ?? [definition.parameter]).map((name) => name.toLowerCase());
+  if (parameters.length < 1 || parameters.length > 8 ||
+      new Set(parameters).size !== parameters.length ||
+      parameters.some((name) => !/^[a-z](?:_[a-z0-9]+)?$/.test(name) || ["e", "pi"].includes(name))) {
+    throw new Error("Functions need 1–8 distinct letter or subscripted parameters, excluding e and pi.");
+  }
+  return parameters;
 }
 
 export function expandUserFunctions(
   source: string,
   definitions: UserFunctionDefinition[],
 ): string {
+  if (source.length > MAX_EXPRESSION_LENGTH) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
   const functionsByName = new Map<string, UserFunctionDefinition>();
   for (const definition of definitions) {
     const name = definition.name.toLowerCase();
-    if (!/^[a-z]$/.test(name) || definition.parameter.toLowerCase() !== "x") {
-      throw new Error("User functions must have a single-letter name and use x as their input.");
+    if (!/^[a-z](?:_[a-z0-9]+)?$/.test(name)) {
+      throw new Error("User functions must have a letter or subscripted name.");
     }
+    functionParameters(definition);
     if (functionsByName.has(name)) {
       throw new Error(`Function "${name}" is defined more than once.`);
     }
@@ -101,24 +116,39 @@ export function expandUserFunctions(
 
       let depth = 1;
       let close = open + 1;
-      let hasMultipleArguments = false;
+      let braceDepth = 0;
+      let bracketDepth = 0;
+      const argumentsSource: string[] = [];
+      let argumentStart = open + 1;
       for (; close < expression.length && depth > 0; close += 1) {
         if (expression[close] === "(") depth += 1;
         else if (expression[close] === ")") depth -= 1;
-        else if (expression[close] === "," && depth === 1) hasMultipleArguments = true;
+        else if (expression[close] === "{") braceDepth += 1;
+        else if (expression[close] === "}") braceDepth -= 1;
+        else if (expression[close] === "[") bracketDepth += 1;
+        else if (expression[close] === "]") bracketDepth -= 1;
+        else if (expression[close] === "," && depth === 1 && braceDepth === 0 && bracketDepth === 0) {
+          argumentsSource.push(expression.slice(argumentStart, close));
+          argumentStart = close + 1;
+        }
       }
       if (depth !== 0) throw new Error(`Missing closing parenthesis in call to "${name}".`);
-      if (hasMultipleArguments) {
-        throw new Error(`Function "${name}" accepts one argument.`);
+      argumentsSource.push(expression.slice(argumentStart, close - 1));
+      const parameters = functionParameters(definition);
+      if (argumentsSource.length !== parameters.length) {
+        throw new Error(`Function "${name}" accepts ${parameters.length === 1 ? "one argument" : `${parameters.length} arguments`}.`);
       }
-
-      const argument = expand(expression.slice(open + 1, close - 1), callStack);
-      if (!argument.trim()) {
-        throw new Error(`Function "${name}" requires one argument.`);
+      if (argumentsSource.some((argument) => !argument.trim())) {
+        throw new Error(`Function "${name}" requires ${parameters.length === 1 ? "one argument" : `${parameters.length} arguments`}.`);
       }
-      const parameter = definition.parameter.toLowerCase();
+      const argumentsExpanded = argumentsSource.map((argument) => expand(argument, callStack));
+      if ([...definition.body.matchAll(/\b([a-z](?:_[a-z0-9]+)?)\s*=\s*\[/gi)]
+        .some((match) => parameters.includes(match[1]!.toLowerCase()))) {
+        throw new Error("Use different names for function parameters and for bindings.");
+      }
       const body = definition.body.replace(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g, (variable) =>
-        variable.toLowerCase() === parameter ? `(${argument})` : variable
+        parameters.includes(variable.toLowerCase())
+          ? `(${argumentsExpanded[parameters.indexOf(variable.toLowerCase())]})` : variable
       );
       result += `(${expand(body, [...callStack, name])})`;
       offset = close;
@@ -137,6 +167,7 @@ type PreciseImplicitEvaluation = (x: number, y: number) => Decimal;
 export type ExplicitEvaluation = (x: number) => Evaluation | number;
 
 export type GraphExpression =
+  | { kind: "polygon"; evaluate: () => [number, number][] }
   | { kind: "explicit"; evaluate: ExplicitEvaluation; tangent?: () => { slope: number; offset: number }; region?: (parameter: number) => string }
   | { kind: "sideways"; evaluate: ExplicitEvaluation; tangent?: () => { slope: number; offset: number }; region?: (parameter: number) => string }
   | { kind: "implicit"; evaluate: ImplicitEvaluation; region?: (x: number, y?: number) => string }
@@ -148,7 +179,8 @@ export type GraphExpression =
       yVariables: string[];
     }
   | { kind: "parametric"; evaluate: (parameter: number) => [number, number]; start: number; end: number; region?: (parameter: number) => string }
-  | { kind: "list"; evaluate: () => Array<number | undefined> };
+  | { kind: "list"; evaluate: () => Array<number | undefined> }
+  | { kind: "collection"; graphs: GraphExpression[] };
 
 export interface PolynomialRegression {
   center: Decimal;
@@ -1775,7 +1807,7 @@ export function graphRelation(source: string): { index: number; operator: Compar
 }
 
 function compileRestrictedGraph(
-  source: string, variables: Record<string, number>, fast: boolean,
+  source: string, variables: Record<string, number>, fast: boolean, statisticsMode: StatisticsMode,
 ): GraphExpression | undefined {
   let depth = 0;
   let start = -1;
@@ -1805,7 +1837,7 @@ function compileRestrictedGraph(
   const restricted = parse(`1${suffix}`, true, false, Object.keys(variables));
   if (restricted.type !== "restricted") throw new Error("Restrictions must follow the complete graph expression.");
   const base = source.slice(0, start).trim();
-  const graph = fast ? compileFastGraphExpression(base, variables) : compileGraphExpression(base, variables);
+  const graph = fast ? compileFastGraphExpression(base, variables, statisticsMode) : compileGraphExpression(base, variables, statisticsMode);
   const condition = fast ? compileFastEvaluator(restricted, variables) : undefined;
   const check = (x: number, y: number) => {
     if (condition) condition(x, y);
@@ -1851,6 +1883,9 @@ function compileRestrictedGraph(
         return point;
       },
     };
+  }
+  if (graph.kind === "collection" || graph.kind === "polygon") {
+    throw new Error("Apply restrictions within each collection expression.");
   }
   return {
     ...graph,
@@ -2029,16 +2064,8 @@ function compilePointGraph(
   source: string,
   variables: Record<string, number>,
 ): Extract<GraphExpression, { kind: "point" }> | undefined {
-  const trimmed = source.trim();
-  if (!trimmed.startsWith("(") || !trimmed.endsWith(")")) return undefined;
-  let depth = 0;
-  for (let index = 0; index < trimmed.length; index += 1) {
-    if (trimmed[index] === "(") depth += 1;
-    if (trimmed[index] === ")") depth -= 1;
-    if (depth === 0 && index < trimmed.length - 1) return undefined;
-  }
-  const coordinates = splitCallArguments(trimmed.slice(1, -1));
-  if (coordinates.length !== 2) return undefined;
+  const coordinates = pointSources(source);
+  if (!coordinates) return undefined;
   const variablesInCoordinate = (coordinate: string): string[] => {
     const identifiers = coordinate.match(/[a-z]+(?:_[a-z0-9]+)?/gi)?.map((name) => name.toLowerCase()) ?? [];
     const sliderVariables = [...new Set(identifiers.filter((name) =>
@@ -2051,12 +2078,6 @@ function compilePointGraph(
   };
   const xVariables = variablesInCoordinate(coordinates[0]!);
   const yVariables = variablesInCoordinate(coordinates[1]!);
-  if (xVariables.some((name) => yVariables.includes(name))) {
-    throw new Error("Use different slider variables for the point's x and y coordinates");
-  }
-  if (xVariables.length === 0 && yVariables.length === 0) {
-    throw new Error("A draggable point needs at least one slider variable, for example (1, b)");
-  }
   const xCoordinate = compileExpression(coordinates[0]!, variables);
   const yCoordinate = compileExpression(coordinates[1]!, variables);
   return {
@@ -2073,6 +2094,7 @@ function compilePointGraph(
 function compileStatisticsGraph(
   source: string,
   variables: Record<string, number>,
+  statisticsMode: StatisticsMode,
 ): Extract<GraphExpression, { kind: "explicit" }> {
   const match = /^([a-z]+)\((.*)\)$/i.exec(source.trim());
   if (!match) throw new Error("Use a supported statistics function with comma-separated values");
@@ -2080,7 +2102,7 @@ function compileStatisticsGraph(
   const args = splitCallArguments(match[2]!);
   const unaryNames = new Set(["factorial"]);
   const supported = new Set([
-    "sum", "product", "min", "max", "mean", "median", "variance", "stdev", "factorial",
+    "sum", "product", "min", "max", "mean", "median", "variance", "stdev", "variancep", "stdevp", "var", "varp", "factorial",
   ]);
   if (!supported.has(name)) throw new Error(`Unknown statistics function "${name}"`);
   if (args.length === 0 || args.some((argument) => !argument) ||
@@ -2117,9 +2139,10 @@ function compileStatisticsGraph(
           : sorted[middle]!;
       }
       const mean = numbers.reduce((sum, value) => sum + value, 0) / numbers.length;
-      const variance = numbers.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
-        numbers.length;
-      return name === "variance" ? variance : Math.sqrt(variance);
+      const denominator = numbers.length - (statisticsMode === "sample" && !name.endsWith("p") ? 1 : 0);
+      if (denominator <= 0) throw new Error("Sample variance and standard deviation require at least two values.");
+      const variance = numbers.reduce((sum, value) => sum + (value - mean) ** 2, 0) / denominator;
+      return name.startsWith("stdev") ? Math.sqrt(variance) : variance;
     },
   };
 }
@@ -2127,11 +2150,14 @@ function compileStatisticsGraph(
 export function compileGraphExpression(
   source: string,
   variables: Record<string, number> = {},
+  statisticsMode: StatisticsMode = "population",
 ):
   GraphExpression {
   if (source.length > MAX_EXPRESSION_LENGTH) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
   const trimmed = source.trim();
-  const restricted = compileRestrictedGraph(trimmed, variables, false);
+  const collection = compileCollectionGraph(trimmed, variables, {}, false, statisticsMode);
+  if (collection) return collection;
+  const restricted = compileRestrictedGraph(trimmed, variables, false, statisticsMode);
   if (restricted) return restricted;
   const relation = graphRelation(trimmed);
   const point = compilePointGraph(trimmed, variables);
@@ -2139,8 +2165,8 @@ export function compileGraphExpression(
   if (/^list\s*\(/i.test(trimmed)) {
     return compileListGraph(trimmed, variables);
   }
-  if (/^(?:sum|product|min|max|mean|median|variance|stdev|factorial)\s*\(/i.test(trimmed)) {
-    return compileStatisticsGraph(trimmed, variables);
+  if (/^(?:sum|product|min|max|mean|median|variance|stdev|variancep|stdevp|var|varp|factorial)\s*\(/i.test(trimmed)) {
+    return compileStatisticsGraph(trimmed, variables, statisticsMode);
   }
   if (/^derivative\s*\(/i.test(trimmed)) {
     return compileCalculusGraph(trimmed, variables, true);
@@ -2188,25 +2214,90 @@ export function compileGraphExpression(
   };
 }
 
+export function compileCollectionGraph(
+  source: string, variables: Record<string, number>,
+  lists: Record<string, string[]> = {}, fast = false,
+  statisticsMode: StatisticsMode = "population",
+): GraphExpression | undefined {
+  if (source.length > MAX_EXPRESSION_LENGTH) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
+  if (/^polygon\s*\(/i.test(source.trim())) {
+    const trimmed = source.trim();
+    if (!trimmed.endsWith(")")) throw new Error("Use polygon((x1,y1),(x2,y2),(x3,y3),...).");
+    const vertices = splitCollectionParts(trimmed.slice(trimmed.indexOf("(") + 1, -1))
+      .flatMap((item) => expandCollections(item, (text) => compileExpression(text, variables)(0).value.toNumber(), lists, statisticsMode).items);
+    if (vertices.length < 3 || vertices.length > 2048) throw new Error("Polygons need 3 to 2048 vertices.");
+    const coordinates = vertices.map((vertex) => {
+      const point = pointSources(vertex);
+      if (!point) throw new Error("Each polygon vertex must be a point (x,y).");
+      if (point.some((item) => (item.match(/[a-z]+(?:_[a-z0-9]+)?/gi) ?? []).some((name) => ["x", "y", "t"].includes(name.toLowerCase())))) {
+        throw new Error("Polygon vertices must use scalar coordinates or sliders, not x, y, or t.");
+      }
+      return point.map((item) => compileExpression(item, variables));
+    });
+    return {
+      kind: "polygon",
+      evaluate: () => coordinates.map((point): [number, number] => {
+        const x = point[0]!(0).value.toNumber();
+        const y = point[1]!(0).value.toNumber();
+        if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("Polygon coordinates must be finite.");
+        return [x, y];
+      }),
+    };
+  }
+  if (!hasCollections(source, lists)) return undefined;
+  const expansion = expandCollections(source, (item) => compileExpression(item, variables)(0).value.toNumber(), lists, statisticsMode);
+  if (!expansion.list) {
+    const graph = fast ? compileFastGraphExpression(expansion.items[0]!, variables, statisticsMode) :
+      compileGraphExpression(expansion.items[0]!, variables, statisticsMode);
+    if (expansion.approximate && graph.kind === "explicit") {
+      return { ...graph, evaluate: (x: number) => {
+        const value = graph.evaluate(x);
+        return typeof value === "number" ? value : { ...value, exact: false };
+      } };
+    }
+    return graph;
+  }
+  const graphs = expansion.items.map((item) => fast ? compileFastGraphExpression(item, variables, statisticsMode) :
+    compileGraphExpression(item, variables, statisticsMode));
+  if (graphs.every((graph, index) => graph.kind === "explicit" &&
+      !(expansion.items[index]!.match(/[a-z]+(?:_[a-z0-9]+)?/gi) ?? []).some((name) => ["x", "y"].includes(name.toLowerCase())) &&
+      !graphRelation(expansion.items[index]!))) {
+    return {
+      kind: "list",
+      evaluate: () => graphs.map((graph) => {
+        if (graph.kind !== "explicit") throw new Error("Expected a scalar list element.");
+        const result = graph.evaluate(0);
+        return typeof result === "number" ? result : result.value.toNumber();
+      }),
+    };
+  }
+  return { kind: "collection", graphs };
+}
+
 export function compileFastGraphExpression(
   source: string,
   variables: Record<string, number> = {},
+  statisticsMode: StatisticsMode = "population",
 ): GraphExpression {
   if (source.length > MAX_EXPRESSION_LENGTH) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
   const trimmed = source.trim();
-  const restricted = compileRestrictedGraph(trimmed, variables, true);
+  const collection = compileCollectionGraph(trimmed, variables, {}, true, statisticsMode);
+  if (collection) return collection;
+  const restricted = compileRestrictedGraph(trimmed, variables, true, statisticsMode);
   if (restricted) return restricted;
   const relation = graphRelation(trimmed);
   const point = compilePointGraph(trimmed, variables);
   if (point) return point;
-  if (/^(?:list|sum|product|min|max|mean|median|variance|stdev|factorial)\s*\(/i.test(trimmed)) {
-    return compileGraphExpression(trimmed, variables);
+  if (/^(?:list|sum|product|min|max|mean|median|variance|stdev|variancep|stdevp|var|varp|factorial)\s*\(/i.test(trimmed)) {
+    return compileGraphExpression(trimmed, variables, statisticsMode);
   }
+
   if (/^(?:derivative|integral)\s*\(/i.test(trimmed)) {
-    return compileGraphExpression(trimmed, variables);
+    return compileGraphExpression(trimmed, variables, statisticsMode);
   }
+
   if (/^(?:parametric|polar)\s*\(/i.test(trimmed)) {
-    return compileGraphExpression(trimmed, variables);
+    return compileGraphExpression(trimmed, variables, statisticsMode);
   }
   if (relation && relation.operator !== "=") {
     return compileInequality(trimmed, variables, true);

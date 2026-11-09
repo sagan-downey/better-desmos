@@ -275,9 +275,9 @@ describe("compileExpression", () => {
       ...definitions,
       { name: "F", parameter: "x", body: "x" },
     ])).toThrow(/defined more than once/);
-    expect(() => expandUserFunctions("g(1)", [
+    expect(compileExpression(expandUserFunctions("g(2)", [
       { name: "g", parameter: "t", body: "t^2" },
-    ])).toThrow(/use x as their input/);
+    ]))(0).value.toNumber()).toBe(4);
   });
 
   it("supports letter-and-number subscripted slider variables", () => {
@@ -609,8 +609,10 @@ describe("compileExpression", () => {
       expect(horizontalPoint.yVariables).toEqual([]);
       expect(horizontalPoint.evaluate()).toEqual([4, 2]);
     }
-    expect(() => compileGraphExpression("(1, 2)", {})).toThrow(/at least one slider variable/);
-    expect(() => compileGraphExpression("(a, a)", variables)).toThrow(/different slider variables/);
+    const fixedPoint = compileGraphExpression("(1, 2)", {});
+    expect(fixedPoint.kind === "point" && fixedPoint.evaluate()).toEqual([1, 2]);
+    const sharedPoint = compileGraphExpression("(a, a)", variables);
+    expect(sharedPoint.kind === "point" && sharedPoint.evaluate()).toEqual([variables.a, variables.a]);
     const constantPoint = compileGraphExpression("(a, e)", variables);
     expect(constantPoint.kind).toBe("point");
     if (constantPoint.kind === "point") {
