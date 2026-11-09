@@ -27,7 +27,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$GITHUB_REF_NAME" = "v3.1.0" ]; then
+          if [ "$GITHUB_REF_NAME" = "v3.2.0" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
+              --title "Better Desmos 3.2 — Formula tables and smoother animation" \
+              --notes-file - <<'NOTES'
+          ## What's new
+
+          - **Named table columns:** Rename either column and use its numeric list in expressions, including polygons such as `polygon((x_1,y_1))`.
+          - **Formula tables:** Use parsed scalar formulas and user-defined functions in individual cells or calculate an entire column row by row. Column names and formulas persist through save, export/import, sharing, and undo/redo.
+          - **Live dependencies:** Table formulas respond to sliders, functions, definitions, and indexed columns from other tables, with explicit domain, duplicate-name, and circular-dependency errors.
+          - **Faster redraws:** Reuse unchanged definitions and table results during pan and zoom. Row removal no longer leaves stale display references.
+          - **Smoother animated regressions:** Avoid excessive subdivision of nearly straight offscreen curve intervals. The tested animated quadratic regression improved from roughly 4 FPS to 60 FPS without reducing accuracy settings.
+          - **Stable animation panning:** Drag previews use the latest rendered camera rather than reapplying the full drag offset after each animation frame.
+          - **Version 3.2:** Calculator badge, accessible brand, page title, and package metadata are updated.
+
+          ## Download and run
+
+          Download **better-desmos.html** below and open it in your browser. It is self-contained and needs no installation or server.
+
+          ## Validation and limitations
+
+          All 82 tests, TypeScript checks, production build, and whitespace checks passed. Browser checks covered formula tables, polygons, live sliders, regressions, errors, JSON persistence, undo/redo, row removal, animated panning, cancellation, and zoom.
+
+          Computed table values and graphs remain numerical approximations. Tables support 5,000 rows, while graph list expansion is bounded to 2,048 items. This release does not provide full Desmos parity; see the README for supported syntax and limitations.
+          NOTES
+          elif [ "$GITHUB_REF_NAME" = "v3.1.0" ]; then
             gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
               --title "Better Desmos 3.1 — Lists, geometry, labels, and PNG export" \
               --notes-file - <<'NOTES'

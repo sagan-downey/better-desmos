@@ -92,6 +92,15 @@ export function refinementLevels(width: number, height: number, dpr: number): nu
     Math.round(width * dpr * factor) * Math.round(height * dpr * factor) <= 16_000_000);
 }
 
+export function isFlatOffscreenInterval(
+  first: number, midpoint: number, second: number, outputLength: number, detailFactor: number,
+): boolean {
+  if (!Number.isFinite(first) || !Number.isFinite(midpoint) || !Number.isFinite(second)) return false;
+  const sameOutsideEdge = (first < -2 * outputLength && midpoint < -2 * outputLength && second < -2 * outputLength) ||
+    (first > 3 * outputLength && midpoint > 3 * outputLength && second > 3 * outputLength);
+  return sameOutsideEdge && Math.abs(midpoint - (first + second) / 2) <= 0.5 / detailFactor;
+}
+
 export function tangentBranchRange(slope: number, offset: number, min: number, max: number) {
   if (![slope, offset, min, max].every(Number.isFinite) || slope === 0) {
     throw new Error("Tangent branches require finite bounds and a nonzero finite slope.");

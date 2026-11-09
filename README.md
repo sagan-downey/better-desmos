@@ -4,9 +4,9 @@ A browser-based graphing calculator built with TypeScript and Vite. Its small st
 
 ## Versioning
 
-The current app version is **3.1**. Keep the package version in `package.json` in sync as `3.1.0`.
+The current app version is **3.2**. Keep the package version in `package.json` in sync as `3.2.0`.
 
-Version 3.0 added embedded photos with relative X/Y scaling, domain/range restrictions, and piecewise expressions. Version 3.1 adds multi-input functions, list expansion, named points, polygons, persistent labels, selectable-resolution PNG export, and saved sample/population statistics conventions. The workspace toolbar now has a wrench dropdown on the left, Undo/Redo arrows in the center, and the add menu on the right.
+Version 3.0 added embedded photos with relative X/Y scaling, domain/range restrictions, and piecewise expressions. Version 3.1 added multi-input functions, list expansion, named points, polygons, persistent labels, selectable-resolution PNG export, and saved sample/population statistics conventions. The workspace toolbar has a wrench dropdown on the left, Undo/Redo arrows in the center, and the add menu on the right. Version 3.2 adds renameable table columns available as expression lists, formula cells and whole-column formulas, faster animated regressions, and stable panning during playback.
 
 Full Desmos parity remains unfinished. Remaining work includes general list/vector conditions and operations, expanded formula-driven tables, custom regressions, probability distributions and statistical visualizations/inference, clickable actions, direct photo manipulation, complex mode, a formatted math editor/keypad, and audio trace.
 
@@ -100,7 +100,17 @@ Expressions can be hidden. Add standalone text blocks from the workspace Add men
 
 Expressions, tables, text blocks, tickers, and photos appear together in one ordered workspace list beneath the app name and project controls. Use the **+** menu to add an expression, table, text block, ticker, photo, or folder. Tables and tickers can be renamed and individually collapsed; folders can also be collapsed with the arrow beside their name. Drag items into folders to group them, and drag items to reorder them; focus an item's reorder handle and use the up/down arrow keys for keyboard reordering. Folder membership, collapsed state, names, text, ticker settings, photos, and mixed item order are saved with the project and included in exports and share links. Older projects without an explicit order open with expressions before tables, preserving existing expression folders; legacy expression notes are imported as text blocks.
 
-In each table, add or remove rows and complete rows with finite numbers to plot their points. Empty rows are ignored; a partly filled row is reported as an error. Tables can be removed independently.
+In each table, add or remove rows and enter finite numbers or parsed scalar formulas such as `sin(pi/2)`, `a+2`, or `f(3)`. Formula cells retain their entered text and show an approximate numerical result beneath it. Tables can be removed independently.
+
+Each column has an editable **Name** and optional whole-column **Formula**. Default names are `x_1` and `y_1` for the table with ID 1 (IDs stay stable when tables are reordered). Rename them to single-letter or subscripted names such as `u`, `v`, or `y_data`; names must be unique across columns, expression definitions, and user-defined functions. Clearing a name restores its default. Columns are available as numeric lists in expressions: `polygon((u,v))` draws a polygon from paired table coordinates, `u[2]` reads the second active row, and `mean(v)` computes a column statistic.
+
+For a function-driven column, define `f(t)=t^2` in an expression, enter x-values, and put `f(x_1)` in the y-column Formula. The formula calculates one value per active row and its cells become read-only. Bare references to the opposite column of the same table use that row's value; the short aliases `x` and `y` follow column renames. Explicit indexing such as `x_1[2]` still reads the named list. Formulas can use sliders, user-defined functions, scalar definitions, and indexed columns from other tables. Clearing a column formula restores its previous manual cell contents.
+
+Rows with no stored cell text are ignored, even with column formulas enabled; enter a value in either manual column to activate a row. An active row must produce one finite scalar value in both columns. Missing values, domain errors, duplicate names, and circular dependencies are reported instead of plotting incomplete data or fitting a partial regression. Computed column values are numerical approximations; graph list expansion remains limited to 2,048 items even though tables support 5,000 rows. Column names, cell formulas, and whole-column formulas are preserved by save, export/import, share links, and undo/redo.
+
+Unchanged definitions and table results are reused during graph-only redraws such as pan and zoom. Editing cells, formulas, column names, or referenced sliders refreshes the calculations; removing rows and restoring projects rebuilds the table display against the current data.
+
+Panning during slider or ticker playback keeps the preview aligned with the latest rendered camera position, so animation redraws do not reapply the accumulated drag offset. Canceling a pan restores the starting camera and redraws it.
 
 Click near a plotted explicit or parametric curve to add the snapped point to a table for that expression. The first click creates the table, and later clicks on the same curve append rows to it. Click-and-drag continues to pan the graph. Implicit contours and shaded inequalities are not sampled into tables because a single x-value can correspond to multiple y-values.
 
@@ -145,6 +155,8 @@ Open **Settings** and expand **Accuracy & performance** to adjust:
 These are different tradeoffs: Desmos mode uses 10-digit standard floating-point arithmetic and wider sampling; increasing Decimal precision does not add more graph samples, and a denser graph does not increase Decimal precision. Rendered curves remain numerical approximations. Desmos mode does not reproduce Desmos-specific rendering effects such as Bernard. The current graph of `tan(35.6x)=0` shows the sampled zero contours.
 
 ### Measuring graph performance during development
+
+Adaptive explicit-curve sampling stops subdividing intervals whose endpoints and midpoint are all beyond the same offscreen margin and whose midpoint curvature is within the current pixel tolerance. Large offscreen slopes alone do not trigger further subdivision. This also applies to animated table regressions when zoomed out; visible crossings, domain gaps, piecewise boundaries, and sharply curved intervals retain adaptive refinement.
 
 Precise-mode sample caches are bounded and evict their least recently used entries without scanning the cache. Fast-mode sampling bypasses this cache because maintaining it can cost more than native math when zooming dense curves. Explicit and sideways expression curves reuse their sampled geometry and drawing paths while the viewport, sampling settings, precision, expanded function source, and referenced parameter values are unchanged. Changing an unrelated slider does not invalidate ordinary scalar curves; appearance and spatial HSV colors are still applied on every redraw. Collection expansion conservatively includes slider values in its cache key so ranges, filters, sorting, and reductions stay live. Multi-curve families bypass the shared per-expression sample/geometry cache to prevent one member from reusing another member's values. Other graph types continue to use their existing renderers. Function/slider analysis and constant math are also cached; precision changes invalidate approximate constant results, and parameter values remain live.
 

@@ -197,7 +197,12 @@ button { color: inherit; }
 .table-columns, .table-data-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 24px; gap: 5px; align-items: center; }
 .table-columns { margin-bottom: 4px; color: var(--muted-text); font-size: 10px; }
 .table-data-row { margin-bottom: 4px; }
-.table-data-row input, .table-regression select, .table-degree { min-width: 0; width: 100%; padding: 5px 6px; border: 1px solid var(--border-medium); border-radius: 4px; color: var(--text); background: var(--input-bg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.table-data-row input, .table-column-control input, .table-regression select, .table-degree { min-width: 0; width: 100%; padding: 5px 6px; border: 1px solid var(--border-medium); border-radius: 4px; color: var(--text); background: var(--input-bg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.table-column-control, .table-cell { min-width: 0; }
+.table-column-control label { display: grid; gap: 3px; margin-bottom: 4px; }
+.table-cell output { display: block; color: var(--muted-text); font-size: 10px; overflow-wrap: anywhere; }
+.table-cell output[hidden] { display: none; }
+.table-data-row input[readonly] { color: var(--muted-text); }
 .table-data-row input[aria-invalid="true"] { border-color: var(--error-border); }
 .row-remove { border: 0; background: transparent; color: var(--muted-text); cursor: pointer; }
 .table-actions { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-top: 7px; }

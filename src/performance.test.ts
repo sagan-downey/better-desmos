@@ -1,5 +1,49 @@
 import { describe, expect, it } from "vitest";
-import { BoundedCache, referencedVariableSignature, SegmentIndex, selectHoverPoint, tangentBranchRange, tangentPixelCoverage, refinementLevels } from "./performance";
+import { BoundedCache, referencedVariableSignature, SegmentIndex, selectHoverPoint, tangentBranchRange, tangentPixelCoverage, refinementLevels, isFlatOffscreenInterval } from "./performance";
+
+describe("offscreen curve refinement", () => {
+  it("does not subdivide a steep straight interval entirely beyond the same edge", () => {
+    expect(isFlatOffscreenInterval(-100_000, -101_000, -102_000, 1000, 1)).toBe(true);
+    expect(isFlatOffscreenInterval(100_000, 101_000, 102_000, 1000, 1)).toBe(true);
+  });
+
+  it("preserves visible crossings, domain gaps, and curvature at every detail level", () => {
+    for (const factor of [1, 1.5, 2, 3, 4]) {
+      expect(isFlatOffscreenInterval(-5000, 0, 5000, 1000, factor)).toBe(false);
+      expect(isFlatOffscreenInterval(-5000, 0, -5000, 1000, factor)).toBe(false);
+      expect(isFlatOffscreenInterval(-5000, NaN, -6000, 1000, factor)).toBe(false);
+      expect(isFlatOffscreenInterval(-Infinity, -5500, -6000, 1000, factor)).toBe(false);
+      expect(isFlatOffscreenInterval(100, 101, 102, 1000, factor)).toBe(false);
+      expect(isFlatOffscreenInterval(-5000, -5499, -6000, 1000, factor)).toBe(false);
+    }
+    expect(isFlatOffscreenInterval(-5000, -5499.75, -6000, 1000, 1)).toBe(true);
+    expect(isFlatOffscreenInterval(-5000, -5499.75, -6000, 1000, 4)).toBe(false);
+  });
+
+  it("bounds sampling a zoomed-out parabola without clipping its visible vertex", () => {
+    let samples = 0;
+    let visibleIntervals = 0;
+    const evaluate = (pixel: number) => {
+      samples += 1;
+      return 1800 - ((pixel - 1800) / 0.8647) ** 2 * 0.8647;
+    };
+    const refine = (from: number, to: number, first: number, second: number, depth: number): void => {
+      if (depth === 10) return;
+      const midpoint = evaluate((from + to) / 2);
+      if (isFlatOffscreenInterval(first, midpoint, second, 3600, 1)) return;
+      visibleIntervals += 1;
+      if (Math.abs(second - first) <= 24 && Math.abs(midpoint - (first + second) / 2) <= 0.5) return;
+      refine(from, (from + to) / 2, first, midpoint, depth + 1);
+      refine((from + to) / 2, to, midpoint, second, depth + 1);
+    };
+    for (let pixel = 0; pixel < 3600; pixel += 1) {
+      refine(pixel, pixel + 1, evaluate(pixel), evaluate(pixel + 1), 0);
+    }
+    expect(samples).toBeLessThan(20_000);
+    expect(visibleIntervals).toBeGreaterThan(0);
+    expect(evaluate(1800)).toBe(1800);
+  });
+});
 
 describe("progressive viewport refinement", () => {
   it("progresses through display-relative levels without exceeding the visible-canvas pixel budget", () => {
