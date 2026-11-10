@@ -27,6 +27,14 @@ type Rational = { kind: "rational"; numerator: bigint; denominator: bigint };
 type Approximate = { kind: "approximate"; value: Decimal };
 type Value = Rational | Approximate;
 
+export type AngleMode = "radians" | "degrees";
+let angleMode: AngleMode = "radians";
+export function getAngleMode(): AngleMode { return angleMode; }
+export function setAngleMode(mode: AngleMode): void {
+  if (mode !== "radians" && mode !== "degrees") throw new Error("Angle mode must be radians or degrees");
+  angleMode = mode;
+}
+
 type Node =
   | { type: "number"; value: Rational }
   | { type: "variable"; name: string }
@@ -34,6 +42,8 @@ type Node =
   | { type: "unary"; operator: "+" | "-"; operand: Node }
   | { type: "binary"; operator: "+" | "-" | "*" | "/" | "^"; left: Node; right: Node }
   | { type: "call"; name: string; argument: Node }
+  | { type: "multicall"; name: string; args: Node[] }
+  | { type: "bound"; operation: "derivative" | "integral" | "sum" | "prod"; variable: string; body: Node; lower: Node; upper?: Node }
   | { type: "restricted"; value: Node; condition: Condition }
   | { type: "piecewise"; branches: Array<{ condition: Condition; value: Node }>; fallback?: Node };
 
@@ -105,6 +115,10 @@ export function expandUserFunctions(
       const definition = functionsByName.get(name);
       let open = offset + token.length;
       while (/\s/.test(expression[open] ?? "")) open += 1;
+      let primes = 0;
+      while (expression[open] === "'") { primes += 1; open += 1; }
+      if (primes && !definition) throw new Error(`Prime notation requires a user-defined function: "${name}"`);
+      if (primes > 2) throw new Error("At most two derivative primes are supported");
       if (!definition || expression[open] !== "(") {
         result += token;
         offset += token.length;
@@ -146,7 +160,16 @@ export function expandUserFunctions(
         .some((match) => parameters.includes(match[1]!.toLowerCase()))) {
         throw new Error("Use different names for function parameters and for bindings.");
       }
-      const body = definition.body.replace(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g, (variable) =>
+      if (primes) {
+        if (parameters.length !== 1) throw new Error("Prime notation requires a single-argument user function");
+        let derivative = expand(definition.body, [...callStack, name]);
+        for (let order = 0; order < primes; order += 1) derivative = `derivativeat(${parameters[0]},${derivative},${order === primes - 1 ? argumentsExpanded[0] : parameters[0]})`;
+        result += `(${derivative})`;
+        offset = close;
+        continue;
+      }
+      const scoped = /(?:sum|prod|int)\s*_|[Σ∑Π∏∫]|d\s*\/\s*d|derivativeat\s*\(/i.test(definition.body);
+      const body = scoped ? substituteScopedBody(expand(definition.body, [...callStack, name]), parameters, argumentsExpanded) : definition.body.replace(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g, (variable) =>
         parameters.includes(variable.toLowerCase())
           ? `(${argumentsExpanded[parameters.indexOf(variable.toLowerCase())]})` : variable
       );
@@ -160,6 +183,46 @@ export function expandUserFunctions(
   };
 
   return expand(source, []);
+}
+
+function substituteScopedBody(source: string, parameters: string[], argumentsSource: string[]): string {
+  const identifiers = source.replace(/θ/g, "theta").match(/[a-z]+(?:_[a-z0-9]+)?/gi) ?? [];
+  const names = identifiers.flatMap((name) => name.toLowerCase().startsWith("log_") ? [name.slice(4).toLowerCase()] : [name.toLowerCase()])
+    .filter((name) => !functions.has(name) && !["pi", "e", "sum", "prod", "int", "d", "derivativeat"].includes(name));
+  const tree = parse(source, true, false, names);
+  let nextScope = 0;
+  const used = new Set((source + argumentsSource.join(" ")).match(/[a-z]+(?:_[a-z0-9]+)?/gi)?.map((name) => name.toLowerCase()));
+  const condition = (value: Condition, bound: Map<string, string>): string => value.type === "logical"
+    ? `(${condition(value.left, bound)}) ${value.operator} (${condition(value.right, bound)})`
+    : `${write(value.left, bound)}${value.operator}${write(value.right, bound)}`;
+  const write = (node: Node, bound: Map<string, string>): string => {
+    switch (node.type) {
+      case "number": return `(${node.value.numerator}/${node.value.denominator})`;
+      case "constant": return node.value;
+      case "variable": {
+        if (bound.has(node.name)) return bound.get(node.name)!;
+        const index = parameters.indexOf(node.name);
+        return index < 0 ? node.name : `(${argumentsSource[index]})`;
+      }
+      case "unary": return `(${node.operator}${write(node.operand, bound)})`;
+      case "binary": return `(${write(node.left, bound)}${node.operator}${write(node.right, bound)})`;
+      case "call": return `${node.name}(${write(node.argument, bound)})`;
+      case "multicall": return `${node.name}(${node.args.map((arg) => write(arg, bound)).join(",")})`;
+      case "restricted": return `(${write(node.value, bound)}{${condition(node.condition, bound)}})`;
+      case "piecewise": return `{${[...node.branches.map((branch) => `${condition(branch.condition, bound)}:${write(branch.value, bound)}`), ...(node.fallback ? [write(node.fallback, bound)] : [])].join(",")}}`;
+      case "bound": {
+        let local: string;
+        do { local = `z_scope${++nextScope}`; } while (used.has(local));
+        used.add(local);
+        const scope = new Map(bound); scope.set(node.variable, local);
+        const body = write(node.body, scope), lower = write(node.lower, bound);
+        if (node.operation === "derivative") return `derivativeat(${local},${body},${lower})`;
+        const upper = write(node.upper!, bound);
+        return node.operation === "integral" ? `(int_{${lower}}^{${upper}} (${body}) d${local})` : `(${node.operation}_{${local}=${lower}}^{${upper}} (${body}))`;
+      }
+    }
+  };
+  return write(tree, new Map());
 }
 
 export type ImplicitEvaluation = (x: number, y: number) => Decimal | number;
@@ -212,7 +275,7 @@ export interface TrigonometricRegression {
   offset: number;
 }
 
-const functions = new Set([
+export const BUILTIN_NAMES = [
   "sqrt",
   "sin",
   "cos",
@@ -225,8 +288,60 @@ const functions = new Set([
   "exp",
   "abs",
   "floor",
-  "ceil",
-]);
+  "ceil", "sec", "csc", "cot", "arcsin", "arccos", "arctan", "arcsec", "arccsc", "arccot",
+  "sinh", "cosh", "tanh", "sech", "csch", "coth", "asinh", "acosh", "atanh",
+  "arcsinh", "arccosh", "arctanh", "arcsech", "arccsch", "arccoth",
+  "sign", "sgn", "round", "factorial", "mod", "gcd", "lcm", "ncr", "npr", "logbase",
+] as const;
+const functions = new Set<string>(BUILTIN_NAMES);
+export function freeIdentifiers(source: string): string[] {
+  const normalized = source.replace(/θ/g, "theta").replace(/[Σ∑]/g, "sum").replace(/[Π∏]/g, "prod").replace(/∫/g, "int").toLowerCase();
+  const relation = graphRelation(normalized);
+  if (relation && !normalized.includes("[")) {
+    const length = /[≤≥≠]/.test(normalized[relation.index]!) ? 1 : relation.operator.length;
+    const left = normalized.slice(0, relation.index), right = normalized.slice(relation.index + length);
+    const names = /^\s*r\s*$/.test(left) ? freeIdentifiers(right).filter((name) => name !== "theta") : [...freeIdentifiers(left), ...freeIdentifiers(right)];
+    return [...new Set(names)];
+  }
+  let coordinates: [string, string] | undefined;
+  try { coordinates = pointSources(normalized); } catch { /* Identifier analysis must also accept incomplete input. */ }
+  if (coordinates) return [...new Set(coordinates.flatMap(freeIdentifiers))];
+  const identifiers = [...new Set(normalized.match(/[a-z]+(?:_[a-z0-9]+)?/g) ?? [])];
+  const found = new Set<string>();
+  const condition = (value: Condition, bound: Set<string>) => {
+    if (value.type === "logical") { condition(value.left, bound); condition(value.right, bound); }
+    else { walk(value.left, bound); walk(value.right, bound); }
+  };
+  const walk = (node: Node, bound: Set<string>) => {
+    switch (node.type) {
+      case "variable": if (!bound.has(node.name)) found.add(node.name); break;
+      case "unary": walk(node.operand, bound); break;
+      case "binary": walk(node.left, bound); walk(node.right, bound); break;
+      case "call": walk(node.argument, bound); break;
+      case "multicall": node.args.forEach((arg) => walk(arg, bound)); break;
+      case "bound": {
+        const scope = new Set([...bound, node.variable]);
+        walk(node.lower, bound);
+        if (node.upper) walk(node.upper, bound);
+        walk(node.body, scope); break;
+      }
+      case "restricted": walk(node.value, bound); condition(node.condition, bound); break;
+      case "piecewise": node.branches.forEach((branch) => { condition(branch.condition, bound); walk(branch.value, bound); }); if (node.fallback) walk(node.fallback, bound); break;
+    }
+  };
+  try {
+    walk(parse(normalized, true, true, identifiers.flatMap((name) => name.startsWith("log_") ? [name.slice(4)] : [name]).filter((name) => !functions.has(name) && !["pi", "e"].includes(name) && !/^(?:log_|sum|prod|int|d|derivativeat)$/.test(name) && !name.startsWith("log_"))), new Set());
+    return [...found];
+  } catch {
+    const bound = new Set([...normalized.matchAll(/\b([a-z](?:_[a-z0-9]+)?)\s*=\s*\[/g)].map((match) => match[1]!));
+    for (const match of normalized.matchAll(/(?:sum|prod|[Σ∑Π∏])_\{\s*([a-z](?:_[a-z0-9]+)?)\s*=/gi)) bound.add(match[1]!);
+    for (const match of normalized.matchAll(/d\s*\/\s*d([a-z](?:_[a-z0-9]+)?)/g)) bound.add(match[1]!);
+    if (/(?:int_|∫)/.test(normalized)) for (const match of normalized.matchAll(/\bd([a-z](?:_[a-z0-9]+)?)\b/g)) { bound.add(match[0]); bound.add(match[1]!); }
+    if (/^\s*r\s*=/.test(normalized)) { bound.add("r"); bound.add("theta"); }
+    return [...new Set(identifiers.flatMap((name) => name.startsWith("log_") ? [name.slice(4)] : [name]).filter((name) => !functions.has(name) && !bound.has(name) && !["sum", "prod", "int", "d", "derivativeat", "pi", "e", "and", "or"].includes(name)))];
+  }
+}
+
 const MAX_EXPRESSION_LENGTH = 512;
 const MAX_COORDINATE_CACHE_SIZE = 2048;
 const rationalDecimalCache = new WeakMap<Rational, Map<number, Decimal>>();
@@ -267,6 +382,7 @@ function rational(numerator: bigint, denominator = 1n): Rational {
 }
 
 function decimalLiteral(text: string): Rational {
+  if (text.startsWith("-")) { const value = decimalLiteral(text.slice(1)); return rational(-value.numerator, value.denominator); }
   const [whole = "0", fractional = ""] = text.split(".");
   const digits = `${whole || "0"}${fractional}`;
   return rational(BigInt(digits), 10n ** BigInt(fractional.length));
@@ -316,7 +432,8 @@ function parse(
   if (source.length > MAX_EXPRESSION_LENGTH) {
     throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
   }
-  const expression = stripYAssignment ? source.trim().replace(/^y\s*=\s*/i, "") : source.trim();
+  const normalized = source.replace(/θ/g, "theta").replace(/[Σ∑]/g, "sum").replace(/[Π∏]/g, "prod").replace(/∫/g, "int");
+  const expression = stripYAssignment ? normalized.trim().replace(/^y\s*=\s*/i, "") : normalized.trim();
   const tokens: string[] = [];
   let offset = 0;
   while (offset < expression.length) {
@@ -325,7 +442,7 @@ function parse(
       continue;
     }
     const remaining = expression.slice(offset);
-    const match = /^(?:\d+(?:\.\d*)?|\.\d+)|^[a-zA-Z]+(?:_[a-zA-Z0-9]+)?|^(?:<=|>=|!=|≤|≥|≠)|^[+\-*/^(),{}:<>=]/.exec(remaining);
+    const match = /^(?:\d+(?:\.\d*)?|\.\d+)|^[a-zA-Z]+(?:_[a-zA-Z0-9]+)?|^(?:<=|>=|!=|≤|≥|≠)|^[_!|' +\-*/^(),{}:<>=]/.exec(remaining);
     if (!match) {
       throw new Error(`Unexpected character "${expression[offset]}"`);
     }
@@ -346,6 +463,8 @@ function parse(
     }
   };
 
+  const boundNames: string[] = [];
+  let bars = 0;
   function primary(): Node {
     const token = take();
     if (token === undefined) {
@@ -353,6 +472,13 @@ function parse(
     }
     if (/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(token)) {
       return { type: "number", value: decimalLiteral(token) };
+    }
+    if (token === "|") {
+      bars += 1;
+      const argument = sum();
+      if (peek() !== "|") throw new Error("Absolute-value bars must be paired; parenthesize nested absolute values");
+      take(); bars -= 1;
+      return { type: "call", name: "abs", argument };
     }
     if (token === "(") {
       const value = sum();
@@ -394,7 +520,56 @@ function parse(
       return { type: "piecewise", branches, fallback };
     }
     const name = token.toLowerCase();
-    if (name === "x" || variableNames.includes(name)) {
+    if (name === "derivativeat") {
+      expect("("); const variable = take() ?? ""; expect(",");
+      boundNames.push(variable); const body = sum(); boundNames.pop(); expect(",");
+      const lower = sum(); expect(")");
+      return { type: "bound", operation: "derivative", variable, body, lower };
+    }
+    if (name === "d" && peek() === "/") {
+      take();
+      const differential = take() ?? "";
+      if (!/^d[a-z](?:_[a-z0-9]+)?$/.test(differential)) throw new Error("Use d/dx(expression) with a single-letter variable");
+      const variable = differential.slice(1);
+      expect("("); boundNames.push(variable);
+      const body = sum(); boundNames.pop(); expect(")");
+      return { type: "bound", operation: "derivative", variable, body, lower: { type: "variable", name: variable } };
+    }
+    if (["sum", "prod", "int"].includes(name) && peek() === "_") {
+      take(); expect("{");
+      let variable = "";
+      if (name !== "int") {
+        variable = take() ?? "";
+        if (!/^[a-z](?:_[a-z0-9]+)?$/.test(variable)) throw new Error("A sum or product index must be a letter or subscripted variable");
+        expect("=");
+      }
+      const lower = sum(); expect("}"); expect("^"); expect("{");
+      const upper = sum(); expect("}");
+      if (name === "int") {
+        let depth = 0, differential = -1;
+        for (let index = position; index < tokens.length; index += 1) {
+          const token = tokens[index]!;
+          if (depth === 0 && /^d[a-z](?:_[a-z0-9]+)?$/.test(token)) { differential = index; break; }
+          if (token === "(" || token === "{") depth += 1;
+          if (token === ")" || token === "}") depth -= 1;
+        }
+        if (differential < 0) throw new Error("An integral needs a trailing differential, for example dx");
+        variable = tokens[differential]!.slice(1);
+        const body = parse(tokens.slice(position, differential).join(" "), allowY, false, [...variableNames, ...boundNames, variable]);
+        position = differential + 1;
+        return { type: "bound", operation: "integral", variable, body, lower, upper };
+      }
+      boundNames.push(variable); const body = product(); boundNames.pop();
+      return { type: "bound", operation: name as "sum" | "prod", variable, body, lower, upper };
+    }
+    if (name.startsWith("log_") || (name === "log" && peek() === "_")) {
+      let base: Node;
+      if (name.startsWith("log_")) base = parse(name.slice(4), allowY, false, [...variableNames, ...boundNames]);
+      else { take(); expect("{"); base = sum(); expect("}"); }
+      expect("("); const argument = sum(); expect(")");
+      return { type: "multicall", name: "logbase", args: [argument, base] };
+    }
+    if (name === "x" || variableNames.includes(name) || boundNames.includes(name)) {
       return { type: "variable", name };
     }
     if (name === "y" && allowY) {
@@ -405,15 +580,17 @@ function parse(
     }
     if (functions.has(name)) {
       expect("(");
-      const argument = sum();
+      const args = [sum()];
+      while (peek() === ",") { take(); args.push(sum()); }
       expect(")");
-      return { type: "call", name, argument };
+      return { type: "multicall", name, args };
     }
     throw new Error(`Unknown name "${token}"`);
   }
 
   function power(): Node {
-    const left = primary();
+    let left = primary();
+    while (peek() === "!") { take(); left = { type: "multicall", name: "factorial", args: [left] }; }
     if (peek() === "^") {
       take();
       return { type: "binary", operator: "^", left, right: unary() };
@@ -430,14 +607,14 @@ function parse(
   }
 
   function startsImplicitFactor(token: string | undefined): boolean {
-    if (token === "(" || /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(token ?? "")) {
+    if ((token === "|" && bars === 0) || token === "(" || /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(token ?? "")) {
       return true;
     }
     if (!token || !/^[a-zA-Z]+(?:_[a-zA-Z0-9]+)?$/.test(token)) {
       return false;
     }
     const name = token.toLowerCase();
-    return name === "x" || variableNames.includes(name) || name === "pi" || name === "e" ||
+    return name === "x" || boundNames.includes(name) || variableNames.includes(name) || name.startsWith("log_") || ["sum", "prod", "int", "d"].includes(name) || name === "pi" || name === "e" ||
       (allowY && name === "y") || functions.has(name);
   }
 
@@ -533,7 +710,7 @@ function parse(
 }
 
 const constantNodes = new WeakMap<Node, boolean>();
-const constantValues = new WeakMap<Node, { precision: number; value: Value }>();
+const constantValues = new WeakMap<Node, { precision: number; mode: AngleMode; value: Value }>();
 
 function conditionIsConstant(condition: Condition): boolean {
   return condition.type === "logical"
@@ -547,6 +724,8 @@ function isConstantExpression(node: Node): boolean {
   const constant = node.type === "variable" ? false
     : node.type === "unary" ? isConstantExpression(node.operand)
       : node.type === "binary" ? isConstantExpression(node.left) && isConstantExpression(node.right)
+        : node.type === "bound" ? false
+        : node.type === "multicall" ? node.args.every(isConstantExpression)
         : node.type === "call" ? isConstantExpression(node.argument)
           : node.type === "restricted" ? isConstantExpression(node.value) && conditionIsConstant(node.condition)
             : node.type === "piecewise" ? node.branches.every((branch) =>
@@ -560,14 +739,18 @@ function isConstantExpression(node: Node): boolean {
 function evaluate(node: Node, x: Decimal, y?: Decimal, variables: Record<string, number> = {}): Value {
   if (!isConstantExpression(node)) return evaluateNode(node, x, y, variables);
   const cached = constantValues.get(node);
-  if (cached?.precision === Decimal.precision) return cached.value;
+  if (cached?.precision === Decimal.precision && cached.mode === angleMode) return cached.value;
   const value = evaluateNode(node, x, y, variables);
-  constantValues.set(node, { precision: Decimal.precision, value });
+  constantValues.set(node, { precision: Decimal.precision, mode: angleMode, value });
   return value;
 }
 
 function evaluateNode(node: Node, x: Decimal, y: Decimal | undefined, variables: Record<string, number>): Value {
   switch (node.type) {
+    case "multicall":
+      return evaluateBuiltin(node.name, node.args.map((arg) => evaluate(arg, x, y, variables)));
+    case "bound":
+      return evaluateBound(node, x, y, variables);
     case "restricted":
       if (!evaluateCondition(node.condition, x, y, variables)) throw new UndefinedPointError();
       return evaluate(node.value, x, y, variables);
@@ -582,6 +765,7 @@ function evaluateNode(node: Node, x: Decimal, y: Decimal | undefined, variables:
     case "number":
       return node.value;
     case "variable":
+      if (boundValues.has(node.name)) return boundValues.get(node.name)!;
       if (node.name === "y") {
         if (!y) {
           throw new Error("y is only available in an implicit equation");
@@ -735,6 +919,152 @@ function evaluateNode(node: Node, x: Decimal, y: Decimal | undefined, variables:
   throw new Error("Could not evaluate expression");
 }
 
+const boundValues = new Map<string, Value>();
+
+function evaluateBuiltin(originalName: string, values: Value[]): Value {
+  const aliases: Record<string, string> = { arcsin: "asin", arccos: "acos", arctan: "atan", arcsinh: "asinh", arccosh: "acosh", arctanh: "atanh", sgn: "sign" };
+  const name = aliases[originalName] ?? originalName;
+  const arity = ["mod", "gcd", "lcm", "ncr", "npr", "logbase"].includes(name) ? [2] : ["round", "atan"].includes(name) ? [1, 2] : [1];
+  if (!arity.includes(values.length)) throw new Error(`${originalName} requires ${arity.join(" or ")} argument(s)`);
+  const a = asDecimal(values[0]!);
+  const b = values[1] && asDecimal(values[1]);
+  const integer = (value: Decimal, label = name): bigint => {
+    if (!value.isInteger()) throw new Error(`${label} requires integer inputs`);
+    if (value.abs().gt("1e100")) throw new Error(`${label} integer is outside the supported range`);
+    return BigInt(value.toFixed(0));
+  };
+  const nonzero = (value: Decimal): Decimal => {
+    if (value.abs().lt(new Decimal(10).pow(-Decimal.precision + 5))) throw new Error(`${name} is undefined at this input`);
+    return value;
+  };
+  const requireDomain = (valid: boolean, description: string) => {
+    if (!valid) throw new Error(`${originalName} requires ${description}`);
+  };
+  const radians = (value: Decimal) => angleMode === "degrees" ? value.times(decimalConstant("pi")).div(180) : value;
+  const angle = (value: Decimal) => approximate(angleMode === "degrees" ? value.times(180).div(decimalConstant("pi")) : value);
+  switch (name) {
+    case "sign": return rational(BigInt(a.comparedTo(0)));
+    case "round": {
+      const digits = b ? Number(integer(b, "round digits")) : 0;
+      requireDomain(Math.abs(digits) <= 100, "digits between -100 and 100");
+      const rounded = a.times(new Decimal(10).pow(digits)).toDecimalPlaces(0, Decimal.ROUND_HALF_CEIL).div(new Decimal(10).pow(digits));
+      return decimalLiteral(rounded.toFixed(Math.max(0, digits)));
+    }
+    case "mod": {
+      if (b!.isZero()) throw new Error("mod divisor cannot be zero");
+      if (values.every((value) => value.kind === "rational")) {
+        const left = values[0] as Rational, right = values[1] as Rational;
+        let n = left.numerator * right.denominator, d = left.denominator * right.numerator;
+        if (d < 0n) { n = -n; d = -d; }
+        let quotient = n / d; if (n < 0n && n % d) quotient -= 1n;
+        return rational(left.numerator * right.denominator - quotient * right.numerator * left.denominator, left.denominator * right.denominator);
+      }
+      return approximate(a.minus(a.div(b!).floor().times(b!)));
+    }
+    case "gcd": case "lcm": {
+      const left = integer(a), right = integer(b!); const divisor = gcd(left, right);
+      return rational(name === "gcd" ? divisor : divisor === 0n ? 0n : (left * right / divisor < 0n ? -left * right / divisor : left * right / divisor));
+    }
+    case "factorial": case "ncr": case "npr": {
+      const n = integer(a); const r = name === "factorial" ? n : integer(b!);
+      requireDomain(n >= 0n && r >= 0n && r <= n, "non-negative integers with 0 <= r <= n");
+      requireDomain(n <= 10000n, "an integer no larger than 10000");
+      const count = name === "ncr" && r > n - r ? n - r : r;
+      let result = 1n;
+      for (let i = 0n; i < count; i += 1n) result = name === "ncr" ? result * (n - i) / (i + 1n) : result * (n - i);
+      return rational(result);
+    }
+    case "logbase":
+      requireDomain(a.gt(0) && b!.gt(0) && !b!.eq(1), "a positive input and a positive base other than 1");
+      {
+        const result = a.ln().div(b!.ln()), nearest = result.toDecimalPlaces(0);
+        if (values[0]!.kind === "rational" && values[1]!.kind === "rational" && nearest.abs().lte(100)) {
+          const input = values[0] as Rational, base = values[1] as Rational, exponent = BigInt(nearest.abs().toFixed(0));
+          const powered = nearest.isNegative() ? rational(base.denominator ** exponent, base.numerator ** exponent) : rational(base.numerator ** exponent, base.denominator ** exponent);
+          if (powered.numerator === input.numerator && powered.denominator === input.denominator) return rational(BigInt(nearest.toFixed(0)));
+        }
+        return approximate(result);
+      }
+    case "sin": return approximate(radians(a).sin());
+    case "cos": return approximate(radians(a).cos());
+    case "tan": return approximate(radians(a).sin().div(nonzero(radians(a).cos())));
+    case "sec": return approximate(new Decimal(1).div(nonzero(radians(a).cos())));
+    case "csc": return approximate(new Decimal(1).div(nonzero(radians(a).sin())));
+    case "cot": return approximate(radians(a).cos().div(nonzero(radians(a).sin())));
+    case "asin": case "acos":
+      requireDomain(a.abs().lte(1), "an input between -1 and 1"); return angle(name === "asin" ? a.asin() : a.acos());
+    case "atan":
+      requireDomain(!b || !a.isZero() || !b.isZero(), "at least one nonzero coordinate for two-argument arctan");
+      return angle(b ? Decimal.atan2(a, b) : a.atan());
+    case "arcsec": case "arccsc":
+      requireDomain(a.abs().gte(1), "an input with absolute value at least 1"); return angle(name === "arcsec" ? new Decimal(1).div(a).acos() : new Decimal(1).div(a).asin());
+    case "arccot": return angle(Decimal.atan2(1, a));
+    case "sinh": return approximate(a.sinh());
+    case "cosh": return approximate(a.cosh());
+    case "tanh": return approximate(a.tanh());
+    case "sech": return approximate(new Decimal(1).div(a.cosh()));
+    case "csch": return approximate(new Decimal(1).div(nonzero(a.sinh())));
+    case "coth": return approximate(a.cosh().div(nonzero(a.sinh())));
+    case "asinh": return approximate(a.asinh());
+    case "acosh": requireDomain(a.gte(1), "an input at least 1"); return approximate(a.acosh());
+    case "atanh": requireDomain(a.abs().lt(1), "an input strictly between -1 and 1"); return approximate(a.atanh());
+    case "arcsech": requireDomain(a.gt(0) && a.lte(1), "an input in (0, 1]"); return approximate(new Decimal(1).div(a).acosh());
+    case "arccsch": requireDomain(!a.isZero(), "a nonzero input"); return approximate(new Decimal(1).div(a).asinh());
+    case "arccoth": requireDomain(a.abs().gt(1), "an input with absolute value greater than 1"); return approximate(new Decimal(1).div(a).atanh());
+    default: {
+      const result = evaluateNode({ type: "call", name, argument: { type: "number", value: values[0]!.kind === "rational" ? values[0] as Rational : decimalLiteral(a.toFixed()) } }, new Decimal(0), undefined, {});
+      return values[0]!.kind === "rational" ? result : approximate(asDecimal(result));
+    }
+  }
+}
+
+function evaluateBound(node: Extract<Node, { type: "bound" }>, x: Decimal, y: Decimal | undefined, variables: Record<string, number>): Value {
+  const lower = node.operation === "derivative" && node.lower.type === "variable" && node.lower.name === node.variable && !boundValues.has(node.variable) && variables[node.variable] === undefined && node.variable !== "y" ? x : asDecimal(evaluate(node.lower, x, y, variables));
+  const upper = node.upper && asDecimal(evaluate(node.upper, x, y, variables));
+  const previous = boundValues.get(node.variable);
+  const at = (value: Decimal | Rational): Value => {
+    boundValues.set(node.variable, "kind" in value ? value : approximate(value));
+    return evaluate(node.body, x, y, variables);
+  };
+  try {
+    if (node.operation === "derivative") {
+      const h = Decimal.max(1, lower.abs()).times(new Decimal(10).pow(-Math.min(10, Math.floor((Decimal.precision - 5) / 4))));
+      return approximate(asDecimal(at(lower.minus(h.times(2)))).minus(asDecimal(at(lower.minus(h))).times(8)).plus(asDecimal(at(lower.plus(h))).times(8)).minus(asDecimal(at(lower.plus(h.times(2))))).div(h.times(12)));
+    }
+    if (node.operation === "sum" || node.operation === "prod") {
+      if (!lower.isInteger() || !upper!.isInteger()) throw new Error("Sum and product bounds must be integers");
+      if (upper!.minus(lower).gte(10000)) throw new Error("Sum and product are limited to 10000 iterations");
+      let result: Value = rational(node.operation === "sum" ? 0n : 1n);
+      for (let index = BigInt(lower.toFixed(0)), end = BigInt(upper!.toFixed(0)); index <= end; index += 1n) {
+        const term = at(rational(index));
+        if (result.kind === "rational" && term.kind === "rational") result = node.operation === "sum" ? rational(result.numerator * term.denominator + term.numerator * result.denominator, result.denominator * term.denominator) : rational(result.numerator * term.numerator, result.denominator * term.denominator);
+        else result = approximate(node.operation === "sum" ? asDecimal(result).plus(asDecimal(term)) : asDecimal(result).times(asDecimal(term)));
+      }
+      return result;
+    }
+    let evaluations = 0;
+    const sample = (value: Decimal): Decimal => {
+      if (++evaluations > 20000) throw new Error("Integral did not converge within 20000 evaluations");
+      return asDecimal(at(value));
+    };
+    const simpson = (a: Decimal, b: Decimal, fa: Decimal, fm: Decimal, fb: Decimal) => b.minus(a).times(fa.plus(fm.times(4)).plus(fb)).div(6);
+    const integrate = (a: Decimal, b: Decimal, fa: Decimal, fm: Decimal, fb: Decimal, whole: Decimal, tolerance: Decimal, depth: number): Decimal => {
+      const middle = a.plus(b).div(2), leftMid = a.plus(middle).div(2), rightMid = middle.plus(b).div(2);
+      const fl = sample(leftMid), fr = sample(rightMid);
+      const left = simpson(a, middle, fa, fl, fm), right = simpson(middle, b, fm, fr, fb);
+      const difference = left.plus(right).minus(whole);
+      if (difference.abs().lte(tolerance.times(15))) return left.plus(right).plus(difference.div(15));
+      if (depth === 0) throw new Error("Integral did not converge");
+      return integrate(a, middle, fa, fl, fm, left, tolerance.div(2), depth - 1).plus(integrate(middle, b, fm, fr, fb, right, tolerance.div(2), depth - 1));
+    };
+    if (lower.eq(upper!)) return approximate(new Decimal(0));
+    const midpoint = lower.plus(upper!).div(2), fa = sample(lower), fm = sample(midpoint), fb = sample(upper!);
+    return approximate(integrate(lower, upper!, fa, fm, fb, simpson(lower, upper!, fa, fm, fb), new Decimal("1e-12"), 24));
+  } finally {
+    if (previous) boundValues.set(node.variable, previous); else boundValues.delete(node.variable);
+  }
+}
+
 type FastEvaluator = (x: number, y?: number) => number;
 
 function compareValues(operator: Comparison, comparison: number): boolean {
@@ -784,14 +1114,24 @@ function compileFastEvaluator(node: Node, variables: Record<string, number>): Fa
   const evaluator = compileFastEvaluatorNode(node, variables);
   if (!isConstantExpression(node)) return evaluator;
   let cached: number | undefined;
+  let cachedMode = angleMode;
   return (x, y) => {
-    if (cached === undefined) cached = evaluator(x, y);
+    if (cached === undefined || cachedMode !== angleMode) { cached = evaluator(x, y); cachedMode = angleMode; }
     return cached;
   };
 }
 
 function compileFastEvaluatorNode(node: Node, variables: Record<string, number>): FastEvaluator {
   switch (node.type) {
+    case "multicall": {
+      if (["tan", "sec", "csc", "cot", "gcd", "lcm", "ncr", "npr", "factorial", "round"].includes(node.name)) {
+        return (x, y) => roundFast(asDecimal(evaluateBuiltin(node.name, node.args.map((arg) => evaluate(arg, new Decimal(x), y === undefined ? undefined : new Decimal(y), variables)))).toNumber());
+      }
+      const args = node.args.map((arg) => compileFastEvaluator(arg, variables));
+      return (x, y) => roundFast(asDecimal(evaluateBuiltin(node.name, args.map((arg) => approximate(new Decimal(arg(x, y)))))).toNumber());
+    }
+    case "bound":
+      return (x, y) => roundFast(asDecimal(evaluateBound(node, new Decimal(x), y === undefined ? undefined : new Decimal(y), variables)).toNumber());
     case "restricted": {
       const condition = compileFastCondition(node.condition, variables);
       const value = compileFastEvaluator(node.value, variables);
@@ -1015,6 +1355,9 @@ function affineInVariable(node: Node, variable: "x" | "y"): AffineExpression | u
         constant: negateNode(operand.constant),
       };
   }
+  if (node.type === "multicall" || node.type === "bound") {
+    return containsVariable(node, variable) ? undefined : { coefficient: zeroNode(), constant: node };
+  }
   if (node.type === "call") {
     return containsVariable(node.argument, variable)
       ? undefined
@@ -1075,6 +1418,8 @@ function containsVariable(node: Node, variable: "x" | "y"): boolean {
       return containsVariable(node.operand, variable);
     case "binary":
       return containsVariable(node.left, variable) || containsVariable(node.right, variable);
+    case "multicall": return node.args.some((arg) => containsVariable(arg, variable));
+    case "bound": return containsVariable(node.lower, variable) || Boolean(node.upper && containsVariable(node.upper, variable)) || (node.variable !== variable && containsVariable(node.body, variable));
     case "call":
       return containsVariable(node.argument, variable);
     default:
@@ -1116,6 +1461,11 @@ function compileCoordinateRegion(
         return value?.(x, y) ?? "";
       };
     }
+    if (tree.type === "bound") return undefined;
+    if (tree.type === "multicall") {
+      const regions = tree.args.map(build);
+      return regions.some(Boolean) ? (x, y) => regions.map((region) => region?.(x, y) ?? "").join("|") : undefined;
+    }
     if (tree.type === "unary") return build(tree.operand);
     if (tree.type === "call") return build(tree.argument);
     if (tree.type !== "binary") return undefined;
@@ -1139,8 +1489,8 @@ function tangentParameters(
   parameter: "x" | "y",
   variables: Record<string, number>,
 ): (() => { slope: number; offset: number }) | undefined {
-  if (tree.type !== "call" || tree.name !== "tan") return undefined;
-  const affine = affineInVariable(tree.argument, parameter);
+  if (angleMode !== "radians" || (tree.type !== "call" && tree.type !== "multicall") || tree.name !== "tan") return undefined;
+  const affine = affineInVariable(tree.type === "call" ? tree.argument : tree.args[0]!, parameter);
   if (!affine || containsVariable(affine.coefficient, parameter) ||
       containsVariable(affine.constant, parameter)) return undefined;
   return () => ({
@@ -1806,6 +2156,42 @@ export function graphRelation(source: string): { index: number; operator: Compar
   return undefined;
 }
 
+function compileNativeGraph(source: string, variables: Record<string, number>): GraphExpression | undefined {
+  const normalized = source.replace(/θ/g, "theta");
+  if (/^r\s*(?:[<>≤≥]|!=)/i.test(normalized)) throw new Error("Polar inequalities are not supported; use r = f(theta)");
+  const candidate = /\{([^{}]+)\}\s*$/.exec(normalized);
+  const suffix = candidate && !/[+\-*/^_(:,=<>]$/.test(normalized.slice(0, candidate.index).trim()) ? candidate : null;
+  const base = suffix ? normalized.slice(0, suffix.index).trim() : normalized;
+  const polar = /^r\s*=/i.test(base);
+  const coordinates = polar ? undefined : pointSources(base);
+  if (!polar && (!coordinates || !coordinates.some((coordinate) => freeIdentifiers(coordinate).includes("t")))) return undefined;
+  const parameter = polar ? "theta" : "t";
+  let start = 0, end = polar ? (angleMode === "degrees" ? 2160 : 12 * Math.PI) : 1;
+  if (suffix) {
+    const range = new RegExp(`^\\s*(.+?)\\s*(?:<=|<|≤)\\s*${parameter}\\s*(?:<=|<|≤)\\s*(.+?)\\s*$`, "i").exec(suffix[1]!);
+    if (!range) return undefined;
+    start = compileExpression(range[1]!, variables)(0).value.toNumber();
+    end = compileExpression(range[2]!, variables)(0).value.toNumber();
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) throw new Error("Graph parameter bounds must be finite and increasing");
+  }
+  const scope = { ...variables } as Record<string, number>;
+  scope[parameter] = 0;
+  const first = compileExpression(polar ? base.replace(/^r\s*=\s*/i, "") : coordinates![0], scope);
+  const second = polar ? undefined : compileExpression(coordinates![1], scope);
+  return {
+    kind: "parametric", start, end,
+    evaluate: (value) => {
+      if (!Number.isFinite(value)) throw new Error("Graph parameter must be finite");
+      Object.assign(scope, variables);
+      scope[parameter] = value;
+      const a = first(value).value.toNumber();
+      if (!polar) return [a, second!(value).value.toNumber()];
+      const radians = angleMode === "degrees" ? value * Math.PI / 180 : value;
+      return [a * Math.cos(radians), a * Math.sin(radians)];
+    },
+  };
+}
+
 function compileRestrictedGraph(
   source: string, variables: Record<string, number>, fast: boolean, statisticsMode: StatisticsMode,
 ): GraphExpression | undefined {
@@ -1814,7 +2200,7 @@ function compileRestrictedGraph(
   for (let index = 0; index < source.length; index += 1) {
     const char = source[index];
     if (char === "{" && depth === 0 && index > 0 &&
-        !/[+\-*/^(:,=<>]$/.test(source.slice(0, index).trim())) {
+        !/[+\-*/^_(:,=<>]$/.test(source.slice(0, index).trim())) {
       start = index;
       break;
     }
@@ -2067,7 +2453,7 @@ function compilePointGraph(
   const coordinates = pointSources(source);
   if (!coordinates) return undefined;
   const variablesInCoordinate = (coordinate: string): string[] => {
-    const identifiers = coordinate.match(/[a-z]+(?:_[a-z0-9]+)?/gi)?.map((name) => name.toLowerCase()) ?? [];
+    const identifiers = freeIdentifiers(coordinate);
     const sliderVariables = [...new Set(identifiers.filter((name) =>
       name !== "pi" && name !== "e" && name !== "and" && name !== "or" && !functions.has(name)))];
     if (sliderVariables.some((name) =>
@@ -2157,6 +2543,8 @@ export function compileGraphExpression(
   const trimmed = source.trim();
   const collection = compileCollectionGraph(trimmed, variables, {}, false, statisticsMode);
   if (collection) return collection;
+  const native = compileNativeGraph(trimmed, variables);
+  if (native) return native;
   const restricted = compileRestrictedGraph(trimmed, variables, false, statisticsMode);
   if (restricted) return restricted;
   const relation = graphRelation(trimmed);
@@ -2283,6 +2671,8 @@ export function compileFastGraphExpression(
   const trimmed = source.trim();
   const collection = compileCollectionGraph(trimmed, variables, {}, true, statisticsMode);
   if (collection) return collection;
+  const native = compileNativeGraph(trimmed, variables);
+  if (native) return native;
   const restricted = compileRestrictedGraph(trimmed, variables, true, statisticsMode);
   if (restricted) return restricted;
   const relation = graphRelation(trimmed);

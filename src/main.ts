@@ -17,6 +17,11 @@ import {
   hsvToHex,
   FAST_MODE_PRECISION_DIGITS,
   getPrecisionDigits,
+  getAngleMode,
+  setAngleMode,
+  BUILTIN_NAMES,
+  freeIdentifiers,
+  type AngleMode,
   setPrecisionDigits,
   expandUserFunctions,
   functionParameters,
@@ -32,9 +37,14 @@ import {
 } from "./math";
 import { BoundedCache, referencedVariableSignature, SegmentIndex, selectHoverPoint, tangentBranchRange, tangentPixelCoverage, refinementLevels, isFlatOffscreenInterval } from "./performance";
 import { expandCollections, hasCollections, COLLECTION_FUNCTIONS, type StatisticsMode } from "./collections";
+import {
+  fitCustomRegression, regressionParameters, regressionSides,
+  type CustomRegressionResult, type RegressionSides,
+} from "./customRegression";
+import { fitLogistic, type FitResult } from "./regression";
 import { imageExportSize } from "./image-export";
 import { refreshDropdowns } from "./dropdowns";
-import { tableColumns, tableColumnName, tableRowSource, validateTableColumnName, evaluateTableColumn, type TableColumn } from "./tables";
+import { tableColumns, tableColumnName, tableColumnFormula, tableCell, tableRowSource, validateTableColumnName, evaluateTableColumn, type TableColumn, type TableAxis } from "./tables";
 import { expandNamedPoints, pointSources, dynamicLabel, type PointSources } from "./geometry";
 import { parsePhotos, evaluatePhotoTransform, photoMatrix, PHOTO_FIELDS, PHOTO_TYPES, MAX_PHOTO_BYTES, MAX_PHOTO_PIXELS, MAX_TOTAL_PHOTO_PIXELS, type Photo } from "./photos";
 import "./style.css";
@@ -90,15 +100,21 @@ interface Expression {
   } | null;
   scalarText?: string;
   scalarEvaluator?: () => Evaluation | number;
+  regressionCache?: { key: string; result: CustomRegressionResult };
+  regressionError?: string;
+  regressionSummary?: string;
+  regressionGraph?: string;
 }
 
 interface TableRow {
+  extra?: string[];
   id: number;
   x: string;
   y: string;
 }
 
 interface DataTable {
+  extraColumns?: Array<{ id: number; name?: string; formula?: string }>;
   id: number;
   rows: TableRow[];
   name?: string;
@@ -110,7 +126,7 @@ interface DataTable {
   folderId?: number;
   sourceExpressionId?: number;
   regressionDegree?: number;
-  regressionKind?: "logarithmic" | "exponential" | "power" | "sine" | "tangent";
+  regressionKind?: "logarithmic" | "exponential" | "power" | "sine" | "tangent" | "logistic";
   color: string;
   regression?: RegressionFit;
   regressionError?: string;
@@ -166,6 +182,7 @@ interface GraphOptions {
   showLabels: boolean;
   aspectRatio: 0.5 | 1 | 2;
   statisticsMode: StatisticsMode;
+  angleMode: AngleMode;
 }
 
 interface WorkspaceItem {
@@ -190,7 +207,8 @@ type RegressionFit =
   | { kind: "logarithmic"; fit: LogarithmicRegression }
   | { kind: "exponential"; fit: ExponentialRegression }
   | { kind: "power"; fit: PowerRegression }
-  | { kind: "sine" | "tangent"; fit: TrigonometricRegression };
+  | { kind: "sine" | "tangent"; fit: TrigonometricRegression }
+  | { kind: "logistic"; fit: FitResult };
 
 interface GraphSample {
   x: number;
@@ -423,6 +441,7 @@ function parseProjectState(text: string): ProjectState {
         typeof graphOptions.showXAxis !== "boolean" ||
         typeof graphOptions.showYAxis !== "boolean" ||
         typeof graphOptions.showLabels !== "boolean" ||
+        (graphOptions.angleMode !== undefined && !["radians", "degrees"].includes(String(graphOptions.angleMode))) ||
         (graphOptions.statisticsMode !== undefined && !["population", "sample"].includes(String(graphOptions.statisticsMode))) ||
         ![0.5, 1, 2].includes(Number(graphOptions.aspectRatio)))) {
     throw new Error("Project contains invalid graph settings.");
@@ -490,17 +509,36 @@ function parseProjectState(text: string): ProjectState {
         (item.collapsed !== undefined && typeof item.collapsed !== "boolean")) {
       throw new Error("Project contains an invalid table.");
     }
+    let extraColumns: DataTable["extraColumns"];
+    if (item.extraColumns !== undefined) {
+      if (!Array.isArray(item.extraColumns) || item.extraColumns.some((column) =>
+        !isRecord(column) || !Number.isSafeInteger(column.id) || Number(column.id) < 1 ||
+        (column.name !== undefined && (typeof column.name !== "string" || column.name.length > 40)) ||
+        (column.formula !== undefined && (typeof column.formula !== "string" || column.formula.length > 512)))) {
+        throw new Error("Project contains invalid extra table columns.");
+      }
+      extraColumns = item.extraColumns.map((column) => ({
+        id: column.id as number, name: column.name as string | undefined, formula: column.formula as string | undefined,
+      }));
+      if (new Set(extraColumns.map(({ id }) => id)).size !== extraColumns.length) {
+        throw new Error("Project contains duplicate extra table column IDs.");
+      }
+    }
     const rows = item.rows.map((row): TableRow => {
       if (!isRecord(row) || !Number.isSafeInteger(row.id) || Number(row.id) < 1 ||
           typeof row.x !== "string" || row.x.length > 128 ||
           typeof row.y !== "string" || row.y.length > 128) {
         throw new Error("Project contains an invalid table row.");
       }
-      return { id: row.id as number, x: row.x, y: row.y };
+      if (row.extra !== undefined && (!Array.isArray(row.extra) || row.extra.length > (extraColumns?.length ?? 0) ||
+          row.extra.some((cell) => typeof cell !== "string" || cell.length > 128))) {
+        throw new Error("Project contains invalid extra table cells.");
+      }
+      return { id: row.id as number, x: row.x, y: row.y, extra: row.extra ? [...row.extra as string[]] : undefined };
     });
     const regressionKind = item.regressionKind;
     if (regressionKind !== undefined &&
-        !["logarithmic", "exponential", "power", "sine", "tangent"].includes(String(regressionKind))) {
+        !["logarithmic", "exponential", "power", "sine", "tangent", "logistic"].includes(String(regressionKind))) {
       throw new Error("Project contains an unsupported regression kind.");
     }
     if (item.regressionDegree !== undefined &&
@@ -511,6 +549,7 @@ function parseProjectState(text: string): ProjectState {
     return {
       id: item.id as number,
       rows,
+      extraColumns,
       name: item.name as string | undefined,
       xColumn: item.xColumn as string | undefined,
       yColumn: item.yColumn as string | undefined,
@@ -718,6 +757,7 @@ function parseProjectState(text: string): ProjectState {
       showYAxis: graphOptions.showYAxis as boolean,
       showLabels: graphOptions.showLabels as boolean,
       aspectRatio: Number(graphOptions.aspectRatio) as GraphOptions["aspectRatio"],
+      angleMode: graphOptions.angleMode === "degrees" ? "degrees" : "radians",
       statisticsMode: graphOptions.statisticsMode === "sample" ? "sample" : "population",
     },
   };
@@ -813,7 +853,15 @@ let centerY = initialProject?.centerY ?? 0;
 let scale = initialProject?.scale ?? 48;
 let renderedView = { centerX, centerY, scale };
 let zoomRedrawTimer: number | undefined;
-const tableValuesCache = new WeakMap<DataTable, { x: number[]; y: number[]; error?: string }>();
+interface TableValues {
+  x: number[];
+  y: number[];
+  extra: Array<Array<number | undefined>>;
+  columnErrors: Array<string | undefined>;
+  primaryError?: string;
+  error?: string;
+}
+const tableValuesCache = new WeakMap<DataTable, TableValues>();
 const tableRevisions = new WeakMap<DataTable, number>();
 const explicitEvaluationCaches = new WeakMap<
   Expression,
@@ -885,7 +933,9 @@ const graphOptions: GraphOptions = initialProject?.graphOptions ?? {
   showLabels: true,
   aspectRatio: 1,
   statisticsMode: initialProject ? "population" : "sample",
+  angleMode: "radians",
 };
+setAngleMode(graphOptions.angleMode);
 const graphSettings = {
   precisionDigits: getPrecisionDigits(),
   explicitSampleSpacing: 1,
@@ -914,7 +964,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 3.3 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">3.3</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 3.4 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">3.4</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -1061,6 +1111,10 @@ app.innerHTML = `
           <span><strong>Desmos mode</strong><small>Fast math (~10 digits)</small></span>
           <input id="desmos-mode" type="checkbox" />
         </label>
+      </div>
+      <div class="setting-control">
+        <label for="angle-mode-setting">Angle mode</label>
+        <select id="angle-mode-setting"><option value="radians">Radians</option><option value="degrees">Degrees</option></select>
       </div>
       <div class="setting-control">
         <label for="precision-setting">Math precision <output id="precision-value">50 digits</output></label>
@@ -1362,7 +1416,7 @@ function drawGrid(target = gridCanvas, exportWidth?: number, exportHeight?: numb
 function compileSpatialColor(expression: Expression): ((x: number, y: number) => string) | undefined {
   const hsv = expression.hsv;
   if (hsv) {
-    const key = `${graphMode}:${userFunctionSignature()}:${JSON.stringify(pointValues)}:${hsv.hue}\u0000${hsv.saturation}\u0000${hsv.value}`;
+    const key = `${graphMode}:${getAngleMode()}:${userFunctionSignature()}:${JSON.stringify(pointValues)}:${hsv.hue}\u0000${hsv.saturation}\u0000${hsv.value}`;
     if (expression.compiledHsvKey !== key) {
       expression.compiledHsvKey = key;
       expression.compiledHsv = undefined;
@@ -1677,7 +1731,7 @@ function drawExplicitCurve(
   regionAt?: (parameter: number) => string,
 ): ExplicitCurveData {
   const source = expression ? expandFunctions(expression.text) : "";
-  const cacheKey = expression ? `${graphMode}:${getPrecisionDigits()}:${source}:${collectionSignature(source)}:${
+  const cacheKey = expression ? `${graphMode}:${getPrecisionDigits()}:${getAngleMode()}:${source}:${collectionSignature(source)}:${
     referencedVariableSignature(source, sliderValues)
   }:${centerX}:${centerY}:${scale}:${graphOptions.aspectRatio}:${width}:${height}:${
     graphSettings.explicitSampleSpacing
@@ -2925,9 +2979,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
     const table=item.type==="table"? tableById.get(item.id):undefined;
     const tableData=table? [{ table,values: tableValues(table) }]:[];
     for(const { table,values } of tableData) {
-      for(let index=0;index<values.x.length;index+=1) {
-        const x=values.x[index]!;
-        const y=values.y[index]!;
+      for(const [x,y] of tablePlotPoints(values)) {
         const screenX=width/2+(x-centerX)*scale;
         const screenY=height/2-(y-centerY)*verticalScale();
         if(screenX<0||screenX>width||screenY<0||screenY>height) {
@@ -2983,9 +3035,9 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
       context.fillStyle=table.color;
       context.strokeStyle=currentThemeColor("text-strong");
       context.lineWidth=1.5;
-      for(let index=0;index<values.x.length;index+=1) {
-        const screenX=width/2+(values.x[index]!-centerX)*scale;
-        const screenY=height/2-(values.y[index]!-centerY)*verticalScale();
+      for(const [x,y] of tablePlotPoints(values)) {
+        const screenX=width/2+(x-centerX)*scale;
+        const screenY=height/2-(y-centerY)*verticalScale();
         if(screenX<-6||screenX>width+6||screenY<-6||screenY>height+6) {
           continue;
         }
@@ -3134,8 +3186,18 @@ function updateScalarResult(expression: Expression): boolean {
     }
   };
   const source = expression.text.trim();
+  if (source.includes("~")) {
+    expression.scalarText = undefined;
+    expression.scalarEvaluator = undefined;
+    if (resultElement) {
+      resultElement.textContent = expression.regressionSummary ?? "";
+      resultElement.title = expression.regressionSummary ? "Least-squares fit (numerical approximation)" : "";
+      resultElement.hidden = !expression.regressionSummary;
+    }
+    return false;
+  }
   const scalarKey = `${source}\u0000${userFunctionSignature()}\u0000${collectionSignature(source)}`;
-  const tokens = source.replace(/([a-z](?:_[a-z0-9]+)?)\.[xy]\b/gi, "$1").match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [];
+  const tokens = freeIdentifiers(source.replace(/([a-z](?:_[a-z0-9]+)?)\.[xy]\b/gi, "$1"));
   if (!source || graphRelation(source) ||
       /^(?:list|derivative|integral|parametric|polar)\s*\(/i.test(source) ||
       tokens.some((name) => ["x", "y", "t"].includes(name.toLowerCase()))) {
@@ -3208,8 +3270,8 @@ function updateScalarResult(expression: Expression): boolean {
 function collectionSignature(source: string): string {
   return hasCollections(source, collectionValues) ||
     getUserFunctionDefinitions().some(({ definition }) => hasCollections(definition.body, collectionValues))
-    ? JSON.stringify([collectionValues, pointValues, sliderValues, tableColumnErrors, graphOptions.statisticsMode]) :
-      JSON.stringify([pointValues, tableColumnErrors, graphOptions.statisticsMode]);
+    ? JSON.stringify([collectionValues, pointValues, sliderValues, tableColumnErrors, graphOptions.statisticsMode, graphOptions.angleMode]) :
+      JSON.stringify([pointValues, tableColumnErrors, graphOptions.statisticsMode, graphOptions.angleMode]);
 }
 
 function getCompiled(expression: Expression): CompiledGraph | undefined {
@@ -3243,6 +3305,21 @@ function getCompiled(expression: Expression): CompiledGraph | undefined {
       }
       updateExpressionErrorDisplay(expression);
       return undefined;
+    }
+    if (expression.text.includes("~")) {
+      expression.compileError = expression.regressionError;
+      if (!expression.compileError && expression.regressionGraph) {
+        try {
+          const source = `y=${expression.regressionGraph}`;
+          expression.compiled = graphMode === "desmos"
+            ? compileFastGraphExpression(source, sliderValues, graphOptions.statisticsMode)
+            : compileGraphExpression(source, sliderValues, graphOptions.statisticsMode);
+        } catch (reason) {
+          expression.compileError = reason instanceof Error ? reason.message : "Could not graph regression.";
+        }
+      }
+      updateExpressionErrorDisplay(expression);
+      return expression.compiled;
     }
     const definition = getVariableDefinition(expression);
     if (definition) {
@@ -3331,7 +3408,7 @@ function getUserFunctionDefinitions(): FunctionState[] {
       "atan", "ln", "log", "exp", "abs", "floor", "ceil", "parametric", "polar",
       "derivative", "integral", "list", "sum", "product", "min", "max", "mean",
       "median", "variance", "stdev", "factorial",
-      "for", ...COLLECTION_FUNCTIONS,
+      "for", "r", "theta", "prod", "int", "derivativeat", ...BUILTIN_NAMES, ...COLLECTION_FUNCTIONS,
     ].includes(name)) {
       state.error = `"${name}" is reserved and cannot be defined as a function.`;
     }
@@ -3396,10 +3473,11 @@ function getVariableDefinition(
     expression.definition = null;
   }
   if (expression.definition) return expression.definition;
+  if (expression.text.includes("~")) return undefined;
   const match = /^\s*([a-z](?:_[a-z0-9]+)?)\s*=\s*(.+)\s*$/i.exec(expression.text);
   if (!match) return undefined;
   const target = match[1]!.toLowerCase();
-  if (["e", "x", "y", "t"].includes(target)) return undefined;
+  if (["e", "x", "y", "t", "r"].includes(target)) return undefined;
   expression.definition = { target, source: match[2]! };
   return expression.definition;
 }
@@ -3407,12 +3485,12 @@ function getVariableDefinition(
 function variableDefinitionSignature(): string {
   return JSON.stringify([
     expressions.map(({ text, hsv, label, labelX, labelY }) => [text, hsv, label, labelX, labelY]),
-    tables.map(({ id, rows, xColumn, yColumn, xFormula, yFormula }) =>
-      [id, rows, xColumn, yColumn, xFormula, yFormula]),
+    tables.map(({ id, rows, xColumn, yColumn, xFormula, yFormula, extraColumns }) =>
+      [id, rows, xColumn, yColumn, xFormula, yFormula, extraColumns]),
     tickers.map(({ action }) => action),
     photos.map((photo) => PHOTO_FIELDS.map(([key]) => photo[key])),
     sliderValues,
-    graphOptions.statisticsMode,
+    graphOptions.statisticsMode, graphOptions.angleMode,
   ]);
 }
 
@@ -3438,7 +3516,7 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
     "atan", "ln", "log", "exp", "abs", "floor", "ceil", "parametric", "polar",
     "derivative", "integral", "list", "sum", "product", "min", "max", "mean",
     "median", "variance", "stdev", "factorial",
-    "for", ...COLLECTION_FUNCTIONS,
+    "for", "r", "theta", "prod", "int", "derivativeat", ...BUILTIN_NAMES, ...COLLECTION_FUNCTIONS,
     ...functionStates.map(({ definition }) => definition.name),
   ]);
   const definitions = expressions
@@ -3453,11 +3531,43 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
       definitions.push(definition);
     }
   }
-  const definitionNames = new Set(definitions.map(({ target }) => target));
   for (const name of Object.keys(tableColumnErrors)) {
     if (Number.isNaN(sliderValues[name])) delete sliderValues[name];
   }
   tableColumnErrors = {};
+  const definitionNames = new Set(definitions.map(({ target }) => target));
+  type RegressionRecord = {
+    expression: Expression;
+    sides?: RegressionSides;
+    parameters: string[];
+    residualName?: string;
+    members: NonNullable<Expression["definition"]>[];
+    error?: string;
+    done?: boolean;
+  };
+  const regressionRecords: RegressionRecord[] = [];
+  const regressionMembers = new Map<NonNullable<Expression["definition"]>, RegressionRecord>();
+  for (const expression of expressions) {
+    if (!expression.text.includes("~")) continue;
+    const record: RegressionRecord = { expression, parameters: [], members: [] };
+    regressionRecords.push(record);
+    try {
+      record.sides = regressionSides(expandFunctions(expression.text));
+      record.parameters = regressionParameters(record.sides!, new Set([...reserved, ...definitionNames]));
+    } catch (reason) {
+      record.error = reason instanceof Error ? reason.message : "Invalid regression.";
+      continue;
+    }
+    const residualName = `e_${regressionRecords.length}`;
+    if (!definitionNames.has(residualName)) record.residualName = residualName;
+    for (const name of [...record.parameters, ...(record.residualName ? [record.residualName] : [])]) {
+      const definition: NonNullable<Expression["definition"]> = { target: name, source: "" };
+      record.members.push(definition);
+      regressionMembers.set(definition, record);
+      definitions.push(definition);
+    }
+  }
+  for (const { target } of regressionMembers.keys()) definitionNames.add(target);
   collectionValues = {};
   pointValues = {};
   const counts = new Map<string, number>();
@@ -3506,7 +3616,7 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
       key: sliderAnalysisKey,
       names: [...new Set(sources.flatMap((source) => {
         const boundNames = new Set([...source.matchAll(/\b([a-z](?:_[a-z0-9]+)?)\s*=\s*\[/gi)].map((match) => match[1]!.toLowerCase()));
-        return (source.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [])
+        return freeIdentifiers(source)
           .filter((name) => !boundNames.has(name.toLowerCase()));
       }).map((name) => name.toLowerCase()).filter((name) =>
         /^[a-z](?:_[a-z0-9]+)?$/.test(name) && !reserved.has(name) &&
@@ -3521,6 +3631,62 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
   const byName = new Map(definitions.map((definition) => [definition.target, definition]));
   const state = new Map<string, "resolving" | "resolved" | "failed">();
   const availableNames = [...new Set([...sliders, ...definitionNames])];
+  const resolveRegression = (record: RegressionRecord): void => {
+    if (record.done) return;
+    record.done = true;
+    const fail = (message: string) => {
+      record.error = message;
+      for (const member of record.members) {
+        member.error = message;
+        state.set(member.target, "failed");
+      }
+    };
+    const preexisting = record.members.find((member) => member.error);
+    if (preexisting) {
+      fail(preexisting.error!);
+      return;
+    }
+    for (const member of record.members) state.set(member.target, "resolving");
+    const sides = record.sides!;
+    const memberNames = new Set(record.members.map(({ target }) => target));
+    const references = [...new Set(freeIdentifiers(`${sides.left}+${sides.right}`)
+      .map((name) => name.toLowerCase()).filter((name) => !memberNames.has(name)))];
+    for (const name of references) {
+      const dependency = byName.get(name);
+      if (!dependency) continue;
+      evaluateDefinition(dependency);
+      if (dependency.error) {
+        fail(dependency.error.startsWith("Circular definition")
+          ? dependency.error : `Cannot fit regression because ${dependency.error}`);
+        return;
+      }
+    }
+    try {
+      const key = JSON.stringify([sides, record.parameters,
+        references.map((name) => [name, collectionValues[name], sliderValues[name]]),
+        graphOptions.statisticsMode, graphOptions.angleMode]);
+      let result = record.expression.regressionCache?.key === key ? record.expression.regressionCache.result : undefined;
+      if (!result) {
+        result = fitCustomRegression(sides, record.parameters, sliderValues, collectionValues, graphOptions.statisticsMode);
+        record.expression.regressionCache = { key, result };
+      }
+      for (const member of record.members) {
+        if (member.target === record.residualName) {
+          collectionValues[member.target] = result.residuals.map((value) => `(${value})`);
+          delete sliderValues[member.target];
+          member.display = `[${result.residuals.map((value) => Number(value.toPrecision(10))).join(", ")}]`;
+        } else {
+          const value = result.parameters[member.target]!;
+          member.value = value;
+          member.display = `≈ ${Number(value.toPrecision(10))}`;
+          sliderValues[member.target] = value;
+        }
+        state.set(member.target, "resolved");
+      }
+    } catch (reason) {
+      fail(reason instanceof Error ? reason.message : "Could not fit regression.");
+    }
+  };
   const evaluateDefinition = (definition: NonNullable<Expression["definition"]>): void => {
     const currentState = state.get(definition.target);
     if (currentState === "resolved" || currentState === "failed") return;
@@ -3531,6 +3697,11 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
     }
     if (definition.error) {
       state.set(definition.target, "failed");
+      return;
+    }
+    const regressionRecord = regressionMembers.get(definition);
+    if (regressionRecord) {
+      resolveRegression(regressionRecord);
       return;
     }
     state.set(definition.target, "resolving");
@@ -3546,7 +3717,7 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
     }
     const boundVariables = new Set([...expanded.matchAll(/\b([a-z](?:_[a-z0-9]+)?)\s*=\s*\[/gi)].map((match) => match[1]!.toLowerCase()));
     const referenceSource = expanded.replace(/([a-z](?:_[a-z0-9]+)?)\.[xy]\b/gi, "$1");
-    const references = (referenceSource.match(/[a-zA-Z]+(?:_[a-zA-Z0-9]+)?/g) ?? [])
+    const references = freeIdentifiers(referenceSource)
       .map((name) => name.toLowerCase());
     if (references.some((name) => ["x", "y", "t"].includes(name) && !boundVariables.has(name))) {
       definition.error = "Variable definitions must not depend on x, y, or t.";
@@ -3575,11 +3746,16 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
     try {
       const column = columns.get(definition);
       if (column) {
-        const oppositeName = tableColumnName(column.table, column.axis === "x" ? "y" : "x");
+        const rowColumns = tableColumns(column.table).filter((entry) =>
+          entry.axis !== column.axis && (entry.axis === "x" || entry.axis === "y"))
+          .map((entry) => ({ target: entry.target, rows: new Map(entry.rows.map((row, index) => [row, index])) }));
         const values = evaluateTableColumn(column, (source, rowIndex) => {
-          const oppositeValues = collectionValues[oppositeName];
-          const rowSource = oppositeValues
-            ? tableRowSource(expandFunctions(source), oppositeName, oppositeValues[rowIndex]!) : expandFunctions(source);
+          let rowSource = expandFunctions(source);
+          for (const entry of rowColumns) {
+            const index = entry.rows.get(column.rows[rowIndex]!);
+            const value = index === undefined ? undefined : collectionValues[entry.target]?.[index];
+            if (value !== undefined) rowSource = tableRowSource(rowSource, entry.target, value);
+          }
           const expandedCell = expandCollections(rowSource,
             (item) => compileExpression(item, sliderValues)(0).value.toNumber(), collectionValues, graphOptions.statisticsMode);
           if (expandedCell.items.length !== 1) throw new Error("Each cell must produce one scalar number.");
@@ -3647,6 +3823,24 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
     }
   };
   for (const definition of definitions) evaluateDefinition(definition);
+  for (const record of regressionRecords) {
+    if (!record.error && !record.members.length) record.error = "Regressions need at least one unknown parameter.";
+    const result = record.error ? undefined : record.expression.regressionCache?.result;
+    const parameters = result ? record.parameters.map((name) =>
+      `${name} = ${Number(result.parameters[name]!.toPrecision(6))}`).join(", ") : "";
+    const summary = result
+      ? `≈ ${parameters} · R² ${Number(result.rSquared.toPrecision(6))}${record.residualName ? ` · residuals ${record.residualName}` : ""}${result.converged ? "" : " · did not fully converge"}`
+      : undefined;
+    const graph = result?.graphSource;
+    const expression = record.expression;
+    if (expression.regressionError !== record.error || expression.regressionSummary !== summary ||
+        expression.regressionGraph !== graph) {
+      expression.regressionError = record.error;
+      expression.regressionSummary = summary;
+      expression.regressionGraph = graph;
+      expression.parsedText = undefined;
+    }
+  }
   for (const definition of definitions) {
     if (definition.error) {
       if (columns.has(definition)) {
@@ -3661,11 +3855,21 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
   }
 
   for (const table of tables) {
-    const tableDefinitions = [...columns].filter(([, column]) => column.table === table).map(([definition]) => definition);
-    const error = [...new Set(tableDefinitions.map((definition) => definition.error).filter(Boolean))].join("\n") || undefined;
-    const x = error ? [] : (collectionValues[tableColumnName(table, "x")] ?? []).map((item) => Number(item.slice(1, -1)));
-    const y = error ? [] : (collectionValues[tableColumnName(table, "y")] ?? []).map((item) => Number(item.slice(1, -1)));
-    const values = { x, y, error };
+    const entries = [...columns].filter(([, column]) => column.table === table);
+    const columnErrors = entries.map(([definition]) => definition.error);
+    const error = [...new Set(columnErrors.filter(Boolean))].join("\n") || undefined;
+    const primaryError = columnErrors.slice(0, 2).filter(Boolean).join("\n") || undefined;
+    const read = (index: number) => columnErrors[index] ? []
+      : (collectionValues[entries[index]![1].target] ?? []).map((item) => Number(item.slice(1, -1)));
+    const x = primaryError ? [] : read(0);
+    const y = primaryError ? [] : read(1);
+    const baseRows = entries[0]![1].rows;
+    const extra = entries.slice(2).map(([, column], index) => {
+      const numbers = read(index + 2);
+      const byRow = new Map(column.rows.map((row, position) => [row, numbers[position]]));
+      return baseRows.map((row) => byRow.get(row));
+    });
+    const values: TableValues = { x, y, extra, columnErrors, primaryError, error };
     const previous = tableValuesCache.get(table);
     if (JSON.stringify(previous) !== JSON.stringify(values)) {
       table.regressionKey = undefined;
@@ -3725,7 +3929,7 @@ function cachedExplicitEvaluator(
   }
   const source = expandFunctions(expression.text);
   const sliderSignature = referencedVariableSignature(source, sliderValues);
-  const key = `${graphMode}:${graphSettings.precisionDigits}\u0000${source}\u0000${sliderSignature}\u0000${collectionSignature(source)}`;
+  const key = `${graphMode}:${graphSettings.precisionDigits}:${getAngleMode()}\u0000${source}\u0000${sliderSignature}\u0000${collectionSignature(source)}`;
   let cache = explicitEvaluationCaches.get(expression);
   if (!cache || cache.key !== key) {
     cache = { key, values: new BoundedCache(MAX_EXPRESSION_SAMPLE_CACHE_SIZE) };
@@ -4716,7 +4920,16 @@ function renderExpressions(): void {
   scheduleProjectSave();
 }
 
-function tableValues(table: DataTable): { x: number[]; y: number[]; error?: string } {
+function* tablePlotPoints(values: TableValues): Generator<[number, number]> {
+  for (const column of [values.y, ...values.extra]) {
+    for (let index = 0; index < values.x.length; index += 1) {
+      const y = column[index];
+      if (y !== undefined) yield [values.x[index]!, y];
+    }
+  }
+}
+
+function tableValues(table: DataTable): TableValues {
   const cached = tableValuesCache.get(table);
   if (cached) return cached;
   synchronizeVariableDefinitions();
@@ -4747,8 +4960,8 @@ function updateTableRegression(table: DataTable): void {
     return;
   }
   const values = tableValues(table);
-  if (values.error) {
-    table.regressionError = values.error;
+  if (values.primaryError) {
+    table.regressionError = values.primaryError;
     return;
   }
   try {
@@ -4776,6 +4989,8 @@ function updateTableRegression(table: DataTable): void {
       table.regression = { kind: "sine", fit: fitSineRegression(values.x, values.y) };
     } else if (table.regressionKind === "tangent") {
       table.regression = { kind: "tangent", fit: fitTangentRegression(values.x, values.y) };
+    } else if (table.regressionKind === "logistic") {
+      table.regression = { kind: "logistic", fit: fitLogistic(values.x, values.y) };
     } else {
       return;
     }
@@ -4802,8 +5017,8 @@ function updateTableRegression(table: DataTable): void {
 }
 
 function tableStatistics(table: DataTable): string {
-  const { x, y, error } = tableValues(table);
-  if (error || y.length === 0) return "Statistics appear when the table has valid data.";
+  const { x, y, primaryError } = tableValues(table);
+  if (primaryError || y.length === 0) return "Statistics appear when the table has valid data.";
   const sorted = [...y].sort((left, right) => left - right);
   const mean = y.reduce((sum, value) => sum + value, 0) / y.length;
   const median = sorted.length % 2 === 0
@@ -4880,6 +5095,10 @@ function evaluateRegression(regression: RegressionFit, x: number): number {
     case "tangent":
       return regression.fit.amplitude *
         Math.tan(regression.fit.frequency * x + regression.fit.phase) + regression.fit.offset;
+    case "logistic": {
+      const { a, b, c } = regression.fit.parameters;
+      return c! / (1 + a! * Math.exp(-b! * x));
+    }
   }
 }
 
@@ -4916,6 +5135,11 @@ function regressionExpression(regression: RegressionFit, digits = 12): string {
       return `${formatRegressionNumber(fit.amplitude, digits)}${trig}(${
         formatRegressionNumber(fit.frequency, digits)
       }x${phaseText})${offsetTerm}`;
+    }
+    case "logistic": {
+      const { a, b, c } = regression.fit.parameters;
+      return `${formatRegressionNumber(c!, digits)}/(1 + ${formatRegressionNumber(a!, digits)}exp(${
+        formatRegressionNumber(-b!, digits)}x))`;
     }
   }
 }
@@ -5009,31 +5233,51 @@ function renderTables(): void {
     const content = document.createElement("div");
     content.className = "data-table-content";
     content.hidden = Boolean(table.collapsed);
+    const grid = document.createElement("div");
+    grid.className = "table-grid";
+    const axes: TableAxis[] = ["x", "y", ...(table.extraColumns ?? []).map((_, index) => index)];
+    grid.style.setProperty("--table-columns", String(axes.length));
+    const axisLabel = (axis: TableAxis) => typeof axis === "number" ? `column ${axis + 3}` : axis;
     const columns = document.createElement("div");
     columns.className = "table-columns";
-    for (const axis of ["x", "y"] as const) {
+    for (const axis of axes) {
       const columnControl = document.createElement("div");
       columnControl.className = "table-column-control";
-      for (const [key, title, maxLength] of [
-        [axis === "x" ? "xColumn" : "yColumn", `${axis} column name`, 40],
-        [axis === "x" ? "xFormula" : "yFormula", `${axis} column formula`, 512],
-      ] as const) {
+      for (const kind of ["name", "formula"] as const) {
         const label = document.createElement("label");
         const field = document.createElement("input");
         field.type = "text";
-        field.maxLength = maxLength;
-        field.value = key.endsWith("Column") ? tableColumnName(table, axis) : table[key] ?? "";
-        field.placeholder = key.endsWith("Formula") ? "Optional formula" : `${axis}_${table.id}`;
+        field.maxLength = kind === "name" ? 40 : 512;
+        field.value = kind === "name" ? tableColumnName(table, axis) : tableColumnFormula(table, axis);
+        field.placeholder = kind === "formula" ? "Optional formula" : tableColumnName(table, axis);
+        const title = typeof axis === "number" ? `${axisLabel(axis)} ${kind}` : `${axis} column ${kind}`;
         field.setAttribute("aria-label", `Table ${tableIndex + 1} ${title}`);
         field.addEventListener("input", () => {
-          table[key] = field.value || undefined;
+          if (typeof axis === "number") table.extraColumns![axis]![kind] = field.value || undefined;
+          else if (kind === "name") table[axis === "x" ? "xColumn" : "yColumn"] = field.value || undefined;
+          else table[axis === "x" ? "xFormula" : "yFormula"] = field.value || undefined;
           invalidateTableData(table);
           renderSliders();
           scheduleDraw();
           scheduleProjectSave();
         });
-        label.append(document.createTextNode(key.endsWith("Column") ? "Name" : "Formula"), field);
+        label.append(document.createTextNode(kind === "name" ? "Name" : "Formula"), field);
         columnControl.append(label);
+      }
+      if (typeof axis === "number") {
+        const removeColumn = document.createElement("button");
+        removeColumn.type = "button";
+        removeColumn.className = "remove-table-column";
+        removeColumn.textContent = "Remove column";
+        removeColumn.setAttribute("aria-label", `Remove table ${tableIndex + 1} column ${axis + 3}`);
+        removeColumn.addEventListener("click", () => {
+          table.extraColumns!.splice(axis, 1);
+          for (const row of table.rows) row.extra?.splice(axis, 1);
+          invalidateTableData(table);
+          renderTables();
+          draw();
+        });
+        columnControl.append(removeColumn);
       }
       columns.append(columnControl);
     }
@@ -5043,58 +5287,55 @@ function renderTables(): void {
     for (const [rowIndex, dataRow] of table.rows.entries()) {
       const row = document.createElement("div");
       row.className = "table-data-row";
-      const xInput = document.createElement("input");
-      xInput.type = "text";
-      xInput.maxLength = 128;
-      xInput.dataset.tableAxis = "x";
-      xInput.dataset.tableRow = String(rowIndex);
-      xInput.value = dataRow.x;
-      xInput.setAttribute("aria-label", `Table ${tableIndex + 1} x value ${rowIndex + 1}`);
-      const yInput = document.createElement("input");
-      yInput.type = "text";
-      yInput.maxLength = 128;
-      yInput.dataset.tableAxis = "y";
-      yInput.dataset.tableRow = String(rowIndex);
-      yInput.value = dataRow.y;
-      yInput.setAttribute("aria-label", `Table ${tableIndex + 1} y value ${rowIndex + 1}`);
+      for (const axis of axes) {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.maxLength = 128;
+        input.dataset.tableAxis = String(axis);
+        input.dataset.tableRow = String(rowIndex);
+        input.value = tableCell(table, rowIndex, axis);
+        input.setAttribute("aria-label", `Table ${tableIndex + 1} ${axisLabel(axis)} value ${rowIndex + 1}`);
+        input.addEventListener("input", () => {
+          if (!tableColumnFormula(table, axis)) {
+            if (typeof axis === "number") {
+              dataRow.extra ??= Array.from({ length: table.extraColumns!.length }, () => "");
+              while (dataRow.extra.length <= axis) dataRow.extra.push("");
+              dataRow.extra[axis] = input.value;
+            } else dataRow[axis] = input.value;
+          }
+          invalidateTableData(table);
+          renderSliders();
+          const values = tableValues(table);
+          updateTableRegression(table);
+          error.textContent = table.regressionError ?? values.error ?? "";
+          updateRegressionSummary(summary, table, tableIndex);
+          stats.textContent = tableStatistics(table);
+          scheduleDraw();
+        });
+        const cell = document.createElement("div");
+        cell.className = "table-cell";
+        const result = document.createElement("output");
+        result.dataset.tableResultAxis = String(axis);
+        result.dataset.tableRow = String(rowIndex);
+        result.setAttribute("aria-label", `Table ${tableIndex + 1} ${axisLabel(axis)} result ${rowIndex + 1}`);
+        cell.append(input, result);
+        row.append(cell);
+      }
       const removeRow = document.createElement("button");
       removeRow.type = "button";
       removeRow.className = "row-remove";
       removeRow.textContent = "×";
       removeRow.setAttribute("aria-label", `Remove table ${tableIndex + 1} row ${rowIndex + 1}`);
-      const updateValues = () => {
-        if (!table.xFormula?.trim()) dataRow.x = xInput.value;
-        if (!table.yFormula?.trim()) dataRow.y = yInput.value;
-        invalidateTableData(table);
-        renderSliders();
-        const values = tableValues(table);
-        updateTableRegression(table);
-        error.textContent = table.regressionError ?? values.error ?? "";
-        updateRegressionSummary(summary, table, tableIndex);
-        stats.textContent = tableStatistics(table);
-        scheduleDraw();
-      };
-      xInput.addEventListener("input", updateValues);
-      yInput.addEventListener("input", updateValues);
       removeRow.addEventListener("click", () => {
         table.rows = table.rows.filter((entry) => entry.id !== dataRow.id);
         invalidateTableData(table);
         renderTables();
         draw();
       });
-      for (const [axis, input] of [["x", xInput], ["y", yInput]] as const) {
-        const cell = document.createElement("div");
-        cell.className = "table-cell";
-        const result = document.createElement("output");
-        result.dataset.tableResultAxis = axis;
-        result.dataset.tableRow = String(rowIndex);
-        result.setAttribute("aria-label", `Table ${tableIndex + 1} ${axis} result ${rowIndex + 1}`);
-        cell.append(input, result);
-        row.append(cell);
-      }
       row.append(removeRow);
       rowList.append(row);
     }
+    grid.append(columns, rowList);
 
     const actions = document.createElement("div");
     actions.className = "table-actions";
@@ -5110,7 +5351,22 @@ function renderTables(): void {
         `[aria-label="Table ${tableIndex + 1} x value ${table.rows.length}"]`,
       )?.focus();
     });
-    actions.append(addRow);
+    const addColumn = document.createElement("button");
+    addColumn.type = "button";
+    addColumn.textContent = "Add column";
+    addColumn.setAttribute("aria-label", `Add column to Table ${tableIndex + 1}`);
+    addColumn.addEventListener("click", () => {
+      table.extraColumns ??= [];
+      const id = Math.max(0, ...table.extraColumns.map((column) => column.id)) + 1;
+      table.extraColumns.push({ id });
+      invalidateTableData(table);
+      renderTables();
+      draw();
+      workspaceList.querySelector<HTMLInputElement>(
+        `[aria-label="Table ${tableIndex + 1} column ${table.extraColumns.length + 2} name"]`,
+      )?.focus();
+    });
+    actions.append(addRow, addColumn);
 
     const regression = document.createElement("label");
     regression.className = "table-regression";
@@ -5127,6 +5383,7 @@ function renderTables(): void {
       ["power", "Power"],
       ["sine", "Sine"],
       ["tangent", "Tangent"],
+      ["logistic", "Logistic"],
     ];
     for (const [value, label] of modelOptions) {
       const option = document.createElement("option");
@@ -5184,7 +5441,7 @@ function renderTables(): void {
     const stats = document.createElement("p");
     stats.className = "table-stats";
     stats.textContent = tableStatistics(table);
-    content.append(columns, rowList, actions, summary, stats, error);
+    content.append(grid, actions, summary, stats, error);
     container.append(heading, content);
     wrapper.append(container);
     tableList.append(wrapper);
@@ -5199,22 +5456,23 @@ function updateTableFormulaDisplay(table: DataTable): void {
   const values = tableValuesCache.get(table);
   if (!container || !values) return;
   const activeRows = new Map(tableColumns(table)[0]!.rows.map((row, index) => [row, index]));
-  for (const axis of ["x", "y"] as const) {
-    const formula = (axis === "x" ? table.xFormula : table.yFormula)?.trim();
+  for (const [columnIndex, column] of tableColumns(table).entries()) {
+    const axis = column.axis;
+    const formula = tableColumnFormula(table, axis);
     const results = new Map([...container.querySelectorAll<HTMLOutputElement>(`[data-table-result-axis="${axis}"]`)]
       .map((result) => [Number(result.dataset.tableRow), result]));
     for (const field of container.querySelectorAll<HTMLInputElement>(`[data-table-axis="${axis}"]`)) {
       const row = Number(field.dataset.tableRow);
       const index = activeRows.get(row);
-      const value = index === undefined ? undefined : values[axis][index];
+      const value = index === undefined ? undefined : (typeof axis === "number" ? values.extra[axis]?.[index] : values[axis][index]);
       field.readOnly = Boolean(formula);
       if (formula) field.value = value === undefined ? "" : Number(value.toPrecision(15)).toString();
-      else field.value = table.rows[row]![axis];
-      field.setAttribute("aria-invalid", String(index !== undefined && Boolean(values.error)));
+      else field.value = tableCell(table, row, axis);
+      field.setAttribute("aria-invalid", String(index !== undefined && Boolean(values.columnErrors[columnIndex])));
       field.title = formula ? `Numerical result from ${formula}` : value === undefined ? "" : `Result: ${value}`;
       const result = results.get(row);
       if (result) {
-        result.hidden = Boolean(formula) || value === undefined || Number(table.rows[row]![axis]) === value;
+        result.hidden = Boolean(formula) || value === undefined || Number(tableCell(table, row, axis)) === value;
         result.textContent = value === undefined ? "" : `≈ ${Number(value.toPrecision(15))}`;
       }
     }
@@ -5704,7 +5962,7 @@ function addTextBlock(): void {
 
 function isRegressionKind(value: string): value is NonNullable<DataTable["regressionKind"]> {
   return value === "logarithmic" || value === "exponential" || value === "power" ||
-    value === "sine" || value === "tangent";
+    value === "sine" || value === "tangent" || value === "logistic";
 }
 
 function addExpression(text = ""): void {
@@ -5771,8 +6029,8 @@ function currentProjectState(): ProjectState {
     expressions: expressions.map((
       { id, text, color, lineWidth, opacity, folderId, hidden, draggable, hsv, label, labelX, labelY },
     ) => ({ id, text, color, lineWidth, opacity, folderId, hidden, draggable, hsv, label, labelX, labelY })),
-    tables: tables.map(({ id, rows, name, collapsed, sourceExpressionId, regressionDegree, regressionKind, color, folderId, xColumn, yColumn, xFormula, yFormula }) =>
-      ({ id, rows, name, collapsed, sourceExpressionId, regressionDegree, regressionKind, color, folderId, xColumn, yColumn, xFormula, yFormula })),
+    tables: tables.map(({ id, rows, name, collapsed, sourceExpressionId, regressionDegree, regressionKind, color, folderId, xColumn, yColumn, xFormula, yFormula, extraColumns }) =>
+      ({ id, rows, name, collapsed, sourceExpressionId, regressionDegree, regressionKind, color, folderId, xColumn, yColumn, xFormula, yFormula, extraColumns })),
     texts: textBlocks.map(({ id, text, folderId }) => ({ id, text, folderId })),
     tickers: tickers.map(({ id, action, name, collapsed, intervalMs, runMode, tickCount, folderId }) =>
       ({ id, action, name, collapsed, intervalMs, runMode, tickCount, folderId })),
@@ -5885,7 +6143,8 @@ function applyProjectState(project: ProjectState, recordHistory = true): void {
   workspaceOrder = project.workspaceOrder.map((item) => ({ ...item }));
   tables = project.tables.map((table) => ({
     id: table.id,
-    rows: table.rows.map((row) => ({ ...row })),
+    rows: table.rows.map((row) => ({ ...row, extra: row.extra ? [...row.extra] : undefined })),
+    extraColumns: table.extraColumns?.map((column) => ({ ...column })),
     name: table.name,
     collapsed: table.collapsed,
     sourceExpressionId: table.sourceExpressionId,
@@ -5913,7 +6172,10 @@ function applyProjectState(project: ProjectState, recordHistory = true): void {
     showLabels: true,
     aspectRatio: 1,
     statisticsMode: "population",
+    angleMode: "radians",
   });
+  graphOptions.angleMode = project.graphOptions?.angleMode ?? "radians";
+  setAngleMode(graphOptions.angleMode);
   updateGraphOptionControls();
   nextId = expressions.reduce((next, expression) => Math.max(next, expression.id + 1), 1);
   nextTableId = tables.reduce((next, table) => Math.max(next, table.id + 1), 1);
@@ -6412,12 +6674,13 @@ function updateGraphOptionControls(): void {
   document.querySelector<HTMLInputElement>("#show-labels-setting")!.checked = graphOptions.showLabels;
   document.querySelector<HTMLSelectElement>("#aspect-ratio-setting")!.value =
     String(graphOptions.aspectRatio);
+  document.querySelector<HTMLSelectElement>("#angle-mode-setting")!.value = graphOptions.angleMode;
   document.querySelector<HTMLSelectElement>("#statistics-mode-setting")!.value = graphOptions.statisticsMode;
   refreshDropdowns();
 }
 updateGraphOptionControls();
 
-const graphOptionInputs: Array<[keyof Omit<GraphOptions, "aspectRatio" | "statisticsMode">, string]> = [
+const graphOptionInputs: Array<[keyof Omit<GraphOptions, "aspectRatio" | "statisticsMode" | "angleMode">, string]> = [
   ["showGrid", "#show-grid-setting"],
   ["showXAxis", "#show-x-axis-setting"],
   ["showYAxis", "#show-y-axis-setting"],
@@ -6446,6 +6709,17 @@ aspectRatioInput.addEventListener("change", () => {
     throw new Error("Unsupported axis scale ratio.");
   }
   graphOptions.aspectRatio = aspectRatio;
+  draw();
+});
+
+document.querySelector<HTMLSelectElement>("#angle-mode-setting")!.addEventListener("change", (event) => {
+  const mode = (event.currentTarget as HTMLSelectElement).value as AngleMode;
+  setAngleMode(mode);
+  graphOptions.angleMode = mode;
+  variableDefinitionCache = undefined;
+  renderSliders();
+  renderTables();
+  renderExpressions();
   draw();
 });
 

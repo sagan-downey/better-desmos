@@ -51,4 +51,53 @@ describe("formula table columns", () => {
     const large = { id: 1, rows: Array.from({ length: 5000 }, (_, id) => ({ id: id + 1, x: String(id), y: String(id * 2) })) };
     expect(evaluateTableColumn(tableColumns(large)[0]!, Number)).toHaveLength(5000);
   });
+  it("adds stable, valid extra-column names and compact lists for nonblank cells", () => {
+    const expanded: FormulaTable = { id: 2, rows: [
+      { id: 1, x: "1", y: "2", extra: ["3", ""] },
+      { id: 2, x: "2", y: "4", extra: ["", "8"] },
+      { id: 3, x: "", y: "" },
+    ], extraColumns: [{ id: 1 }, { id: 12 }] };
+    const columns = tableColumns(expanded);
+    expect(columns.map(({ target }) => target)).toEqual(["x_2", "y_2", "c_t2c1", "c_t2c12"]);
+    expect(columns[2]!.rows).toEqual([0]);
+    expect(columns[3]!.rows).toEqual([1]);
+    expect(evaluateTableColumn(columns[2]!, Number)).toEqual(["(3)"]);
+    for (const column of columns) expect(() => validateTableColumnName(column.target)).not.toThrow();
+    expect(tableColumnName({ ...expanded, id: 21 }, 0)).not.toBe(tableColumnName(expanded, 0));
+    expect(tableColumnName({ ...expanded, extraColumns: [{ id: 12 }, { id: 1 }] }, 0)).toBe("c_t2c12");
+    expect(tableColumnName({ ...expanded, extraColumns: [{ id: 1, name: " W_data " }] }, 0)).toBe("w_data");
+  });
+  it("evaluates extra formulas with both row aliases and preserves stored manual cells", () => {
+    const expanded: FormulaTable = { id: 2, xColumn: "u", yColumn: "v", rows: [
+      { id: 1, x: "1", y: "2", extra: ["99", "x+y", ""] },
+      { id: 2, x: "3", y: "4", extra: ["", "", "x*y"] },
+      { id: 3, x: "", y: "", extra: ["", "", ""] },
+    ], extraColumns: [{ id: 1, formula: "x^2+y" }, { id: 2 }, { id: 3 }] };
+    const columns = tableColumns(expanded);
+    const evaluate = (source: string) => compileExpression(source)(0).value.toNumber();
+    const x = evaluateTableColumn(columns[0]!, evaluate);
+    const y = evaluateTableColumn(columns[1]!, evaluate);
+    const calculate = (column: typeof columns[number]) => evaluateTableColumn(column, (source, index) => {
+      const row = column.rows[index]!;
+      return evaluate(tableRowSource(tableRowSource(source, "u", x[row]!), "v", y[row]!));
+    });
+    expect(columns[2]!.sources).toEqual(["u^2+v", "u^2+v"]);
+    expect(calculate(columns[2]!)).toEqual(["(3)", "(13)"]);
+    expect(calculate(columns[3]!)).toEqual(["(3)"]);
+    expect(calculate(columns[4]!)).toEqual(["(12)"]);
+    expect(expanded.rows[0]!.extra![0]).toBe("99");
+    expect(tableColumns({ ...expanded, extraColumns: [{ id: 1 }] })[2]!.sources).toEqual(["99"]);
+  });
+  it("ignores blank extra cells but reports invalid nonblank extra input", () => {
+    const expanded: FormulaTable = { id: 1, rows: [
+      { id: 1, x: "1", y: "2" }, { id: 2, x: "2", y: "3", extra: ["sqrt(-1)"] },
+    ], extraColumns: [{ id: 1 }] };
+    const column = tableColumns(expanded)[2]!;
+    expect(column.rows).toEqual([1]);
+    expect(() => evaluateTableColumn(column, (text) => compileExpression(text)(0).value.toNumber()))
+      .toThrow(/Row 2, c_t1c1/);
+    expect(tableColumns({ ...expanded, rows: [{ id: 1, x: "", y: "" }] })[2]!.rows).toEqual([]);
+    expect(tableColumns({ ...expanded, rows: [{ id: 1, x: "", y: "", extra: ["1"] }] })[0]!.sources).toEqual([""]);
+  });
+
 });

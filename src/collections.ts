@@ -63,10 +63,10 @@ export function expandCollections(
     return number(expanded.items[0]!);
   };
   const combine = (left: CollectionExpansion, right: CollectionExpansion): CollectionExpansion => {
-    if (left.list && right.list && left.items.length !== right.items.length) {
-      throw new Error("Lists used together must have the same length.");
-    }
-    const size = left.list ? left.items.length : right.list ? right.items.length : 1;
+    // Like Desmos, lists of different lengths combine up to the shortest length.
+    const size = left.list && right.list
+      ? Math.min(left.items.length, right.items.length)
+      : left.list ? left.items.length : right.list ? right.items.length : 1;
     return bounded(Array.from({ length: size }, (_, index) =>
       `${left.items[left.list ? index : 0] ?? ""}${right.items[right.list ? index : 0] ?? ""}`),
     left.list || right.list);

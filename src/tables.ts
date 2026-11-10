@@ -1,13 +1,14 @@
 export interface FormulaTable {
   id: number;
-  rows: Array<{ id: number; x: string; y: string }>;
+  rows: Array<{ id: number; x: string; y: string; extra?: string[] }>;
   xColumn?: string;
   yColumn?: string;
   xFormula?: string;
   yFormula?: string;
+  extraColumns?: Array<{ id: number; name?: string; formula?: string }>;
 }
 
-export type TableAxis = "x" | "y";
+export type TableAxis = "x" | "y" | number;
 export interface TableColumn {
   table: FormulaTable;
   axis: TableAxis;
@@ -17,18 +18,37 @@ export interface TableColumn {
 }
 
 export function tableColumnName(table: FormulaTable, axis: TableAxis): string {
+  if (typeof axis === "number") {
+    const column = table.extraColumns![axis]!;
+    return column.name?.trim().toLowerCase() || `c_t${table.id}c${column.id}`;
+  }
   return (axis === "x" ? table.xColumn : table.yColumn)?.trim().toLowerCase() || `${axis}_${table.id}`;
 }
 
+export function tableColumnFormula(table: FormulaTable, axis: TableAxis): string {
+  return (typeof axis === "number" ? table.extraColumns?.[axis]?.formula
+    : axis === "x" ? table.xFormula : table.yFormula)?.trim() || "";
+}
+
+export function tableCell(table: FormulaTable, row: number, axis: TableAxis): string {
+  return typeof axis === "number" ? table.rows[row]!.extra?.[axis] ?? "" : table.rows[row]![axis];
+}
+
 export function tableColumns(table: FormulaTable): TableColumn[] {
-  const rows = table.rows.flatMap((row, index) => row.x.trim() || row.y.trim() ? [index] : []);
-  return (["x", "y"] as const).map((axis) => ({
-    table, axis, rows, target: tableColumnName(table, axis),
-    sources: rows.map((index) => ((axis === "x" ? table.xFormula : table.yFormula)?.trim() || table.rows[index]![axis].trim())
-      .replace(/[a-z]+(?:_[a-z0-9]+)?(?:\.[xy])?/gi, (token) =>
-        token.toLowerCase() === "x" || token.toLowerCase() === "y"
-          ? tableColumnName(table, token.toLowerCase() === "x" ? "x" : "y") : token)),
-  }));
+  const activeRows = table.rows.flatMap((row, index) =>
+    row.x.trim() || row.y.trim() || row.extra?.some((cell) => cell.trim()) ? [index] : []);
+  return (["x", "y", ...(table.extraColumns ?? []).map((_, index) => index)] as TableAxis[]).map((axis) => {
+    const formula = tableColumnFormula(table, axis);
+    const rows = typeof axis === "number" && !formula
+      ? activeRows.filter((index) => tableCell(table, index, axis).trim()) : activeRows;
+    return {
+      table, axis, rows, target: tableColumnName(table, axis),
+      sources: rows.map((index) => (formula || tableCell(table, index, axis).trim())
+        .replace(/[a-z]+(?:_[a-z0-9]+)?(?:\.[xy])?/gi, (token) =>
+          token.toLowerCase() === "x" || token.toLowerCase() === "y"
+            ? tableColumnName(table, token.toLowerCase() === "x" ? "x" : "y") : token)),
+    };
+  });
 }
 
 export function tableRowSource(source: string, columnName: string, value: string): string {

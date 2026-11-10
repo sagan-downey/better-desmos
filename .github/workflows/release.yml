@@ -27,7 +27,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$GITHUB_REF_NAME" = "v3.3.0" ]; then
+          if [ "$GITHUB_REF_NAME" = "v3.4.0" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
+              --title "Better Desmos 3.4 — Desmos math syntax, regressions, and tables" \
+              --notes-file - <<'NOTES'
+          ## What's new
+
+          - **Core math syntax:** `|x|`, `x!`, multi-argument functions such as `nCr`, degree/radian angle mode, `d/dx`, `f'`/`f''`, `int_{a}^{b} … dx`, `sum_`/`prod_`, and `θ`.
+          - **Curves:** Native `(f(t),g(t))` parametric curves with `{a<=t<=b}` ranges and `r=f(θ)` polar curves.
+          - **Custom regressions:** `y_1 ~ m x_1 + b` fits any model with Levenberg–Marquardt least squares, shows parameters and R², and exposes residuals as `e_n`.
+          - **Logistic regression:** New table regression model `c/(1+a·exp(-bx))`.
+          - **Multi-column tables:** Add extra columns with names and formulas; each plots against the first column.
+          - **List lengths:** Combining lists of different lengths uses the shortest length, as in Desmos.
+          - **Version 3.4:** Calculator badge, accessible brand, page title, and package metadata are updated.
+
+          ## Download and run
+
+          Download **better-desmos.html** below and open it in your browser. It is self-contained and needs no installation or server.
+
+          ## Validation
+
+          All 131 tests, TypeScript checks, production build, and whitespace checks passed. Regression fits are numerical approximations; see the README for supported syntax and limitations.
+          NOTES
+          elif [ "$GITHUB_REF_NAME" = "v3.3.0" ]; then
             gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
               --title "Better Desmos 3.3 — Theme-aware dropdown menus" \
               --notes-file - <<'NOTES'

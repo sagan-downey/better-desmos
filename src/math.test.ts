@@ -16,6 +16,9 @@ import {
   fitTangentRegression,
   FAST_MODE_PRECISION_DIGITS,
   getPrecisionDigits,
+  getAngleMode,
+  setAngleMode,
+  freeIdentifiers,
   setPrecisionDigits,
   expandUserFunctions,
   UndefinedPointError,
@@ -665,5 +668,138 @@ describe("compileExpression", () => {
       expect(compile("x^2 + y^2 = 4").kind).toBe("implicit");
       expect(compile("x*y=y^2").kind).toBe("implicit");
     }
+  });
+});
+
+describe("Phase 1 Desmos syntax", () => {
+  it("supports exact combinatorics, integer arithmetic and rounding", () => {
+    for (const [source, expected] of [["5!", 120], ["nCr(5,2)", 10], ["nPr(5,2)", 20], ["gcd(-18,24)", 6], ["lcm(6,8)", 24], ["mod(-7,3)", 2], ["mod(7,-3)", -2], ["mod(7/2,2/3)", 1 / 6], ["round(1.235,2)", 1.24], ["round(-1.5)", -1], ["sgn(-3)", -1], ["log_2(8)", 3], ["log_{10}(100)", 2]] as const) {
+      const value = compileExpression(source)(0);
+      expect(value.value.toNumber(), source).toBeCloseTo(expected, 12);
+      expect(value.exact, source).toBe(true);
+    }
+  });
+
+  it("supports trig aliases, reciprocal and hyperbolic functions in both engines", () => {
+    for (const compile of [compileGraphExpression, compileFastGraphExpression]) {
+      for (const [source, expected] of [["sec(0)", 1], ["csc(pi/2)", 1], ["cot(pi/4)", 1], ["arcsin(1)", Math.PI / 2], ["arccos(0)", Math.PI / 2], ["arctan(1,0)", Math.PI / 2], ["arcsec(2)", Math.PI / 3], ["arccsc(2)", Math.PI / 6], ["arccot(0)", Math.PI / 2], ["sinh(0)", 0], ["cosh(0)", 1], ["tanh(0)", 0], ["sech(0)", 1], ["csch(1)", 1 / Math.sinh(1)], ["coth(1)", 1 / Math.tanh(1)], ["arcsinh(1)", Math.asinh(1)], ["arccosh(2)", Math.acosh(2)], ["arctanh(0.5)", Math.atanh(0.5)], ["arcsech(0.5)", Math.acosh(2)], ["arccsch(1)", Math.asinh(1)], ["arccoth(2)", Math.atanh(0.5)]] as const) {
+        const graph = compile(source);
+        if (graph.kind !== "explicit") throw new Error("Expected explicit graph");
+        const result = graph.evaluate(0);
+        expect(typeof result === "number" ? result : result.value.toNumber(), source).toBeCloseTo(expected, 8);
+      }
+    }
+  });
+
+  it("reports invalid domains and arities explicitly", () => {
+    for (const source of ["gcd(1.5,2)", "gcd(1.0000000000000001,2)", "(-1)!", "(1.5)!", "arcsin(2)", "arctan(0,0)", "arccosh(0)", "arctanh(1)", "arcsech(0)", "arccoth(1)", "csch(0)", "sec(pi/2)", "csc(0)", "cot(pi)", "tan(pi/2)", "mod(1,0)", "log_1(2)", "round(1,101)", "nCr(2,3)", "sin(1,2)"]) {
+      for (const compile of [compileGraphExpression, compileFastGraphExpression]) expect(() => {
+        const graph = compile(source);
+        if (graph.kind === "explicit") graph.evaluate(0);
+      }, source).toThrow(Error);
+    }
+  });
+
+  it("parses absolute values including parenthesized nesting", () => {
+    expect(compileExpression("|x-3|")(1).value.toNumber()).toBe(2);
+    expect(compileExpression("|x-(|x-3|)|")(1).value.toNumber()).toBe(1);
+    expect(() => compileExpression("|x-3")(1)).toThrow(/bars/);
+  });
+
+  it("invalidates constant caches when angle mode changes", () => {
+    const precise = compileExpression("sin(90)");
+    const fast = compileFastGraphExpression("sin(90)");
+    try {
+      setAngleMode("degrees");
+      expect(getAngleMode()).toBe("degrees");
+      expect(precise(0).value.toNumber()).toBe(1);
+      if (fast.kind !== "explicit") throw Error("Expected explicit");
+      expect(fast.evaluate(0)).toBe(1);
+      expect(compileExpression("arcsin(1)")(0).value.toNumber()).toBe(90);
+      expect(compileExpression("sinh(1)")(0).value.toNumber()).toBeCloseTo(Math.sinh(1));
+      setAngleMode("radians");
+      expect(precise(0).value.toNumber()).toBeCloseTo(Math.sin(90));
+      expect(fast.evaluate(0)).toBeCloseTo(Math.sin(90));
+    } finally { setAngleMode("radians"); }
+  });
+
+  it("evaluates bound sums and products exactly with nesting and scope restoration", () => {
+    for (const source of ["sum_{n=1}^{4} n", "Σ_{n=1}^{4} n", "∑_{n=1}^{4} n"]) {
+      const result = compileExpression(source)(0);
+      expect(result.value.toNumber()).toBe(10); expect(result.exact).toBe(true);
+      for (const compile of [compileGraphExpression, compileFastGraphExpression]) {
+        const graph = compile(source); if (graph.kind !== "explicit") throw Error("Expected explicit");
+        const output = graph.evaluate(0); expect(typeof output === "number" ? output : output.value.toNumber()).toBe(10);
+      }
+    }
+    expect(compileExpression("prod_{n=1}^{4} n")(0).value.toNumber()).toBe(24);
+    expect(compileExpression("Π_{n=1}^{4} n")(0).value.toNumber()).toBe(24);
+    expect(compileExpression("sum_{n=1}^{2} (sum_{n=1}^{2} n)+n", { n: 9 })(0).value.toNumber()).toBe(15);
+    expect(() => compileExpression("sum_{n=1.5}^{4} n")(0)).toThrow(/integer/);
+    expect(() => compileExpression("sum_{n=1}^{10001} n")(0)).toThrow(/10000/);
+  });
+
+  it("evaluates derivatives, integrals and user-function primes approximately", () => {
+    for (const compile of [compileGraphExpression, compileFastGraphExpression]) {
+      for (const [source, at, expected] of [["d/dx(x^3)", 2, 12], ["int_{0}^{1} x^2 dx", 0, 1 / 3]] as const) {
+        const graph = compile(source); if (graph.kind !== "explicit") throw Error("Expected explicit");
+        const result = graph.evaluate(at); expect(typeof result === "number" ? result : result.value.toNumber()).toBeCloseTo(expected, 8);
+      }
+    }
+    const derivative = compileExpression("d/dx(x^3)")(2);
+    expect(derivative.value.toNumber()).toBeCloseTo(12, 10); expect(derivative.exact).toBe(false);
+    expect(compileExpression("d/dt(t^3)")(2).value.toNumber()).toBeCloseTo(12, 10);
+    expect(compileExpression("d/dt(t^3)", { t: 2 })(0).value.toNumber()).toBeCloseTo(12, 10);
+    expect(compileExpression("d/dt_1(t_1^3)", { t_1: 2 })(0).value.toNumber()).toBeCloseTo(12, 10);
+    for (const source of ["int_{0}^{1} x^2 dx", "∫_{0}^{1} t^2 dt"]) {
+      const result = compileExpression(source)(0); expect(result.value.toNumber()).toBeCloseTo(1 / 3, 10); expect(result.exact).toBe(false);
+    }
+    const definitions = [{ name: "f", parameter: "x", body: "x^3" }];
+    expect(compileExpression(expandUserFunctions("f'(x)", definitions))(2).value.toNumber()).toBeCloseTo(12, 9);
+    expect(compileExpression(expandUserFunctions("f''(x)", definitions))(2).value.toNumber()).toBeCloseTo(12, 7);
+    expect(() => expandUserFunctions("g'(x)", definitions)).toThrow(/user-defined/);
+    expect(compileExpression(expandUserFunctions("f(2)", [{ name: "f", parameter: "t", body: "int_{0}^{1} t^2 dt" }]))(0).value.toNumber()).toBeCloseTo(1 / 3, 10);
+    expect(compileExpression(expandUserFunctions("f(n)", [{ name: "f", parameter: "x", body: "sum_{n=1}^{3} x*n" }]), { n: 2 })(0).value.toNumber()).toBe(12);
+    expect(compileExpression(expandUserFunctions("f(2)", [{ name: "f", parameter: "n", body: "sum_{n=1}^{3} n+n" }]))(0).value.toNumber()).toBe(8);
+    expect(compileExpression("int_{1}^{0} x^2 dx")(0).value.toNumber()).toBeCloseTo(-1 / 3, 10);
+    expect(() => compileExpression("int_{0}^{1} 1/x dx")(0)).toThrow(/zero/);
+  });
+
+  it("dispatches native parameterized curves with parameter range restrictions", () => {
+    for (const compile of [compileGraphExpression, compileFastGraphExpression]) {
+      const graph = compile("(t,t^2){-2<=t<=3}");
+      if (graph.kind !== "parametric") throw Error("Expected parametric");
+      expect([graph.start, graph.end]).toEqual([-2, 3]); expect(graph.evaluate(2)).toEqual([2, 4]);
+      const defaultGraph = compile("(t,t^2)");
+      if (defaultGraph.kind !== "parametric") throw Error("Expected parametric");
+      expect([defaultGraph.start, defaultGraph.end]).toEqual([0, 1]);
+      const polar = compile("r=2cos(θ){0≤θ≤pi}");
+      if (polar.kind !== "parametric") throw Error("Expected polar");
+      expect(polar.start).toBe(0); expect(polar.end).toBeCloseTo(Math.PI);
+      expect(polar.evaluate(0)).toEqual([2, 0]);
+      expect(compile("r={theta<1: 2, 3}").kind).toBe("parametric");
+      expect(compile("(log_2(8),0)").kind).toBe("point");
+      expect(compile("(int_{0}^{1} t dt,2)").kind).toBe("point");
+      expect(() => compile("r<cos(theta)")).toThrow(/Polar inequalities/);
+    }
+    try {
+      setAngleMode("degrees");
+      const graph = compileGraphExpression("r=2"); if (graph.kind !== "parametric") throw Error("Expected polar");
+      expect(graph.end).toBe(2160); expect(graph.evaluate(90)[1]).toBeCloseTo(2);
+    } finally { setAngleMode("radians"); }
+  });
+
+  it("keeps legacy graph forms and discovers only free identifiers", () => {
+    for (const source of ["sum(1,2,3)", "product(2,3)", "derivative(x^2)", "integral(x^2,0,x)"]) expect(compileGraphExpression(source).kind).toBe("explicit");
+    for (const source of ["parametric(t,t^2,0,2)", "polar(2,0,2pi)"]) expect(compileGraphExpression(source).kind).toBe("parametric");
+    expect(freeIdentifiers("Σ_{n=a}^{b} n*c").sort()).toEqual(["a", "b", "c"]);
+    expect(freeIdentifiers("y=sum_{n=a}^{b} n*c+n").sort()).toEqual(["a", "b", "c", "n", "y"]);
+    expect(freeIdentifiers("sum_{n=a}^{b} n*c").sort()).toEqual(["a", "b", "c"]);
+    expect(freeIdentifiers("int_{a}^{b} t*c dt").sort()).toEqual(["a", "b", "c"]);
+    expect(freeIdentifiers("d/dt(t^2+a)").sort()).toEqual(["a", "t"]);
+    expect(freeIdentifiers("d/dx(x^3)")).toEqual(["x"]);
+    expect(freeIdentifiers("log_b(x)+log_{c}(y)").sort()).toEqual(["b", "c", "x", "y"]);
+    expect(freeIdentifiers("r=cos(θ)+a")).toEqual(["a"]);
+    expect(freeIdentifiers("n^2 for n=[1,2]")).not.toContain("n");
   });
 });

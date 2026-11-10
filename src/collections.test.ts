@@ -10,7 +10,8 @@ describe("collections and multi-input functions", () => {
   it("broadcasts scalars and zips equal-length lists through arithmetic and calls", () => {
     expect(numbers("2[1,2,3]+[4,5,6]")).toEqual([6, 9, 12]);
     expect(numbers("sin([0,pi/2,pi])").slice(0, 2)).toEqual([0, 1]);
-    expect(() => numbers("[1,2]+[1,2,3]")).toThrow(/same length/);
+    expect(numbers("[1,2]+[1,2,3]")).toEqual([2, 4]);
+    expect(numbers("[1,2,3]*[2]")).toEqual([2]);
     expect(numbers("[]+1")).toEqual([]);
     expect(numbers("[2]+1")).toEqual([3]);
   });
