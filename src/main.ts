@@ -42,6 +42,7 @@ import {
   type CustomRegressionResult, type RegressionSides,
 } from "./customRegression";
 import { fitLogistic, type FitResult } from "./regression";
+import { filterFunctionReference } from "./functionReference";
 import { imageExportSize } from "./image-export";
 import { refreshDropdowns } from "./dropdowns";
 import { tableColumns, tableColumnName, tableColumnFormula, tableCell, tableRowSource, validateTableColumnName, evaluateTableColumn, type TableColumn, type TableAxis } from "./tables";
@@ -964,7 +965,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 3.4 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">3.4</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 3.5 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">3.5</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -1135,6 +1136,14 @@ app.innerHTML = `
         <p>Maximum grid spacing for equations such as <code>x^2 + y^2 = 4</code>. Smaller spacing may show more detail but takes longer.</p>
       </div>
     </details>
+    <section class="settings-section function-reference" aria-labelledby="function-reference-heading">
+      <h3 id="function-reference-heading">Functions</h3>
+      <div class="setting-control">
+        <label for="function-reference-search">Search functions</label>
+        <input id="function-reference-search" type="search" placeholder="e.g. mean, floor, log" autocomplete="off" spellcheck="false" aria-controls="function-reference-list" />
+      </div>
+      <div id="function-reference-list" class="function-reference-list" aria-live="polite"></div>
+    </section>
   </dialog>
   <dialog class="settings-dialog save-dialog" id="save-dialog" aria-labelledby="save-dialog-title">
     <form id="save-dialog-form">
@@ -6532,6 +6541,37 @@ document.querySelector("#close-settings")!.addEventListener("click", () => setti
 settingsDialog.addEventListener("keydown", (event) => {
   if (event.key === "Escape") settingsDialog.close();
 });
+
+const functionReferenceSearch = document.querySelector<HTMLInputElement>("#function-reference-search")!;
+const functionReferenceList = document.querySelector<HTMLDivElement>("#function-reference-list")!;
+function renderFunctionReference(): void {
+  const categories = filterFunctionReference(functionReferenceSearch.value);
+  functionReferenceList.replaceChildren();
+  if (!categories.length) {
+    const empty = document.createElement("p");
+    empty.className = "function-reference-empty";
+    empty.textContent = "No functions match your search.";
+    functionReferenceList.append(empty);
+    return;
+  }
+  for (const category of categories) {
+    const heading = document.createElement("h3");
+    heading.textContent = category.title;
+    const list = document.createElement("dl");
+    for (const entry of category.entries) {
+      const term = document.createElement("dt");
+      const code = document.createElement("code");
+      code.textContent = entry.syntax;
+      term.append(code);
+      const detail = document.createElement("dd");
+      detail.textContent = entry.aliases?.length ? `${entry.description} Also: ${entry.aliases.join(", ")}.` : entry.description;
+      list.append(term, detail);
+    }
+    functionReferenceList.append(heading, list);
+  }
+}
+functionReferenceSearch.addEventListener("input", renderFunctionReference);
+renderFunctionReference();
 
 const colorSchemeSelect = document.querySelector<HTMLSelectElement>("#color-scheme-setting")!;
 const customThemeForm = document.querySelector<HTMLFormElement>("#custom-theme-form")!;

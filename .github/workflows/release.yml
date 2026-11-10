@@ -27,7 +27,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$GITHUB_REF_NAME" = "v3.4.0" ]; then
+          if [ "$GITHUB_REF_NAME" = "v3.5.0" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
+              --title "Better Desmos 3.5 — Functions list in Settings" \
+              --notes-file - <<'NOTES'
+          ## What's new
+
+          - **Functions list:** The bottom of Settings now lists every supported function, such as `mean(L)`, `floor(x)`, `nCr(n, r)`, and `d/dx(f)`, grouped by category with syntax and a short description.
+          - **Search:** Filter the list by name, alias (for example `sgn` finds `sign`), or description.
+          - **Always complete:** A test keeps the list in sync with every function the parser accepts.
+          - **Version 3.5:** Calculator badge, accessible brand, page title, and package metadata are updated.
+
+          ## Download and run
+
+          Download **better-desmos.html** below and open it in your browser. It is self-contained and needs no installation or server.
+
+          ## Validation
+
+          All 133 tests, TypeScript checks, production build, and whitespace checks passed. Mathematical behavior is unchanged.
+          NOTES
+          elif [ "$GITHUB_REF_NAME" = "v3.4.0" ]; then
             gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
               --title "Better Desmos 3.4 — Desmos math syntax, regressions, and tables" \
               --notes-file - <<'NOTES'
