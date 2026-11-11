@@ -27,7 +27,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$GITHUB_REF_NAME" = "v4.0.0" ]; then
+          if [ "$GITHUB_REF_NAME" = "v4.1.0" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
+              --title "Better Desmos 4.1 — Visual math editing and expanded audio trace" \
+              --notes-file - <<'NOTES'
+          ## What's new
+
+          - **Visual math editing:** Cursor-editable fractions, powers, roots, subscripts, and calculus with structured keypad insertion, keyboard navigation, and a text-syntax alternative.
+          - **Safe notation conversion:** Visual editing feeds the existing parsed evaluator. Unsupported notation, incomplete placeholders, and expression-length limits report explicit errors without silently replacing the last applied expression.
+          - **Implicit and polygon audio:** Numerically refined viewport contours with separately selectable branches, including disconnected curves and polygon/inequality boundaries.
+          - **Shaded-region sound:** Sweep sampled inequality and polygon interiors using up to five simultaneous, volume-bounded tones.
+          - **Offline and static:** Math-editor fonts are embedded in the standalone file. Network font loading, editor sounds, floating keyboard, and editor animations are disabled.
+          - **Persistence and reliability:** Existing project formats, text syntax, save/reload, and Undo/Redo are preserved. Playback cancellation covers Stop, closing, branch changes, and pending audio startup.
+
+          ## Download and run
+
+          Download **better-desmos.html** below and open it in your browser. The desktop 2D calculator is self-contained and requires no installation, server, or CDN.
+
+          ## Validation and limitations
+
+          All 274 tests, TypeScript checks, production build, and whitespace checks passed. Isolated browser checks covered structured editing, stored fraction reopening, save/reload, Undo/Redo, multiple audio branches, region chords, playback cancellation, and embedded fonts with external requests blocked.
+
+          This release does not certify exhaustive Desmos parity or superior accuracy/performance. Contours use a 96 × 96 grid and region audio uses a 201 × 128 grid; narrow features, isolated points, and tangent roots can be missed. Numerical, complex/list, and notation limits remain documented in the README.
+          NOTES
+          elif [ "$GITHUB_REF_NAME" = "v4.0.0" ]; then
             gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
               --title "Better Desmos 4.0 — Expanded math and graphing tools" \
               --notes-file - <<'NOTES'

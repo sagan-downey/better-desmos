@@ -1,7 +1,7 @@
 {
   "name": "better-desmos",
   "private": true,
-  "version": "4.0.0",
+  "version": "4.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "decimal.js": "^10.6.0",
-    "jstat": "^1.9.6"
+    "jstat": "^1.9.6",
+    "mathlive": "^0.111.4"
   },
   "devDependencies": {
     "typescript": "^5.8.3",

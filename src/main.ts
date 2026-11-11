@@ -56,8 +56,10 @@ import { axisStep, fitViewportBounds } from "./viewport";
 import { compileComplexExpression,complexExpressionIsReal,expressionMathML } from "./math";
 import { COMPLEX_FUNCTIONS, formatComplex, type Complex } from "./complex";
 import { AudioTracePlayer,tracePoints,type TracePoint } from "./audioTrace";
-import { bracketedRoot,bracketedExtremum,segmentCrossings } from "./graphAnalysis";
+import { bracketedRoot,bracketedExtremum,segmentCrossings,polygonSignedDistance } from "./graphAnalysis";
+import { traceContour,tracePolyline,traceRegion } from "./regionTrace";
 import { numericSource } from "./numericSource";
+import { installVisualMath } from "./visualMath";
 import { installWorkspaceResize } from "./workspaceResize";
 import { MAX_TABLE_ROWS, nextTableCell, spreadsheetCells, tableAxisAt, validateSpreadsheetPaste } from "./spreadsheet";
 import { imageExportSize } from "./image-export";
@@ -1026,7 +1028,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 4.0 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">4.0</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 4.1 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">4.1</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -1100,6 +1102,9 @@ app.innerHTML = `
     <div class="settings-dialog-heading"><h2 id="audio-trace-title">Audio trace</h2><button type="button" id="close-audio-trace" aria-label="Close audio trace">×</button></div>
     <p>Higher y is higher pitch; x pans left to right. Negative y uses a triangle tone. Undefined samples are silent. Arrow keys trace individual points; Home/End go to the bounds.</p>
     <label class="setting-control">Curve<select id="audio-trace-expression" aria-label="Audio trace curve"></select></label>
+    <label class="setting-control" hidden>Trace<select id="audio-trace-mode" aria-label="Audio trace mode"><option value="boundary">Boundary</option><option value="region">Shaded region</option></select></label>
+    <label class="setting-control" hidden>Branch<select id="audio-trace-branch" aria-label="Audio trace branch"></select></label>
+    <p id="audio-trace-limits"></p>
     <div class="theme-actions"><button type="button" id="play-audio-trace">Play viewport</button><button type="button" id="stop-audio-trace">Stop</button><button type="button" id="previous-audio-point">Previous point</button><button type="button" id="next-audio-point">Next point</button></div>
     <input id="audio-trace-position" type="range" min="0" max="200" value="0" aria-label="Audio trace position" />
     <output id="audio-trace-result" role="status" aria-live="polite"></output>
@@ -1107,8 +1112,12 @@ app.innerHTML = `
   <dialog class="settings-dialog" id="math-keypad-dialog" aria-labelledby="math-keypad-title">
     <div class="settings-dialog-heading"><h2 id="math-keypad-title">Math keypad</h2><button type="button" id="close-math-keypad" aria-label="Close math keypad">×</button></div>
     <label class="setting-control">Expression<select id="math-keypad-expression" aria-label="Keypad expression"></select></label>
+    <div id="visual-math-editor" class="visual-math-editor"></div>
+    <p id="visual-math-help">Click inside fractions, powers, and roots to edit them. Arrow keys move the math cursor; Tab moves between placeholders. Text syntax below remains available.</p>
+    <p id="visual-math-error" class="expression-error" role="status"></p>
+    <label class="keypad-source-label" for="math-keypad-input">Text syntax</label>
     <input id="math-keypad-input" type="text" maxlength="512" aria-label="Formatted expression editor" autocomplete="off" />
-    <div id="math-keypad-preview" class="math-preview" aria-label="Formatted expression"></div>
+    <details class="keypad-preview-details"><summary>Read-only preview</summary><div id="math-keypad-preview" class="math-preview" aria-label="Formatted expression"></div></details>
     <div id="math-keypad-keys" class="math-keypad-keys"></div>
     <p id="math-keypad-error" class="expression-error" role="status"></p>
   </dialog>
@@ -7460,34 +7469,54 @@ const settingsDialog = document.querySelector<HTMLDialogElement>("#settings-dial
 const audioDialog=document.querySelector<HTMLDialogElement>("#audio-trace-dialog")!;
 const audioPlayer=new AudioTracePlayer();
 const audioSelection=document.querySelector<HTMLSelectElement>("#audio-trace-expression")!;
+const audioMode=document.querySelector<HTMLSelectElement>("#audio-trace-mode")!;
+const audioBranch=document.querySelector<HTMLSelectElement>("#audio-trace-branch")!;
+const audioLimits=document.querySelector<HTMLParagraphElement>("#audio-trace-limits")!;
 const audioPosition=document.querySelector<HTMLInputElement>("#audio-trace-position")!;
 const audioOutput=document.querySelector<HTMLOutputElement>("#audio-trace-result")!;
 let audioGraphs:CompiledGraph[]=[];
 let audioPoints:Array<TracePoint|undefined>=[];
+let audioPaths:Array<Array<TracePoint|undefined>>=[];
 let audioBounds:[number,number,number,number]=[-10,10,-10,10];
 let audioGeneration=0;
 const showAudioPoint=(index:number,point:TracePoint|undefined):void=>{
   audioPosition.value=String(Math.min(audioPoints.length-1,index));
   audioOutput.textContent=index>=audioPoints.length?"Trace complete.":point?
-    `x ≈ ${Number(point.x.toPrecision(8))}, y ≈ ${Number(point.y.toPrecision(8))}`:"Undefined point (silent).";
+    `x ≈ ${Number(point.x.toPrecision(8))}, y ≈ ${Number(point.y.toPrecision(8))}${point.region?` (shaded-region chord, ${point.voices!.length} tones)`:""}`:"Undefined or unshaded sample (silent).";
 };
+function selectAudioBranch():void{
+  audioGeneration++;audioPlayer.stop();
+  audioPoints=audioPaths[Number(audioBranch.value)]??[];
+  audioPosition.max=String(Math.max(0,audioPoints.length-1));audioPosition.value="0";
+  const gaps=audioPoints.filter((point)=>!point).length;
+  audioOutput.textContent=audioPoints.length?
+    `${audioPoints.length} trace samples${gaps?`; ${gaps} silent samples`:""}. Press Play or use Arrow keys.`:
+    "No sampled boundary is visible in this viewport. Try Shaded region or adjust the viewport.";
+}
 function prepareAudioTrace():void{
   audioGeneration++;
   audioPlayer.stop();
+  audioPoints=[];audioPaths=[];audioBranch.replaceChildren();audioLimits.textContent="";
   const graph=audioGraphs[Number(audioSelection.value)];
   if(!graph)throw new Error("Select an available curve.");
+  audioMode.closest("label")!.hidden=graph.kind!=="inequality"&&graph.kind!=="polygon";
+  let sampleError="";
+  const sample=<T,>(evaluate:()=>T,fallback:T):T=>{
+    try{return evaluate();}catch(reason){
+      if(!(reason instanceof Error))throw reason;
+      sampleError ||= reason.message;return fallback;
+    }
+  };
   const bounds=canvasWrap.getBoundingClientRect();
   audioBounds=[centerX-bounds.width/(2*scale),centerX+bounds.width/(2*scale),
     centerY-bounds.height/(2*verticalScale()),centerY+bounds.height/(2*verticalScale())];
   if(graph.kind==="parametric"){
     audioPoints=Array.from({length:201},(_,index)=>{
-      try{const [x,y]=graph.evaluate(graph.start+(graph.end-graph.start)*index/200);return Number.isFinite(x)&&Number.isFinite(y)?{x,y}:undefined;}
-      catch(reason){if(!(reason instanceof Error))throw reason;return undefined;}
+      return sample(()=>{const [x,y]=graph.evaluate(graph.start+(graph.end-graph.start)*index/200);return Number.isFinite(x)&&Number.isFinite(y)?{x,y}:undefined;},undefined);
     });
   }else if(graph.kind==="explicit"||graph.kind==="sideways"){
     const evaluate=(x:number):number=>{
-      try{const result=graph.evaluate(x);return typeof result==="number"?result:result.value.toNumber();}
-      catch(reason){if(!(reason instanceof Error))throw reason;return NaN;}
+      return sample(()=>{const result=graph.evaluate(x);return typeof result==="number"?result:result.value.toNumber();},NaN);
     };
     audioPoints=graph.kind==="explicit"?tracePoints(evaluate,audioBounds[0],audioBounds[1]):
       tracePoints(evaluate,audioBounds[2],audioBounds[3]).map((point)=>point?{x:point.y,y:point.x}:undefined);
@@ -7495,10 +7524,28 @@ function prepareAudioTrace():void{
     const [x,y]=graph.evaluate();audioPoints=[{x,y}];
   }else if(graph.kind==="list"){
     audioPoints=graph.evaluate().map((y,index)=>y===undefined?undefined:{x:index+1,y});
-  }else throw new Error("Audio trace supports explicit, sideways, parametric, polar, list, and point graphs.");
-  audioPosition.max=String(Math.max(0,audioPoints.length-1));
-  const gaps=audioPoints.filter((point)=>!point).length;
-  audioOutput.textContent=`${audioPoints.length} trace samples${gaps?`; ${gaps} undefined samples are silent`:""}. Press Play or use Arrow keys.`;
+  }else if(graph.kind==="implicit"||graph.kind==="inequality"||graph.kind==="polygon"){
+    const vertices=graph.kind==="polygon"?graph.evaluate():undefined;
+    const evaluate=(x:number,y:number):number=>sample(()=>{
+      if(graph.kind==="polygon")return polygonSignedDistance(vertices!,x,y);
+      const result=graph.evaluate(x,y);return typeof result==="number"?result:result.toNumber();
+    },NaN);
+    if(graph.kind!=="implicit"&&audioMode.value==="region"){
+      audioPoints=traceRegion(evaluate,graph.kind==="polygon"?"<=":graph.relation,audioBounds);
+      audioLimits.textContent="Shaded regions use up to five simultaneous sawtooth tones per column, sampled on a 201 × 128 grid. Silent columns have no sampled shading; narrow regions can be missed.";
+    }else{
+      const contour=traceContour(evaluate,audioBounds);
+      audioPaths=contour.paths.map((path)=>tracePolyline(path));
+      audioLimits.textContent=`Numerical boundary trace: 96 × 96 cells, refined crossings, 201 points per branch. Narrow features, isolated points, and tangent roots may be missed.${contour.gaps?` ${contour.gaps} nonfinite samples or unresolved crossings.`:""}${contour.limited?" Only the first 128 branches are available.":""}`;
+    }
+  }else throw new Error("This graph type cannot be audio traced.");
+  if(!audioPaths.length&&audioPoints.length)audioPaths=[audioPoints];
+  if(sampleError)audioLimits.textContent+=` Sample error: ${sampleError}`;
+  for(const [index]of audioPaths.entries()){
+    const option=document.createElement("option");option.value=String(index);option.textContent=`Branch ${index+1} of ${audioPaths.length}`;audioBranch.append(option);
+  }
+  audioBranch.closest("label")!.hidden=audioPaths.length<2;
+  refreshDropdowns();selectAudioBranch();
 }
 document.querySelector("#open-audio-trace")!.addEventListener("click",()=>{
   try{
@@ -7509,7 +7556,7 @@ document.querySelector("#open-audio-trace")!.addEventListener("click",()=>{
       const graph=getCompiled(expression);
       const members=graph?.kind==="collection"?graph.graphs:graph?[graph]:[];
       for(const member of members){
-        if(!["explicit","sideways","parametric","point","list"].includes(member.kind))continue;
+        if(!["explicit","sideways","parametric","point","list","implicit","inequality","polygon"].includes(member.kind))continue;
         const option=document.createElement("option");option.value=String(audioGraphs.length);
         option.textContent=`Expression ${index+1}: ${expression.text.slice(0,60)}${members.length>1?` (${member.kind})`:""}`;
         audioGraphs.push(member);audioSelection.append(option);
@@ -7521,8 +7568,13 @@ document.querySelector("#open-audio-trace")!.addEventListener("click",()=>{
 audioSelection.addEventListener("change",()=>{
   try{prepareAudioTrace();}catch(reason){audioOutput.textContent=reason instanceof Error?reason.message:"Could not trace curve.";}
 });
+audioMode.addEventListener("change",()=>{
+  try{prepareAudioTrace();}catch(reason){audioOutput.textContent=reason instanceof Error?reason.message:"Could not trace region.";}
+});
+audioBranch.addEventListener("change",selectAudioBranch);
 const playPoint=async(index:number):Promise<void>=>{
   try{
+    if(!audioPoints.length)throw new Error("There are no sampled points to play.");
     const generation=++audioGeneration;
     audioPlayer.stop();await audioPlayer.start();
     if(!audioDialog.open||generation!==audioGeneration)return;
@@ -7533,7 +7585,7 @@ const playPoint=async(index:number):Promise<void>=>{
 };
 document.querySelector("#play-audio-trace")!.addEventListener("click",async()=>{
   const generation=++audioGeneration;
-  try{audioPlayer.stop();await audioPlayer.start();if(audioDialog.open&&generation===audioGeneration)audioPlayer.sequence(audioPoints,audioBounds,showAudioPoint,
+  try{if(!audioPoints.length)throw new Error("There are no sampled points to play.");audioPlayer.stop();await audioPlayer.start();if(audioDialog.open&&generation===audioGeneration)audioPlayer.sequence(audioPoints,audioBounds,showAudioPoint,
     (error)=>{audioOutput.textContent=error.message;});}
   catch(reason){audioOutput.textContent=reason instanceof Error?reason.message:"Could not play audio trace.";}
 });
@@ -7542,7 +7594,7 @@ document.querySelector("#previous-audio-point")!.addEventListener("click",()=>vo
 document.querySelector("#next-audio-point")!.addEventListener("click",()=>void playPoint(Number(audioPosition.value)+1));
 audioPosition.addEventListener("input",()=>void playPoint(Number(audioPosition.value)));
 audioDialog.addEventListener("keydown",(event)=>{
-  if(event.target===audioSelection||audioSelection.parentElement?.contains(event.target as Node))return;
+  if(event.target instanceof Element&&(event.target.closest(".setting-control")||event.target.closest(".dropdown-menu")))return;
   const keys=["ArrowLeft","ArrowRight","Home","End"];
   if(!keys.includes(event.key)||event.target===audioPosition)return;
   event.preventDefault();
@@ -7557,6 +7609,9 @@ const keypadSelection=document.querySelector<HTMLSelectElement>("#math-keypad-ex
 const keypadInput=document.querySelector<HTMLInputElement>("#math-keypad-input")!;
 const keypadPreview=document.querySelector<HTMLDivElement>("#math-keypad-preview")!;
 const keypadError=document.querySelector<HTMLParagraphElement>("#math-keypad-error")!;
+const visualMath=installVisualMath(document.querySelector<HTMLElement>("#visual-math-editor")!,keypadInput,(message)=>{
+  document.querySelector<HTMLElement>("#visual-math-error")!.textContent=message;
+});
 let keypadExpression:Expression|undefined;
 let focusedExpressionId:number|undefined;
 workspaceList.addEventListener("focusin",(event)=>{
@@ -7582,11 +7637,11 @@ document.querySelector("#open-keypad")!.addEventListener("click",()=>{
   }
   keypadExpression=expressions.find((expression)=>expression.id===focusedExpressionId)??expressions[0];
   keypadSelection.value=String(keypadExpression!.id);keypadInput.value=keypadExpression!.text;
-  updateKeypadPreview();refreshDropdowns();keypadDialog.showModal();keypadInput.focus();
+  updateKeypadPreview();visualMath.sync();refreshDropdowns();keypadDialog.showModal();visualMath.focus();keypadDialog.scrollTop=0;
 });
 keypadSelection.addEventListener("change",()=>{
   keypadExpression=expressions.find((expression)=>expression.id===Number(keypadSelection.value));
-  keypadInput.value=keypadExpression?.text??"";updateKeypadPreview();keypadInput.focus();
+  keypadInput.value=keypadExpression?.text??"";updateKeypadPreview();visualMath.sync();visualMath.focus();
 });
 const keypadKeys=document.querySelector("#math-keypad-keys")!;
 for(const [label,text]of [
@@ -7602,6 +7657,8 @@ for(const [label,text]of [
   button.setAttribute("aria-label",`Insert ${label}`);
   button.addEventListener("pointerdown",(event)=>event.preventDefault());
   button.addEventListener("click",()=>{
+    try{if(visualMath.insert(text))return;}
+    catch(reason){keypadError.textContent=reason instanceof Error?reason.message:"Could not insert math.";return;}
     const start=keypadInput.selectionStart??keypadInput.value.length,end=keypadInput.selectionEnd??start;
     if(text==="left"||text==="right"){const caret=Math.max(0,Math.min(keypadInput.value.length,start+(text==="left"?-1:1)));keypadInput.setSelectionRange(caret,caret);}
     else if(text==="clear"){keypadInput.value="";applyKeypadInput();}
@@ -7614,11 +7671,16 @@ for(const [label,text]of [
       if(inner>=0)keypadInput.setSelectionRange(from+inner+1,from+inner+1);
       applyKeypadInput();
     }
+    visualMath.sync();
     keypadInput.focus();
   });keypadKeys.append(button);
 }
 document.querySelector("#close-math-keypad")!.addEventListener("click",()=>keypadDialog.close());
-keypadDialog.addEventListener("close",()=>{renderExpressions();scheduleDraw();});
+keypadDialog.addEventListener("close",()=>{
+  const warning=document.querySelector<HTMLElement>("#visual-math-error")!.textContent;
+  if(warning?.startsWith("Visual edit not applied:"))setProjectStatus("Incomplete visual edit discarded; the last applied text expression was kept.");
+  renderExpressions();scheduleDraw();
+});
 document.querySelector("#open-settings")!.addEventListener("click", () => {
   updateGraphOptionControls();
   settingsDialog.showModal();

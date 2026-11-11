@@ -1,4 +1,4 @@
-export interface TracePoint { x:number; y:number }
+export interface TracePoint { x:number; y:number; voices?:number[]; region?:boolean }
 export function traceFrequency(y:number,yMin:number,yMax:number):number{
   if(![y,yMin,yMax].every(Number.isFinite)||yMin>=yMax)throw new Error("Audio trace needs finite, increasing graph bounds.");
   const position=Math.max(0,Math.min(1,(y-yMin)/(yMax-yMin)));
@@ -25,15 +25,24 @@ export class AudioTracePlayer{
   }
   tone(point:TracePoint,xMin:number,xMax:number,yMin:number,yMax:number,duration=0.12):void{
     if(!this.audio||this.audio.state!=="running")throw new Error("Start audio trace before playing a point.");
+    if(point.voices){
+      for(const y of point.voices)this.note({...point,y,voices:undefined},xMin,xMax,yMin,yMax,duration,point.voices.length);
+      return;
+    }
+    this.note(point,xMin,xMax,yMin,yMax,duration,1);
+  }
+  private note(point:TracePoint,xMin:number,xMax:number,yMin:number,yMax:number,duration:number,voices:number):void{
+    const audio=this.audio;
+    if(!audio||audio.state!=="running")throw new Error("Audio playback is not running.");
     const frequency=traceFrequency(point.y,yMin,yMax);
-    const oscillator=this.audio.createOscillator(),gain=this.audio.createGain(),pan=this.audio.createStereoPanner();
-    oscillator.type=point.y<0?"triangle":"sine";
+    const oscillator=audio.createOscillator(),gain=audio.createGain(),pan=audio.createStereoPanner();
+    oscillator.type=point.region?"sawtooth":point.y<0?"triangle":"sine";
     oscillator.frequency.value=frequency;
     pan.pan.value=Math.max(-1,Math.min(1,2*(point.x-xMin)/(xMax-xMin)-1));
-    const now=this.audio.currentTime;
-    gain.gain.setValueAtTime(0,now);gain.gain.linearRampToValueAtTime(0.12,now+0.01);
-    gain.gain.setValueAtTime(0.12,now+duration-0.02);gain.gain.linearRampToValueAtTime(0,now+duration);
-    oscillator.connect(gain);gain.connect(pan);pan.connect(this.audio.destination);
+    const now=audio.currentTime,volume=0.12/voices;
+    gain.gain.setValueAtTime(0,now);gain.gain.linearRampToValueAtTime(volume,now+0.01);
+    gain.gain.setValueAtTime(volume,now+duration-0.02);gain.gain.linearRampToValueAtTime(0,now+duration);
+    oscillator.connect(gain);gain.connect(pan);pan.connect(audio.destination);
     oscillator.start(now);oscillator.stop(now+duration);
     this.sources.add(oscillator);oscillator.onended=()=>{this.sources.delete(oscillator);oscillator.disconnect();gain.disconnect();pan.disconnect();};
   }

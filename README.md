@@ -4,7 +4,9 @@ A browser-based graphing calculator built with TypeScript and Vite. Its small st
 
 ## Versioning
 
-The current app version is **4.0**. Keep the package version in `package.json` in sync as `4.0.0`.
+The current app version is **4.1**. Keep the package version in `package.json` in sync as `4.1.0`.
+
+Version 4.1 adds cursor-editable visual math with embedded offline fonts, safe text/visual notation conversion, implicit and polygon boundary audio tracing with branch selection, and sampled shaded-region sonification. Existing text syntax, project persistence, and Undo/Redo remain available.
 
 Version 4.0 adds descriptive statistics and statistical plots, probability distributions and seeded sampling, named inference objects and regression-slope tests, scalar/point/list actions, graph styles and axis controls, logical list filters and point arithmetic, complex mode, a formatted math keypad, audio trace, direct photo/vertex manipulation, polygon restrictions, additional numerical intersections, and cross-column table formulas.
 
@@ -23,7 +25,7 @@ npm install
 npm run build
 ```
 
-The generated HTML contains the app's JavaScript and CSS, so it can be copied and opened directly. Keep the project file to rebuild after changing the source.
+The generated HTML contains the app's JavaScript, CSS, and math-editor fonts, so it can be copied and opened directly without a CDN or network connection. Keep the project file to rebuild after changing the source.
 
 Prebuilt downloads are available from the GitHub [Releases](https://github.com/sagan-downey/better-desmos/releases) page. Download `better-desmos.html`, then open it in Firefox or another browser.
 
@@ -216,9 +218,13 @@ At most 10 axis intercepts per curve are retained, prioritizing those nearest th
 
 Enable **Complex numbers** in Settings to use `i`, complex definitions such as `z=2+3i`, principal-branch arithmetic, roots/logarithms, analytic trig/hyperbolic functions, and `real`, `imag`, `conj`, and `arg`. Arguments respect Angle mode. Nonreal scalar results plot at `(real,imag)`; complex lists plot their nonreal members as points. User-defined functions and list reductions such as `mean([i,2i])` use the same safe parsed evaluator. Real-component expressions such as `1+real(z*x)` graph normally. Coordinate expressions with complex outputs, such as `exp(i*x)`, trace the complex plane with parameter `x` from -10 to 10; use real/imaginary component expressions for Cartesian graphs. Complex arithmetic uses finite double precision, not the arbitrary-precision real engine. Ordered comparisons and numeric sorting/statistics require real inputs. Complex numerical derivatives use a five-point stencil; integrals use adaptive Simpson error checks on both components, capped at 20000 evaluations and 24 subdivisions, with domain/non-convergence errors reported.
 
-The graph toolbar's **Math keypad** edits the selected expression with keyboard-operable insertion/caret controls and a live, safe MathML preview, including fractions, powers, roots, subscripts, tuples/lists, and calculus. Text syntax remains the stored source; the preview is not a cursor-editable symbolic AST. Unsupported preview syntax is shown as text with an explicit formatting message rather than being executed or silently rewritten.
+The graph toolbar's **Math keypad** includes a cursor-editable MathLive field: click inside fractions, powers, roots, and subscripts, use Arrow keys to move through their structure, and Tab between placeholders. The existing keypad inserts structured math into that field; focusing **Text syntax** switches keypad insertion back to plain text. A collapsible read-only MathML preview is also available. MathLive supplies editing and typesetting only: the notation adapter feeds the existing safe parser, never a JavaScript evaluator or a second computation engine. All fonts are embedded in the standalone file; sounds, network font loading, the floating keyboard, and editor animations are disabled.
 
-**Audio trace** selects an explicit, sideways, parametric/polar, list, or point graph and plays it through Web Audio. Pitch rises with y; stereo position follows x, and negative y uses a distinct waveform. Play/Stop, individual sample controls, Arrow keys, and Home/End provide navigation with a coordinate readout. Curves use 201 samples; undefined samples are silent and reported in the summary. Implicit/shaded interiors are not sonified. Closing the dialog stops playback; sound requires browser audio permission and support.
+Text syntax remains the saved source. Opening the editor does not rewrite it. Supported visual notation includes fractions, roots, powers, subscripts, calls, prime derivatives, sums/products/integrals, tuples/lists, restrictions, actions, and regressions. Unsupported visual notation shows an explicit message and leaves text editing available. Incomplete placeholders and overlong conversions are not applied: the last applied text expression remains visible, and closing with an incomplete visual edit reports that it was discarded. Completed edits use the existing save/history behavior, and the expression limit remains 512 characters.
+
+**Audio trace** selects an explicit, sideways, implicit, parametric/polar, polygon, inequality, list, or point graph and plays it through Web Audio. Pitch rises with y; stereo position follows x, and negative y uses a distinct waveform. Play/Stop, individual sample controls, Arrow keys, and Home/End provide navigation with a coordinate readout. Implicit curves and polygon/inequality boundaries are sampled in the current viewport on a 96 × 96 grid, with refined zero crossings and separately selectable branches; each branch is resampled to 201 approximately equal-distance points. Asymptotes and undefined gaps are not joined across. Numerical sampling can miss narrow features, isolated points, and tangent roots, and at most 128 branches are offered; the dialog states these limits.
+
+For inequalities and polygons, **Trace → Shaded region** sweeps the viewport on a 201 × 128 grid. Each shaded column plays up to five simultaneous sawtooth tones chosen from its sampled interior, with bounded total volume. Unshaded/undefined columns are silent. This is sampled region sonification, not a reconstruction of every point in the region. Curves normally use 201 samples; points/lists retain their own sample counts. Sample errors and silent-sample counts are reported. Changing curve, mode, or branch, pressing Stop, or closing the dialog cancels playback, including pending audio startup. Sound requires browser audio permission and support.
 
 ## Numeric approach and limitations
 
