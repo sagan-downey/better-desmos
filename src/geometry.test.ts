@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dynamicLabel, expandNamedPoints, pointSources } from "./geometry";
+import { dynamicLabel, expandNamedPoints, pointSources,replacePolygonVertex } from "./geometry";
 import { compileExpression, compileCollectionGraph, compileFastGraphExpression, compileGraphExpression } from "./math";
 
 describe("named points, polygons and labels", () => {
@@ -51,5 +51,9 @@ describe("named points, polygons and labels", () => {
     expect(dynamicLabel("<script>hello</script>", evaluate)).toBe("<script>hello</script>");
     expect(() => dynamicLabel("${window.alert(1)}", evaluate)).toThrow();
     expect(() => dynamicLabel("${1/0}", evaluate)).toThrow();
+  });
+  it("edits one literal polygon vertex without changing the others",()=>{
+    expect(replacePolygonVertex("polygon([(0,0),(2,0),(0,2)])",1,3,4)).toBe("polygon((0,0),(3,4),(0,2))");
+    expect(()=>replacePolygonVertex("polygon(l)",1,3,4)).toThrow();
   });
 });

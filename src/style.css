@@ -115,10 +115,17 @@ button { color: inherit; }
 .remove-button { border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted-text); font-size: 20px; cursor: pointer; }
 .expression-error { grid-column: 2 / 5; min-height: 14px; margin: 4px 0 0; color: var(--error); font-size: 11px; }
 .expression-result { grid-column: 2 / 5; min-height: 16px; margin-top: 2px; color: var(--accent-soft); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.expression-action { grid-column: 2 / 5; justify-self: start; margin-top: 6px; }
+.math-keypad-keys { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 6px; margin-top: 12px; }
+.math-keypad-keys button { min-height: 38px; padding: 6px; }
+.math-preview { min-height: 60px; overflow: auto; padding: 12px; margin-top: 8px; font-size: 24px; background: var(--input-alt); border-radius: 5px; }
 .visibility-button { padding: 0; border: 0; background: transparent; color: var(--accent-soft); cursor: pointer; }
 .expression-appearance { grid-column: 2 / 5; color: var(--text-secondary); font-size: 10px; }
 .expression-appearance:not([open]) { display: none; }
 .appearance-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; gap: 7px; padding: 8px; border: 1px solid var(--border-medium); border-radius: 5px; background: var(--input-alt); }
+.statistical-plot-controls { grid-column: 1 / -1; display: grid; gap: 6px; }
+.statistical-plot-controls label { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: 6px; }
+.statistical-plot-controls .themed-select { min-width: 0; }
 .appearance-color-control, .appearance-range-control { display: grid; align-items: center; gap: 3px; color: var(--text-secondary); }
 .appearance-color-control { grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr) 30px; }
 .appearance-range-control { grid-template-columns: minmax(0, 1fr) auto; min-width: 0; }
@@ -157,6 +164,7 @@ button { color: inherit; }
 .photo-field input, .photo-field select { min-width: 0; width: 100%; min-height: 36px; padding: 7px; border: 1px solid var(--border-medium); border-radius: 5px; color: var(--text); background: var(--input-bg); }
 .photo-field input[type="range"] { padding: 0; border: 0; background: transparent; accent-color: var(--accent); }
 .photo-error { grid-column: 1 / -1; margin: 0; color: var(--error); font-size: 12px; overflow-wrap: anywhere; }
+.photo-drag-help { grid-column: 1 / -1; margin: 0; color: var(--text-secondary); font-size: 12px; }
 .photo-panel [aria-invalid="true"] { border-color: var(--error-border); }
 .hsv-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: 5px; }
 .expression-row .hsv-fields input { padding: 5px; font-size: 10px; }

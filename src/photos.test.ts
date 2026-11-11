@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { expandUserFunctions } from "./math";
-import { evaluatePhotoTransform, parsePhotos, photoMatrix, MAX_PHOTO_BYTES, type Photo } from "./photos";
+import { evaluatePhotoTransform, parsePhotos, photoMatrix, photoDragTransform, photoLocalPoint, MAX_PHOTO_BYTES, type Photo } from "./photos";
 
 const photo: Photo = {
   id: 1, name: "Test photo", source: "data:image/png;base64,AAAA",
@@ -10,6 +10,15 @@ const photo: Photo = {
 };
 
 describe("photos", () => {
+  it("moves, resizes, and rotates photos in graph coordinates",()=>{
+    const transform={centerX:1,centerY:2,width:4,height:2,rotation:0};
+    expect(photoDragTransform(transform,"move",[0,0],[3,4])).toEqual({...transform,centerX:4,centerY:6});
+    expect(photoDragTransform(transform,"scale",[3,3],[5,4])).toEqual({...transform,width:8,height:4});
+    expect(photoDragTransform(transform,"rotate",[2,2],[1,3]).rotation).toBeCloseTo(Math.PI/2);
+    const local=photoLocalPoint({...transform,rotation:Math.PI/2},1,3);
+    expect(local[0]).toBeCloseTo(1);expect(local[1]).toBeCloseTo(0);
+    expect(()=>photoDragTransform(transform,"scale",[1,2],[2,3])).toThrow(/away/);
+  });
   it("imports embedded raster data and preserves only persistent fields", () => {
     expect(parsePhotos(undefined)).toEqual([]);
     const saved = { ...photo, folderId: 2, bitmap: "runtime data" };

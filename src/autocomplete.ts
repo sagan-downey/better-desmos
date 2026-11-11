@@ -1,6 +1,10 @@
 import { COLLECTION_FUNCTIONS } from "./collections";
 import { FUNCTION_REFERENCE } from "./functionReference";
 import { BUILTIN_NAMES } from "./math";
+import { DISTRIBUTION_NAMES } from "./probability";
+import { INFERENCE_NAMES } from "./inference";
+import { RANDOM_NAMES } from "./random";
+import { COMPLEX_FUNCTIONS } from "./complex";
 
 const descriptions = new Map(FUNCTION_REFERENCE.flatMap((category) => category.entries.flatMap((entry) =>
   [entry.name, ...(entry.aliases ?? [])].map((name) => [name, entry] as const))));
@@ -11,8 +15,12 @@ const graphSignatures = new Map([
   ["polar", "polar(radius, startAngle, endAngle)"],
   ["derivative", "derivative(expression)"],
   ["integral", "integral(expression, start, end)"],
+  ["histogram", "histogram(L, binWidth)"],
+  ["dotplot", "dotplot(L, binWidth)"],
+  ["boxplot", "boxplot(L, offset, height)"],
+  ["stats", "stats(L)"],
 ]);
-const names = [...new Set([...BUILTIN_NAMES, ...COLLECTION_FUNCTIONS, ...graphSignatures.keys()])].sort();
+const names = [...new Set([...BUILTIN_NAMES, ...COLLECTION_FUNCTIONS, ...DISTRIBUTION_NAMES, ...INFERENCE_NAMES, ...RANDOM_NAMES, ...COMPLEX_FUNCTIONS, ...graphSignatures.keys()])].sort();
 
 export function functionCompletions(text: string, caret: number): { start: number; end: number; names: string[] } | undefined {
   const match = /[a-z]+$/i.exec(text.slice(0, caret));

@@ -780,7 +780,7 @@ describe("Phase 1 Desmos syntax", () => {
       expect(compile("r={theta<1: 2, 3}").kind).toBe("parametric");
       expect(compile("(log_2(8),0)").kind).toBe("point");
       expect(compile("(int_{0}^{1} t dt,2)").kind).toBe("point");
-      expect(() => compile("r<cos(theta)")).toThrow(/Polar inequalities/);
+      expect(compile("r<cos(theta)").kind).toBe("inequality");
     }
     try {
       setAngleMode("degrees");

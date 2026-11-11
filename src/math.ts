@@ -1,6 +1,13 @@
 import Decimal from "decimal.js";
-import { expandCollections, hasCollections, splitCollectionParts, type StatisticsMode } from "./collections";
+import { expandCollections, hasCollections, INTERNAL_COLLECTION_FUNCTIONS, splitCollectionParts, type StatisticsMode } from "./collections";
 import { pointSources } from "./geometry";
+import { statisticalPlotShapes } from "./statisticalPlots";
+import { DISTRIBUTION_NAMES, PROBABILITY_KERNELS, isProbabilityKernel, probabilityKernel } from "./probability";
+import { distributionCall, readDistribution, rewriteDistributions } from "./distributionSyntax";
+import { inferenceCall, inferenceProperty, readInference, rewriteInferenceProperties } from "./inference";
+import { rewriteRandom } from "./randomSyntax";
+import { complex, add, sub, mul, div, pow, neg, complexFunction, integrateComplex, COMPLEX_FUNCTIONS, type Complex } from "./complex";
+import { polygonSignedDistance } from "./graphAnalysis";
 
 const DEFAULT_PRECISION_DIGITS = 50;
 export const FAST_MODE_PRECISION_DIGITS = 10;
@@ -230,7 +237,7 @@ type PreciseImplicitEvaluation = (x: number, y: number) => Decimal;
 export type ExplicitEvaluation = (x: number) => Evaluation | number;
 
 export type GraphExpression =
-  | { kind: "polygon"; evaluate: () => [number, number][] }
+  | { kind: "polygon"; evaluate: () => [number, number][]; vertexSources?:[string,string][] }
   | { kind: "explicit"; evaluate: ExplicitEvaluation; tangent?: () => { slope: number; offset: number }; region?: (parameter: number) => string }
   | { kind: "sideways"; evaluate: ExplicitEvaluation; tangent?: () => { slope: number; offset: number }; region?: (parameter: number) => string }
   | { kind: "implicit"; evaluate: ImplicitEvaluation; region?: (x: number, y?: number) => string }
@@ -293,7 +300,7 @@ export const BUILTIN_NAMES = [
   "arcsinh", "arccosh", "arctanh", "arcsech", "arccsch", "arccoth",
   "sign", "sgn", "round", "factorial", "mod", "gcd", "lcm", "ncr", "npr", "logbase",
 ] as const;
-const functions = new Set<string>(BUILTIN_NAMES);
+const functions = new Set<string>([...BUILTIN_NAMES, ...PROBABILITY_KERNELS, ...DISTRIBUTION_NAMES,...COMPLEX_FUNCTIONS]);
 export function freeIdentifiers(source: string): string[] {
   const normalized = source.replace(/θ/g, "theta").replace(/[Σ∑]/g, "sum").replace(/[Π∏]/g, "prod").replace(/∫/g, "int").toLowerCase();
   const relation = graphRelation(normalized);
@@ -306,7 +313,9 @@ export function freeIdentifiers(source: string): string[] {
   let coordinates: [string, string] | undefined;
   try { coordinates = pointSources(normalized); } catch { /* Identifier analysis must also accept incomplete input. */ }
   if (coordinates) return [...new Set(coordinates.flatMap(freeIdentifiers))];
-  const identifiers = [...new Set(normalized.match(/[a-z]+(?:_[a-z0-9]+)?/g) ?? [])];
+  const identifiers = [...new Set([...normalized.matchAll(/[a-z]+(?:_[a-z0-9]+)?/g)]
+    .filter((match)=>normalized[match.index-1]!=="."&&
+      !(match[0]==="d"&&/^\s*\/\s*d[a-z]/.test(normalized.slice(match.index+1)))).map((match)=>match[0]))];
   const found = new Set<string>();
   const condition = (value: Condition, bound: Set<string>) => {
     if (value.type === "logical") { condition(value.left, bound); condition(value.right, bound); }
@@ -338,7 +347,7 @@ export function freeIdentifiers(source: string): string[] {
     for (const match of normalized.matchAll(/d\s*\/\s*d([a-z](?:_[a-z0-9]+)?)/g)) bound.add(match[1]!);
     if (/(?:int_|∫)/.test(normalized)) for (const match of normalized.matchAll(/\bd([a-z](?:_[a-z0-9]+)?)\b/g)) { bound.add(match[0]); bound.add(match[1]!); }
     if (/^\s*r\s*=/.test(normalized)) { bound.add("r"); bound.add("theta"); }
-    return [...new Set(identifiers.flatMap((name) => name.startsWith("log_") ? [name.slice(4)] : [name]).filter((name) => !functions.has(name) && !bound.has(name) && !["sum", "prod", "int", "d", "derivativeat", "pi", "e", "and", "or"].includes(name)))];
+    return [...new Set(identifiers.flatMap((name) => name.startsWith("log_") ? [name.slice(4)] : [name]).filter((name) => !functions.has(name) && !bound.has(name) && !["sum", "prod", "int", "derivativeat", "pi", "e", "and", "or"].includes(name)))];
   }
 }
 
@@ -428,6 +437,7 @@ function parse(
   allowY = false,
   stripYAssignment = true,
   variableNames: string[] = [],
+  functionNames: string[] = [],
 ): Node {
   if (source.length > MAX_EXPRESSION_LENGTH) {
     throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
@@ -578,7 +588,7 @@ function parse(
     if (name === "pi" || name === "e") {
       return { type: "constant", value: name };
     }
-    if (functions.has(name)) {
+    if (functions.has(name)||functionNames.includes(name)) {
       expect("(");
       const args = [sum()];
       while (peek() === ",") { take(); args.push(sum()); }
@@ -922,6 +932,9 @@ function evaluateNode(node: Node, x: Decimal, y: Decimal | undefined, variables:
 const boundValues = new Map<string, Value>();
 
 function evaluateBuiltin(originalName: string, values: Value[]): Value {
+  if (isProbabilityKernel(originalName)) {
+    return approximate(new Decimal(probabilityKernel(originalName, values.map((value) => asDecimal(value).toNumber()))));
+  }
   const aliases: Record<string, string> = { arcsin: "asin", arccos: "acos", arctan: "atan", arcsinh: "asinh", arccosh: "acosh", arctanh: "atanh", sgn: "sign" };
   const name = aliases[originalName] ?? originalName;
   const arity = ["mod", "gcd", "lcm", "ncr", "npr", "logbase"].includes(name) ? [2] : ["round", "atan"].includes(name) ? [1, 2] : [1];
@@ -1978,12 +1991,161 @@ export function fitTangentRegression(
   };
 }
 
+export function compileComplexExpression(
+  source:string,variables:Record<string,number>={},values:Record<string,Complex>={},
+):(x:number,y?:number)=>Complex{
+  const tree=parse(source,true,true,[...Object.keys(variables),...Object.keys(values),"i"]);
+  const local=new Map<string,Complex>();
+  const real=(value:Complex):number=>{
+    if(value.im!==0)throw new Error("Comparisons and calculus bounds require real values.");
+    return value.re;
+  };
+  const condition=(node:Condition,x:number,y:number):boolean=>{
+    if(node.type==="logical")return node.operator==="and"?condition(node.left,x,y)&&condition(node.right,x,y):condition(node.left,x,y)||condition(node.right,x,y);
+    const a=visit(node.left,x,y),b=visit(node.right,x,y);
+    if(node.operator==="="||node.operator==="!="){const equal=a.re===b.re&&a.im===b.im;return node.operator==="="?equal:!equal;}
+    const left=real(a),right=real(b);
+    return node.operator==="<"?left<right:node.operator==="<="?left<=right:node.operator===">"?left>right:left>=right;
+  };
+  const visit=(node:Node,x:number,y:number):Complex=>{
+    if(node.type==="number")return complex(asDecimal(node.value).toNumber());
+    if(node.type==="constant")return complex(node.value==="pi"?Math.PI:Math.E);
+    if(node.type==="variable"){
+      if(local.has(node.name))return local.get(node.name)!;
+      if(node.name==="i")return complex(0,1);
+      if(node.name==="x")return complex(x);
+      if(node.name==="y")return complex(y);
+      if(Object.hasOwn(values,node.name))return values[node.name]!;
+      if(Object.hasOwn(variables,node.name))return complex(variables[node.name]!);
+      throw new Error(`Unknown complex variable "${node.name}".`);
+    }
+    if(node.type==="unary"){const value=visit(node.operand,x,y);return node.operator==="-"?neg(value):value;}
+    if(node.type==="binary"){
+      const a=visit(node.left,x,y),b=visit(node.right,x,y);
+      return node.operator==="+"?add(a,b):node.operator==="-"?sub(a,b):node.operator==="*"?mul(a,b):node.operator==="/"?div(a,b):pow(a,b);
+    }
+    if(node.type==="restricted"){if(!condition(node.condition,x,y))throw new UndefinedPointError();return visit(node.value,x,y);}
+    if(node.type==="piecewise"){
+      for(const branch of node.branches)if(condition(branch.condition,x,y))return visit(branch.value,x,y);
+      if(node.fallback)return visit(node.fallback,x,y);throw new UndefinedPointError();
+    }
+    if(node.type==="bound"){
+      const lower=real(visit(node.lower,x,y)),upper=node.upper?real(visit(node.upper,x,y)):undefined;
+      const previous=local.get(node.variable);
+      const at=(t:number)=>{local.set(node.variable,complex(t));return visit(node.body,x,y);};
+      try{
+        if(node.operation==="sum"||node.operation==="prod"){
+          if(upper===undefined||!Number.isSafeInteger(lower)||!Number.isSafeInteger(upper)||upper-lower>=10000)throw new Error("Complex sums/products need safe integer bounds and at most 10000 terms.");
+          let result=complex(node.operation==="sum"?0:1);
+          for(let t=lower;t<=upper;t++)result=node.operation==="sum"?add(result,at(t)):mul(result,at(t));
+          return result;
+        }
+        if(node.operation==="derivative"){
+          const h=Number.EPSILON**0.2*Math.max(1,Math.abs(lower));
+          return div(add(sub(at(lower-2*h),mul(complex(8),at(lower-h))),sub(mul(complex(8),at(lower+h)),at(lower+2*h))),complex(12*h));
+        }
+        if(upper===undefined)throw new Error("Complex integrals need two bounds.");
+        return integrateComplex(at,lower,upper);
+      }finally{if(previous)local.set(node.variable,previous);else local.delete(node.variable);}
+    }
+    const args=node.type==="call"?[visit(node.argument,x,y)]:node.args.map((arg)=>visit(arg,x,y));
+    if(args.length===1){
+      try{return complexFunction(node.name,args[0]!,angleMode==="degrees");}
+      catch(reason){if(args[0]!.im!==0||!BUILTIN_NAMES.some((name)=>name===node.name))throw reason;}
+    }
+    if(node.name==="logbase"&&args.length===2)return div(complexFunction("ln",args[0]!),complexFunction("ln",args[1]!));
+    if(args.some((arg)=>arg.im!==0))throw new Error(`"${node.name}" requires real arguments.`);
+    return complex(asDecimal(evaluateBuiltin(node.name,args.map((arg)=>approximate(new Decimal(arg.re))))).toNumber());
+  };
+  return(x,y=0)=>{if(!Number.isFinite(x)||!Number.isFinite(y))throw new Error("Complex coordinates must be finite.");return visit(tree,x,y);};
+}
+
+export function complexExpressionIsReal(source:string,variables:Record<string,number>={},values:Record<string,Complex>={}):boolean{
+  const tree=parse(source,true,true,[...Object.keys(variables),...Object.keys(values),"i"]);
+  const nonreal=(node:Node):boolean=>{
+    if(node.type==="number"||node.type==="constant")return false;
+    if(node.type==="variable")return node.name==="i"||Boolean(values[node.name]?.im);
+    if(node.type==="unary")return nonreal(node.operand);
+    if(node.type==="binary")return nonreal(node.left)||nonreal(node.right);
+    if(node.type==="restricted")return nonreal(node.value);
+    if(node.type==="piecewise")return node.branches.some((branch)=>nonreal(branch.value))||Boolean(node.fallback&&nonreal(node.fallback));
+    if(node.type==="bound")return nonreal(node.body);
+    if(["real","imag","abs","arg"].includes(node.name))return false;
+    return(node.type==="call"?[node.argument]:node.args).some(nonreal);
+  };
+  return!nonreal(tree);
+}
+
+export function expressionMathML(source:string):string{
+  const escape=(text:string)=>text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  const condition=(node:Condition):string=>node.type==="logical"?`<mrow>${condition(node.left)}<mtext> ${node.operator} </mtext>${condition(node.right)}</mrow>`:
+    `<mrow>${render(node.left)}<mo>${escape(node.operator)}</mo>${render(node.right)}</mrow>`;
+  const render=(node:Node):string=>{
+    if(node.type==="number")return node.value.denominator===1n?`<mn>${node.value.numerator}</mn>`:
+      `<mfrac><mn>${node.value.numerator}</mn><mn>${node.value.denominator}</mn></mfrac>`;
+    if(node.type==="variable"){
+      const [name,subscript]=node.name.split("_");
+      return subscript?`<msub><mi>${escape(name!)}</mi><mtext>${escape(subscript)}</mtext></msub>`:`<mi>${escape(node.name)}</mi>`;
+    }
+    if(node.type==="constant")return `<mi>${node.value==="pi"?"π":"e"}</mi>`;
+    if(node.type==="unary")return `<mrow><mo>${node.operator}</mo>${render(node.operand)}</mrow>`;
+    if(node.type==="binary"){
+      if(node.operator==="/")return `<mfrac>${render(node.left)}${render(node.right)}</mfrac>`;
+      if(node.operator==="^")return `<msup><mrow>${render(node.left)}</mrow><mrow>${render(node.right)}</mrow></msup>`;
+      return `<mrow><mo>(</mo>${render(node.left)}<mo>${node.operator==="*"?"·":node.operator}</mo>${render(node.right)}<mo>)</mo></mrow>`;
+    }
+    if(node.type==="bound")return `<mrow><msubsup><mo>${node.operation==="sum"?"Σ":node.operation==="prod"?"Π":node.operation==="integral"?"∫":"D"}</mo><mrow><mi>${escape(node.variable)}</mi><mo>=</mo>${render(node.lower)}</mrow>${node.upper?render(node.upper):"<mrow/>"}</msubsup>${render(node.body)}</mrow>`;
+    if(node.type==="restricted")return `<mrow>${render(node.value)}<mo>{</mo>${condition(node.condition)}<mo>}</mo></mrow>`;
+    if(node.type==="piecewise")return `<mrow><mo>{</mo><mtable>${node.branches.map((branch)=>`<mtr><mtd>${render(branch.value)}</mtd><mtd>${condition(branch.condition)}</mtd></mtr>`).join("")}${node.fallback?`<mtr><mtd>${render(node.fallback)}</mtd><mtd><mtext>otherwise</mtext></mtd></mtr>`:""}</mtable></mrow>`;
+    const args=node.type==="call"?[node.argument]:node.args;
+    if(node.name==="sqrt"&&args.length===1)return `<msqrt>${render(args[0]!)}</msqrt>`;
+    if(node.name==="abs"&&args.length===1)return `<mrow><mo>|</mo>${render(args[0]!)}<mo>|</mo></mrow>`;
+    return `<mrow><mi>${escape(node.name)}</mi><mo>(</mo>${args.map(render).join("<mo>,</mo>")}<mo>)</mo></mrow>`;
+  };
+  const relation=graphRelation(source);
+  const names=[...new Set(source.match(/[a-z]+(?:_[a-z0-9]+)?/gi)??[])].map((name)=>name.toLowerCase())
+    .filter((name)=>!functions.has(name)&&!["pi","e","sum","prod","int"].includes(name));
+  const callable=[...source.matchAll(/\b([a-z]+(?:_[a-z0-9]+)?)\s*\(/gi)].map((match)=>match[1]!.toLowerCase())
+    .filter((name)=>!["x","y","e","pi"].includes(name));
+  const tree=(text:string):string=>{
+    const point=pointSources(text);
+    if(point)return`<mrow><mo>(</mo>${point.map(tree).join("<mo>,</mo>")}<mo>)</mo></mrow>`;
+    const trimmed=text.trim();
+    if(trimmed.startsWith("[")&&trimmed.endsWith("]"))return`<mrow><mo>[</mo>${trimmed.slice(1,-1).trim()?splitCollectionParts(trimmed.slice(1,-1)).map(tree).join("<mo>,</mo>"):""}<mo>]</mo></mrow>`;
+    return render(parse(text,true,false,names.filter((name)=>!callable.includes(name)),callable));
+  };
+  const body=relation?`<mrow>${tree(source.slice(0,relation.index))}<mo>${escape(relation.operator)}</mo>${tree(source.slice(relation.index+relation.operator.length))}</mrow>`:tree(source);
+  return `<math xmlns="http://www.w3.org/1998/Math/MathML" display="block">${body}</math>`;
+}
+
 export function compileExpression(
   source: string,
   variables: Record<string, number> = {},
   allowY = false,
 ): (x: number, y?: number) => Evaluation {
-  const tree = parse(source, allowY, true, Object.keys(variables));
+  source = rewriteRandom(source, (text) => compileExpression(text, variables)(0).value.toNumber());
+  const inferenceValues: Record<string, number> = {};
+  let inferenceIndex = 0;
+  source = rewriteInferenceProperties(source, (call) => {
+    let name: string;
+    do { name = `inference_value${inferenceIndex++}`; } while (Object.hasOwn(variables, name) || source.includes(name));
+    Object.defineProperty(inferenceValues, name, {
+      enumerable: true,
+      get: () => inferenceProperty(readInference(call,
+        (text) => compileExpression(text, variables)(0).value.toNumber()), call.property!),
+    });
+    return name;
+  });
+  source = rewriteDistributions(source, (text) => compileExpression(text, variables)(0).value.toNumber());
+  if ((source.match(/[a-z]+(?:_[a-z0-9]+)?/gi) ?? []).some((name) => INTERNAL_COLLECTION_FUNCTIONS.includes(name.toLowerCase()))) {
+    const expanded = expandCollections(source, (text) => compileExpression(text, variables)(0).value.toNumber());
+    if (expanded.list || expanded.items.length !== 1) throw new Error("A scalar expression cannot return a random sample list.");
+    source = expanded.items[0]!;
+  }
+  const context: Record<string, number> = {};
+  for (const name of Object.keys(variables)) Object.defineProperty(context, name, { enumerable: true, get: () => variables[name] });
+  for (const name of Object.keys(inferenceValues)) Object.defineProperty(context, name, { enumerable: true, get: () => inferenceValues[name] });
+  const tree = parse(source, allowY, true, Object.keys(context));
   const xCoordinates = new Map<number, Decimal>();
   const yCoordinates = new Map<number, Decimal>();
   return (x: number, y?: number) => {
@@ -1997,7 +2159,7 @@ export function compileExpression(
       tree,
       cachedCoordinate(xCoordinates, x),
       allowY ? cachedCoordinate(yCoordinates, y!) : undefined,
-      variables,
+      context,
     );
     return { value: asDecimal(result), exact: result.kind === "rational" };
   };
@@ -2158,7 +2320,12 @@ export function graphRelation(source: string): { index: number; operator: Compar
 
 function compileNativeGraph(source: string, variables: Record<string, number>): GraphExpression | undefined {
   const normalized = source.replace(/θ/g, "theta");
-  if (/^r\s*(?:[<>≤≥]|!=)/i.test(normalized)) throw new Error("Polar inequalities are not supported; use r = f(theta)");
+  if (/^r\s*(?:[<>≤≥])/i.test(normalized)) {
+    const period = angleMode === "degrees" ? "360" : "(2*pi)";
+    const cartesian = normalized.replace(/\br\b/gi, "sqrt(x^2+y^2)")
+      .replace(/\btheta\b/gi, `mod(arctan(y,x)+${period},${period})`);
+    return compileGraphExpression(cartesian, variables);
+  }
   const candidate = /\{([^{}]+)\}\s*$/.exec(normalized);
   const suffix = candidate && !/[+\-*/^_(:,=<>]$/.test(normalized.slice(0, candidate.index).trim()) ? candidate : null;
   const base = suffix ? normalized.slice(0, suffix.index).trim() : normalized;
@@ -2250,6 +2417,11 @@ function compileRestrictedGraph(
       },
     };
   }
+  if(graph.kind==="polygon"){
+    return{kind:"inequality",relation:"<=",evaluate:(x,y)=>{
+      check(x,y);return polygonSignedDistance(graph.evaluate(),x,y);
+    }};
+  }
   if (graph.kind === "point") {
     return {
       ...graph,
@@ -2270,7 +2442,7 @@ function compileRestrictedGraph(
       },
     };
   }
-  if (graph.kind === "collection" || graph.kind === "polygon") {
+  if (graph.kind === "collection") {
     throw new Error("Apply restrictions within each collection expression.");
   }
   return {
@@ -2543,6 +2715,7 @@ export function compileGraphExpression(
   const trimmed = source.trim();
   const collection = compileCollectionGraph(trimmed, variables, {}, false, statisticsMode);
   if (collection) return collection;
+  source = rewriteDistributions(source, (text) => compileExpression(text, variables)(0).value.toNumber());
   const native = compileNativeGraph(trimmed, variables);
   if (native) return native;
   const restricted = compileRestrictedGraph(trimmed, variables, false, statisticsMode);
@@ -2608,8 +2781,67 @@ export function compileCollectionGraph(
   statisticsMode: StatisticsMode = "population",
 ): GraphExpression | undefined {
   if (source.length > MAX_EXPRESSION_LENGTH) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
+  source = rewriteRandom(source, (text) => compileExpression(text, variables)(0).value.toNumber(), lists, statisticsMode);
+  const inference = inferenceCall(source);
+  if (inference && !inference.property) {
+    const result = readInference(inference, (text) => compileExpression(text, variables)(0).value.toNumber(), lists, statisticsMode);
+    const evaluate = (x: number) => result.distribution.pdf(x);
+    const threshold = result.score;
+    const shaded = (x: number) => result.tails < 0 ? x <= threshold :
+      result.tails > 0 ? x >= threshold : Math.abs(x) >= Math.abs(threshold);
+    return { kind: "collection", graphs: [
+      { kind: "explicit", evaluate },
+      { kind: "inequality", relation: "<=", evaluate: (x: number, y: number) => {
+        const density = evaluate(x);
+        return shaded(x) && y >= 0 ? y - density : 1;
+      } },
+      { kind: "point", xVariables: [], yVariables: [], evaluate: () => [threshold, evaluate(threshold)] },
+    ] };
+  }
+  const rewrittenInference = rewriteInferenceProperties(source, (call) =>
+    `(${inferenceProperty(readInference(call, (text) => compileExpression(text, variables)(0).value.toNumber(), lists, statisticsMode), call.property!)})`);
+  if (rewrittenInference !== source) return compileCollectionGraph(rewrittenInference, variables, lists, fast, statisticsMode) ??
+    (fast ? compileFastGraphExpression(rewrittenInference, variables, statisticsMode) : compileGraphExpression(rewrittenInference, variables, statisticsMode));
+  const distribution = distributionCall(source);
+  if (distribution && !source.slice(distribution.end).trim()) {
+    const evaluated = readDistribution(source, (text) => compileExpression(text, variables)(0).value.toNumber(), lists, statisticsMode);
+    if (evaluated.discrete) {
+      const [supportMin, supportMax] = evaluated.support();
+      const low = Math.max(supportMin, evaluated.inverse(0.00001));
+      const high = Math.min(supportMax, evaluated.inverse(0.99999));
+      if (!evaluated.values && (!Number.isFinite(high - low) || high - low >= 2048)) {
+        throw new Error("Discrete distribution plot exceeds 2048 points; use .pdf(x) or .cdf(x) to graph it.");
+      }
+      const outcomes = evaluated.values ? [...new Set(evaluated.values)].sort((a, b) => a - b) :
+        Array.from({ length: Math.floor(high - low) + 1 }, (_, index) => low + index);
+      if (outcomes.length > 2048) throw new Error("Discrete distribution plot exceeds 2048 points; use .pdf(x) or .cdf(x) to graph it.");
+      return { kind: "collection", graphs: outcomes.map((x) => ({
+        kind: "point", xVariables: [], yVariables: [], evaluate: () => [x, evaluated.pdf(x)],
+      })) };
+    }
+  }
+  const rewrittenDistribution = rewriteDistributions(source,
+    (text) => compileExpression(text, variables)(0).value.toNumber(), lists, statisticsMode);
+  if (rewrittenDistribution !== source) return compileCollectionGraph(rewrittenDistribution, variables, lists, fast, statisticsMode) ??
+    (fast ? compileFastGraphExpression(rewrittenDistribution, variables, statisticsMode) : compileGraphExpression(rewrittenDistribution, variables, statisticsMode));
+  const shapes = statisticalPlotShapes(source,
+    (text) => compileExpression(text, variables)(0).value.toNumber(), lists, statisticsMode);
+  if (shapes) {
+    return { kind: "collection", graphs: shapes.map((shape): GraphExpression => {
+      if (shape.kind === "point") return { kind: "point", xVariables: [], yVariables: [], evaluate: () => shape.point };
+      if (shape.kind === "polygon") return { kind: "polygon", evaluate: () => shape.vertices };
+      return { kind: "parametric", start: 0, end: 1, evaluate: (t: number) => [
+        shape.start[0] * (1 - t) + shape.end[0] * t,
+        shape.start[1] * (1 - t) + shape.end[1] * t,
+      ] };
+    }) };
+  }
   if (/^polygon\s*\(/i.test(source.trim())) {
     const trimmed = source.trim();
+    if(!trimmed.endsWith(")")){
+      const restricted=compileRestrictedGraph(trimmed,variables,fast,statisticsMode);
+      if(restricted)return restricted;
+    }
     if (!trimmed.endsWith(")")) throw new Error("Use polygon((x1,y1),(x2,y2),(x3,y3),...).");
     const vertices = splitCollectionParts(trimmed.slice(trimmed.indexOf("(") + 1, -1))
       .flatMap((item) => expandCollections(item, (text) => compileExpression(text, variables)(0).value.toNumber(), lists, statisticsMode).items);
@@ -2624,6 +2856,7 @@ export function compileCollectionGraph(
     });
     return {
       kind: "polygon",
+      vertexSources:vertices.map((vertex)=>pointSources(vertex)!),
       evaluate: () => coordinates.map((point): [number, number] => {
         const x = point[0]!(0).value.toNumber();
         const y = point[1]!(0).value.toNumber();
@@ -2635,6 +2868,7 @@ export function compileCollectionGraph(
   if (!hasCollections(source, lists)) return undefined;
   const expansion = expandCollections(source, (item) => compileExpression(item, variables)(0).value.toNumber(), lists, statisticsMode);
   if (!expansion.list) {
+    if(expansion.items[0]===source)return undefined;
     const graph = fast ? compileFastGraphExpression(expansion.items[0]!, variables, statisticsMode) :
       compileGraphExpression(expansion.items[0]!, variables, statisticsMode);
     if (expansion.approximate && graph.kind === "explicit") {
@@ -2671,6 +2905,7 @@ export function compileFastGraphExpression(
   const trimmed = source.trim();
   const collection = compileCollectionGraph(trimmed, variables, {}, true, statisticsMode);
   if (collection) return collection;
+  source = rewriteDistributions(source, (text) => compileExpression(text, variables)(0).value.toNumber());
   const native = compileNativeGraph(trimmed, variables);
   if (native) return native;
   const restricted = compileRestrictedGraph(trimmed, variables, true, statisticsMode);

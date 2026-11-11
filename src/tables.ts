@@ -1,3 +1,5 @@
+import { numericSource } from "./numericSource";
+
 export interface FormulaTable {
   id: number;
   rows: Array<{ id: number; x: string; y: string; extra?: string[] }>;
@@ -73,7 +75,7 @@ export function evaluateTableColumn(
       if (!source) throw new Error("Enter a value or a column formula.");
       const value = evaluate(source, index);
       if (!Number.isFinite(value)) throw new Error("The result must be a finite number.");
-      return `(${value})`;
+      return `(${numericSource(value)})`;
     } catch (reason) {
       throw new Error(`Row ${row + 1}, ${column.target}: ${reason instanceof Error ? reason.message : "Could not evaluate cell."}`);
     }

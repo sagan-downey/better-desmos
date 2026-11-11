@@ -87,6 +87,32 @@ export interface PhotoTransform {
   height: number;
 }
 
+export function photoLocalPoint(transform: PhotoTransform, x: number, y: number): [number,number] {
+  const dx=x-transform.centerX,dy=y-transform.centerY;
+  return [dx*Math.cos(transform.rotation)+dy*Math.sin(transform.rotation),
+    -dx*Math.sin(transform.rotation)+dy*Math.cos(transform.rotation)];
+}
+
+export function photoDragTransform(
+  transform: PhotoTransform, mode: "move"|"scale"|"rotate",
+  start: [number,number], end: [number,number],
+): PhotoTransform {
+  const result={...transform};
+  if(mode==="move"){
+    result.centerX+=end[0]-start[0];result.centerY+=end[1]-start[1];
+  }else if(mode==="rotate"){
+    const a=photoLocalPoint(transform,...start),b=photoLocalPoint(transform,...end);
+    if(Math.hypot(...a)<1e-10||Math.hypot(...b)<1e-10)throw new Error("Rotate a photo from a point away from its center.");
+    result.rotation+=Math.atan2(b[1],b[0])-Math.atan2(a[1],a[0]);
+  }else{
+    const a=photoLocalPoint(transform,...start),b=photoLocalPoint(transform,...end);
+    if(Math.abs(a[0])<1e-10||Math.abs(a[1])<1e-10)throw new Error("Resize a photo from a point away from its center axes.");
+    result.width*=b[0]/a[0];result.height*=b[1]/a[1];
+  }
+  if(!Object.values(result).every(Number.isFinite))throw new Error("Photo manipulation exceeds the supported numeric range.");
+  return result;
+}
+
 export function evaluatePhotoTransform(
   photo: Photo,
   variables: Record<string, number>,

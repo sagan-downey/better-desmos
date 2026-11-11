@@ -44,13 +44,27 @@ import {
 import { fitLogistic, type FitResult } from "./regression";
 import { filterFunctionReference } from "./functionReference";
 import { installFunctionAutocomplete } from "./autocomplete";
+import { STATISTICAL_PLOTS, statisticalPlotCall, statisticsSummary } from "./statisticalPlots";
+import { DISTRIBUTION_NAMES, PROBABILITY_KERNELS } from "./probability";
+import { distributionCall, distributionDefinition, expandDistributionDefinitions, readDistribution, rewriteDistributions } from "./distributionSyntax";
+import { INFERENCE_NAMES, inferenceCall, inferenceDefinition, expandInferenceDefinitions, regressionSlopeSummary, inferenceProperty, inferenceSummary, readInference, rewriteInferenceProperties } from "./inference";
+import { RANDOM_NAMES, getRandomSeed, setRandomSeed } from "./random";
+import { rewriteRandom } from "./randomSyntax";
+import { actionDefinition, actionUpdateSource, evaluateActions, expandActions, type ActionUpdate } from "./actions";
+import { dashedSegments, drawStyledPoint, lineDash, type LineStyle, type PointStyle } from "./graphAppearance";
+import { axisStep, fitViewportBounds } from "./viewport";
+import { compileComplexExpression,complexExpressionIsReal,expressionMathML } from "./math";
+import { COMPLEX_FUNCTIONS, formatComplex, type Complex } from "./complex";
+import { AudioTracePlayer,tracePoints,type TracePoint } from "./audioTrace";
+import { bracketedRoot,bracketedExtremum,segmentCrossings } from "./graphAnalysis";
+import { numericSource } from "./numericSource";
 import { installWorkspaceResize } from "./workspaceResize";
 import { MAX_TABLE_ROWS, nextTableCell, spreadsheetCells, tableAxisAt, validateSpreadsheetPaste } from "./spreadsheet";
 import { imageExportSize } from "./image-export";
 import { refreshDropdowns } from "./dropdowns";
 import { tableColumns, tableColumnName, tableColumnFormula, tableCell, tableRowSource, validateTableColumnName, evaluateTableColumn, type TableColumn, type TableAxis } from "./tables";
-import { expandNamedPoints, pointSources, dynamicLabel, type PointSources } from "./geometry";
-import { parsePhotos, evaluatePhotoTransform, photoMatrix, PHOTO_FIELDS, PHOTO_TYPES, MAX_PHOTO_BYTES, MAX_PHOTO_PIXELS, MAX_TOTAL_PHOTO_PIXELS, type Photo } from "./photos";
+import { expandNamedPoints, pointSources, polygonVertexSources, replacePolygonVertex, dynamicLabel, type PointSources } from "./geometry";
+import { parsePhotos, evaluatePhotoTransform, photoMatrix, photoLocalPoint, photoDragTransform, PHOTO_FIELDS, PHOTO_TYPES, MAX_PHOTO_BYTES, MAX_PHOTO_PIXELS, MAX_TOTAL_PHOTO_PIXELS, type Photo, type PhotoTransform } from "./photos";
 import "./style.css";
 
 type CompiledGraph = GraphExpression;
@@ -72,6 +86,10 @@ interface Expression {
   text: string;
   color: string;
   lineWidth?: number;
+  lineStyle?: LineStyle;
+  pointStyle?: PointStyle;
+  pointSize?: number;
+  clickAction?: string;
   opacity?: number;
   draggable?: boolean;
   folderId?: number;
@@ -184,9 +202,17 @@ interface GraphOptions {
   showXAxis: boolean;
   showYAxis: boolean;
   showLabels: boolean;
-  aspectRatio: 0.5 | 1 | 2;
+  aspectRatio: number;
+  gridMode?: "cartesian" | "polar";
+  minorGrid?: boolean;
+  xStep?: number;
+  yStep?: number;
+  xAxisLabel?: string;
+  yAxisLabel?: string;
+  complexMode?: boolean;
   statisticsMode: StatisticsMode;
   angleMode: AngleMode;
+  randomSeed?: number;
 }
 
 interface WorkspaceItem {
@@ -244,6 +270,8 @@ interface DraggableGraphPoint {
   screenY: number;
   color: string;
   opacity: number;
+  directSource?:string;
+  vertexIndex?:number;
 }
 
 interface CurveGeometry {
@@ -257,6 +285,7 @@ interface CurveGeometry {
 
 interface ExplicitCurveData extends CurveGeometry {
   samples: GraphSample[];
+  evaluate?: (x:number)=>number;
 }
 
 interface HoverState {
@@ -446,8 +475,18 @@ function parseProjectState(text: string): ProjectState {
         typeof graphOptions.showYAxis !== "boolean" ||
         typeof graphOptions.showLabels !== "boolean" ||
         (graphOptions.angleMode !== undefined && !["radians", "degrees"].includes(String(graphOptions.angleMode))) ||
+        (graphOptions.randomSeed !== undefined && (typeof graphOptions.randomSeed !== "number" ||
+          !Number.isSafeInteger(graphOptions.randomSeed) || graphOptions.randomSeed < 0 || graphOptions.randomSeed > 0xffffffff)) ||
         (graphOptions.statisticsMode !== undefined && !["population", "sample"].includes(String(graphOptions.statisticsMode))) ||
-        ![0.5, 1, 2].includes(Number(graphOptions.aspectRatio)))) {
+        (graphOptions.gridMode !== undefined && !["cartesian", "polar"].includes(String(graphOptions.gridMode))) ||
+        (graphOptions.minorGrid !== undefined && typeof graphOptions.minorGrid !== "boolean") ||
+        (graphOptions.complexMode !== undefined && typeof graphOptions.complexMode !== "boolean") ||
+        (["xStep", "yStep"].some((key) => graphOptions[key] !== undefined &&
+          (typeof graphOptions[key] !== "number" || !Number.isFinite(graphOptions[key]) || graphOptions[key] <= 0))) ||
+        (["xAxisLabel", "yAxisLabel"].some((key) => graphOptions[key] !== undefined &&
+          (typeof graphOptions[key] !== "string" || graphOptions[key].length > 80))) ||
+        (typeof graphOptions.aspectRatio !== "number" || !Number.isFinite(graphOptions.aspectRatio) ||
+          graphOptions.aspectRatio < 0.001 || graphOptions.aspectRatio > 1000))) {
     throw new Error("Project contains invalid graph settings.");
   }
   const parsedExpressions = value.expressions.map((item): Expression => {
@@ -459,6 +498,10 @@ function parseProjectState(text: string): ProjectState {
         (item.lineWidth !== undefined &&
           (typeof item.lineWidth !== "number" || !Number.isFinite(item.lineWidth) ||
             item.lineWidth < 1 || item.lineWidth > 10)) ||
+        (item.lineStyle !== undefined && !["solid", "dashed", "dotted"].includes(String(item.lineStyle))) ||
+        (item.pointStyle !== undefined && !["filled", "open", "cross"].includes(String(item.pointStyle))) ||
+        (item.pointSize !== undefined && (typeof item.pointSize !== "number" || !Number.isFinite(item.pointSize) || item.pointSize < 2 || item.pointSize > 12)) ||
+        (item.clickAction !== undefined && (typeof item.clickAction !== "string" || item.clickAction.length > 512)) ||
         (item.opacity !== undefined &&
           (typeof item.opacity !== "number" || !Number.isFinite(item.opacity) ||
             item.opacity < 0 || item.opacity > 1)) ||
@@ -476,6 +519,10 @@ function parseProjectState(text: string): ProjectState {
       text: item.text,
       color: item.color,
       lineWidth: item.lineWidth === undefined ? 2 : item.lineWidth as number,
+      lineStyle: item.lineStyle === "dashed" || item.lineStyle === "dotted" ? item.lineStyle : "solid",
+      pointStyle: item.pointStyle === "open" || item.pointStyle === "cross" ? item.pointStyle : "filled",
+      pointSize: typeof item.pointSize === "number" ? item.pointSize : undefined,
+      clickAction: typeof item.clickAction === "string" ? item.clickAction : undefined,
       opacity: item.opacity === undefined ? 1 : item.opacity as number,
       folderId: item.folderId as number | undefined,
       note: item.note as string | undefined,
@@ -763,6 +810,14 @@ function parseProjectState(text: string): ProjectState {
       aspectRatio: Number(graphOptions.aspectRatio) as GraphOptions["aspectRatio"],
       angleMode: graphOptions.angleMode === "degrees" ? "degrees" : "radians",
       statisticsMode: graphOptions.statisticsMode === "sample" ? "sample" : "population",
+      randomSeed: typeof graphOptions.randomSeed === "number" ? graphOptions.randomSeed : 1,
+      gridMode: graphOptions.gridMode === "polar" ? "polar" : "cartesian",
+      minorGrid: graphOptions.minorGrid === true,
+      complexMode: graphOptions.complexMode === true,
+      xStep: typeof graphOptions.xStep === "number" ? graphOptions.xStep : undefined,
+      yStep: typeof graphOptions.yStep === "number" ? graphOptions.yStep : undefined,
+      xAxisLabel: typeof graphOptions.xAxisLabel === "string" ? graphOptions.xAxisLabel : undefined,
+      yAxisLabel: typeof graphOptions.yAxisLabel === "string" ? graphOptions.yAxisLabel : undefined,
     },
   };
 }
@@ -829,6 +884,7 @@ let workspaceOrder: WorkspaceItem[] = initialProject?.workspaceOrder ?? [
 ];
 const sliderValues: Record<string, number> = initialProject?.sliders ?? {};
 let collectionValues: Record<string, string[]> = {};
+let complexValues: Record<string,Complex>={};
 let tableColumnErrors: Record<string, string> = {};
 let pointValues: Record<string, PointSources> = {};
 const sliderOptions: Record<string, SliderOptions> = initialProject?.sliderOptions ?? {};
@@ -940,6 +996,7 @@ const graphOptions: GraphOptions = initialProject?.graphOptions ?? {
   angleMode: "radians",
 };
 setAngleMode(graphOptions.angleMode);
+setRandomSeed(graphOptions.randomSeed ?? 1);
 const graphSettings = {
   precisionDigits: getPrecisionDigits(),
   explicitSampleSpacing: 1,
@@ -956,6 +1013,7 @@ let drag: {
   startSliderValues?: Record<string, number>;
   pointerOffsetX?: number;
   pointerOffsetY?: number;
+  photo?: { item: Photo; transform: PhotoTransform; start: [number,number]; mode: "move"|"scale"|"rotate"; original: Pick<Photo,"centerX"|"centerY"|"width"|"height"|"rotation"> };
 } | undefined;
 let hoverPosition: HoverState | undefined;
 let hoverCandidates: PointCandidate[] = [];
@@ -968,7 +1026,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 3.6 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">3.6</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 4.0 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">4.0</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -1030,11 +1088,30 @@ app.innerHTML = `
           <button type="button" class="icon-control" id="reset-view" aria-label="Reset view" title="Reset view">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7h-6v7H4a1 1 0 0 1-1-1Z"/></svg>
           </button>
+          <button type="button" class="icon-control" id="rerandomize" aria-label="Rerandomize samples" title="Rerandomize samples">↻</button>
+          <button type="button" class="icon-control" id="open-audio-trace" aria-label="Audio trace" title="Audio trace">♫</button>
+          <button type="button" class="icon-control" id="open-keypad" aria-label="Math keypad" title="Math keypad">⌨</button>
         </div>
       </div>
       <div class="canvas-wrap"><canvas id="graph" aria-label="Graph of the entered expressions"></canvas><canvas id="graph-detail" aria-hidden="true" hidden></canvas><canvas id="graph-grid" aria-hidden="true"></canvas><canvas id="graph-points" aria-hidden="true"></canvas></div>
     </section>
   </main>
+  <dialog class="settings-dialog" id="audio-trace-dialog" aria-labelledby="audio-trace-title">
+    <div class="settings-dialog-heading"><h2 id="audio-trace-title">Audio trace</h2><button type="button" id="close-audio-trace" aria-label="Close audio trace">×</button></div>
+    <p>Higher y is higher pitch; x pans left to right. Negative y uses a triangle tone. Undefined samples are silent. Arrow keys trace individual points; Home/End go to the bounds.</p>
+    <label class="setting-control">Curve<select id="audio-trace-expression" aria-label="Audio trace curve"></select></label>
+    <div class="theme-actions"><button type="button" id="play-audio-trace">Play viewport</button><button type="button" id="stop-audio-trace">Stop</button><button type="button" id="previous-audio-point">Previous point</button><button type="button" id="next-audio-point">Next point</button></div>
+    <input id="audio-trace-position" type="range" min="0" max="200" value="0" aria-label="Audio trace position" />
+    <output id="audio-trace-result" role="status" aria-live="polite"></output>
+  </dialog>
+  <dialog class="settings-dialog" id="math-keypad-dialog" aria-labelledby="math-keypad-title">
+    <div class="settings-dialog-heading"><h2 id="math-keypad-title">Math keypad</h2><button type="button" id="close-math-keypad" aria-label="Close math keypad">×</button></div>
+    <label class="setting-control">Expression<select id="math-keypad-expression" aria-label="Keypad expression"></select></label>
+    <input id="math-keypad-input" type="text" maxlength="512" aria-label="Formatted expression editor" autocomplete="off" />
+    <div id="math-keypad-preview" class="math-preview" aria-label="Formatted expression"></div>
+    <div id="math-keypad-keys" class="math-keypad-keys"></div>
+    <p id="math-keypad-error" class="expression-error" role="status"></p>
+  </dialog>
   <dialog class="settings-dialog" id="image-export-dialog" aria-labelledby="image-export-title">
     <form id="image-export-form">
       <div class="settings-dialog-heading"><h2 id="image-export-title">Export graph as PNG</h2></div>
@@ -1088,6 +1165,19 @@ app.innerHTML = `
     <section class="settings-section" aria-labelledby="graph-options-heading">
       <h3 id="graph-options-heading">Graph</h3>
       <label class="setting-check" for="show-grid-setting"><span>Show grid</span><input id="show-grid-setting" type="checkbox" /></label>
+      <div class="setting-control"><label for="grid-mode-setting">Grid coordinates</label><select id="grid-mode-setting"><option value="cartesian">Cartesian</option><option value="polar">Polar</option></select></div>
+      <label class="setting-check" for="minor-grid-setting"><span>Minor grid</span><input id="minor-grid-setting" type="checkbox" /></label>
+      <label class="setting-check" for="complex-mode-setting"><span>Complex numbers (principal branches)</span><input id="complex-mode-setting" type="checkbox" /></label>
+      <div class="setting-control"><label for="x-step-setting">X / radial step</label><input id="x-step-setting" type="number" step="any" placeholder="Automatic" /></div>
+      <div class="setting-control"><label for="y-step-setting">Y step</label><input id="y-step-setting" type="number" step="any" placeholder="Automatic" /></div>
+      <p id="grid-step-warning" class="expression-error" role="status"></p>
+      <div class="setting-control"><label for="x-axis-label-setting">X-axis label</label><input id="x-axis-label-setting" maxlength="80" placeholder="x" /></div>
+      <div class="setting-control"><label for="y-axis-label-setting">Y-axis label</label><input id="y-axis-label-setting" maxlength="80" placeholder="y" /></div>
+      <div class="setting-control"><label for="x-min-setting">X minimum</label><input id="x-min-setting" type="number" step="any" /></div>
+      <div class="setting-control"><label for="x-max-setting">X maximum</label><input id="x-max-setting" type="number" step="any" /></div>
+      <div class="setting-control"><label for="y-min-setting">Y minimum</label><input id="y-min-setting" type="number" step="any" /></div>
+      <div class="setting-control"><label for="y-max-setting">Y maximum</label><input id="y-max-setting" type="number" step="any" /></div>
+      <button type="button" id="apply-view-bounds">Apply exact viewport bounds</button>
       <label class="setting-check" for="show-x-axis-setting"><span>Show x-axis</span><input id="show-x-axis-setting" type="checkbox" /></label>
       <label class="setting-check" for="show-y-axis-setting"><span>Show y-axis</span><input id="show-y-axis-setting" type="checkbox" /></label>
       <label class="setting-check" for="show-labels-setting"><span>Show axis numbers</span><input id="show-labels-setting" type="checkbox" /></label>
@@ -1353,13 +1443,57 @@ function drawGrid(target = gridCanvas, exportWidth?: number, exportHeight?: numb
   const yScale = verticalScale();
   const originX = width / 2 - centerX * scale;
   const originY = height / 2 + centerY * yScale;
-  const xStep = tickStep();
-  const yStep = tickStep(yScale);
+  const warnings: string[] = [];
+  const boundedStep = (requested: number | undefined, automatic: number, span: number) => {
+    if (requested !== undefined && span / requested > 1000) {
+      warnings.push("Manual grid step is too small at this zoom; displaying automatic steps.");
+      return automatic;
+    }
+    return requested ?? automatic;
+  };
+  const xStep = boundedStep(graphOptions.xStep, tickStep(), width / scale);
+  const yStep = boundedStep(graphOptions.yStep, tickStep(yScale), height / yScale);
+  const warning = document.querySelector("#grid-step-warning");
+  if (warning) warning.textContent = [...new Set(warnings)].join(" ");
   context.font = "12px Inter, ui-sans-serif, system-ui, sans-serif";
   context.lineWidth = 1;
   context.beginPath();
 
   if (graphOptions.showGrid) {
+    if (graphOptions.gridMode === "polar") {
+      const radius = Math.max(...[0,width].flatMap((x) => [0,height].map((y) =>
+        Math.hypot((x - originX) / scale, (y - originY) / yScale))));
+      const step = Math.max(boundedStep(graphOptions.xStep, tickStep(Math.min(scale,yScale)), radius), radius / 1000);
+      for (const [spacing, alpha] of [[graphOptions.minorGrid ? step / 5 : step, 0.1], [step, 0.22]]) {
+        context.beginPath();
+        for (let r = spacing!; r <= radius; r += spacing!) {
+          context.moveTo(originX + r * scale, originY);
+          context.ellipse(originX, originY, r * scale, r * yScale, 0, 0, Math.PI * 2);
+        }
+        const rays = graphOptions.minorGrid && alpha === 0.1 ? 24 : 12;
+        for (let ray = 0; ray < rays; ray += 1) {
+          const theta = ray / rays * Math.PI * 2;
+          context.moveTo(originX,originY);
+          context.lineTo(originX + radius * Math.cos(theta) * scale,originY - radius * Math.sin(theta) * yScale);
+        }
+        context.strokeStyle = themeColorWithAlpha("text", alpha!);
+        context.stroke();
+      }
+    } else {
+    if (graphOptions.minorGrid) {
+      context.beginPath();
+      for (let x = Math.ceil((centerX - width / (2 * scale)) / (xStep / 5)) * (xStep / 5);
+        x <= centerX + width / (2 * scale); x += xStep / 5) {
+        context.moveTo(originX + x * scale,0); context.lineTo(originX + x * scale,height);
+      }
+      for (let y = Math.ceil((centerY - height / (2 * yScale)) / (yStep / 5)) * (yStep / 5);
+        y <= centerY + height / (2 * yScale); y += yStep / 5) {
+        context.moveTo(0,originY - y * yScale); context.lineTo(width,originY - y * yScale);
+      }
+      context.strokeStyle = themeColorWithAlpha("text",0.09);
+      context.stroke();
+      context.beginPath();
+    }
     for (let xValue = Math.ceil((centerX - width / (2 * scale)) / xStep) * xStep;
       xValue <= centerX + width / (2 * scale); xValue += xStep) {
       const x = originX + xValue * scale;
@@ -1384,7 +1518,11 @@ function drawGrid(target = gridCanvas, exportWidth?: number, exportHeight?: numb
     }
     context.strokeStyle = themeColorWithAlpha("text", 0.22);
     context.stroke();
+    }
   }
+  context.fillStyle = currentThemeColor("text");
+  if (graphOptions.showXAxis && graphOptions.xAxisLabel) context.fillText(graphOptions.xAxisLabel, width - 70, Math.max(14, Math.min(height - 8, originY - 8)));
+  if (graphOptions.showYAxis && graphOptions.yAxisLabel) context.fillText(graphOptions.yAxisLabel, Math.max(4, Math.min(width - 80, originX + 8)), 18);
 
   context.beginPath();
   const zeroX = originX;
@@ -1482,11 +1620,12 @@ function strokeColoredSegments(
   opacity: number,
 ): void {
   const paths = new Map<string, number[]>();
-  for (let index = 0; index < geometry.segments.length; index += 4) {
-    const x1 = geometry.segments[index]!;
-    const y1 = geometry.segments[index + 1]!;
-    const x2 = geometry.segments[index + 2]!;
-    const y2 = geometry.segments[index + 3]!;
+  const geometrySegments = dashedSegments(geometry.segments, context.getLineDash());
+  for (let index = 0; index < geometrySegments.length; index += 4) {
+    const x1 = geometrySegments[index]!;
+    const y1 = geometrySegments[index + 1]!;
+    const x2 = geometrySegments[index + 2]!;
+    const y2 = geometrySegments[index + 3]!;
     const x = ((x1 + x2) / 2 - width / 2) / scale + centerX;
     const y = (height / 2 - (y1 + y2) / 2) / verticalScale() + centerY;
     let color: string;
@@ -1500,6 +1639,7 @@ function strokeColoredSegments(
     paths.set(color, segments);
   }
   context.save();
+  context.setLineDash([]);
   context.globalAlpha = opacity;
   context.lineWidth = lineWidth;
   context.lineCap = "round";
@@ -1771,7 +1911,7 @@ function drawExplicitCurve(
   }
   const path = new Path2D();
   const samples: GraphSample[] = [];
-  const geometry: ExplicitCurveData = { id, color, samples, segments: [], colorAt, sideways };
+  const geometry: ExplicitCurveData = { id, color, samples, segments: [], colorAt, sideways,evaluate };
   const yScale = verticalScale();
   const originY = height / 2 + centerY * yScale;
   const parameterLength = sideways ? height : width;
@@ -2075,11 +2215,12 @@ function detectExplicitPoints(
     if ((previousValue < 0 && currentValue > 0) || (previousValue > 0 && currentValue < 0) ||
         previousValue === 0 || currentValue === 0) {
       if (previousValue !== 0 || currentValue !== 0) {
-        const fraction = previousValue === 0 ? 0
-          : currentValue === 0 ? 1
-            : previousValue / (previousValue - currentValue);
-        const x = sideways ? 0 : previous.x + (current.x - previous.x) * fraction;
-        const y = sideways ? previous.y + (current.y - previous.y) * fraction : 0;
+        let root:number|undefined;
+        try{root=bracketedRoot(evaluate,Math.min(sideways?previous.y:previous.x,sideways?current.y:current.x),
+          Math.max(sideways?previous.y:previous.x,sideways?current.y:current.x));}
+        catch(reason){if(!(reason instanceof Error))throw reason;continue;}
+        if(root===undefined)continue;
+        const x=sideways?0:root,y=sideways?root:0;
         addPointCandidate(
           axisIntercepts, x, y,
           sideways ? "y-intercept" : "x-intercept", [id],
@@ -2123,14 +2264,10 @@ function detectExplicitPoints(
         Math.sign(firstSlope) === Math.sign(secondSlope)) {
       continue;
     }
-    const curvature = previous.y - 2 * current.y + next.y;
-    if (curvature === 0) {
-      continue;
-    }
-    const offset = Math.max(-1, Math.min(1, 0.5 * (previous.y - next.y) / curvature));
-    const stepX = next.x - current.x;
-    const x = current.x + offset * stepX;
-    const y = current.y - 0.25 * (previous.y - next.y) * offset;
+    let x:number,y:number;
+    try{const extremum=bracketedExtremum(evaluate,Math.min(previous.x,next.x),Math.max(previous.x,next.x),firstSlope>0);
+      x=extremum.x;y=extremum.y;}
+    catch(reason){if(!(reason instanceof Error))throw reason;continue;}
     addPointCandidate(
       candidates, x, y, "vertex", [id], colorAt?.(x, y) ?? color, width, height,
     );
@@ -2185,8 +2322,15 @@ function detectExplicitIntersections(
     const fraction = difference0 === 0 ? 0
       : difference1 === 0 ? 1
         : difference0 / (difference0 - difference1);
-    const x = a0.x + (a1.x - a0.x) * fraction;
-    const y = a0.y + (a1.y - a0.y) * fraction;
+    let x = a0.x + (a1.x - a0.x) * fraction;
+    let y = a0.y + (a1.y - a0.y) * fraction;
+    if(first.evaluate&&second.evaluate&&!first.sideways&&!second.sideways){
+      try{
+        const root=bracketedRoot((x)=>first.evaluate!(x)-second.evaluate!(x),Math.min(a0.x,a1.x),Math.max(a0.x,a1.x));
+        if(root===undefined)continue;
+        x=root;y=first.evaluate(x);
+      }catch(reason){if(!(reason instanceof Error))throw reason;continue;}
+    }
     addPointCandidate(
       candidates, x, y, "intersection", [first.id, second.id],
       first.colorAt?.(x, y) ?? first.color, width, height,
@@ -2408,7 +2552,7 @@ function addGraphPointAt(screenX: number, screenY: number): void {
   }
 
   let table = tables.find((entry) => entry.sourceExpressionId === expression.id);
-  const row = { id: nextRowId++, x: String(x), y: String(y) };
+  const row = { id: nextRowId++, x: numericSource(x), y: numericSource(y) };
   if (!table) {
     table = {
       id: nextTableId++,
@@ -2749,6 +2893,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
     color: string;
     graphId: string;
     opacity: number;
+    expressionId: number;
   }> = [];
   const fixedVariables = new Set(expressions
     .map((entry) => getVariableDefinition(entry)?.target)
@@ -2775,6 +2920,8 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
       const evaluationErrors = new Set<string>();
       for (const [memberIndex, graph] of graphs.entries()) {
       expression.evaluationError = undefined;
+      context.save();
+      context.setLineDash(lineDash(expression.lineStyle, expression.lineWidth ?? 2));
       try {
       if (graph.kind === "collection") throw new Error("Nested graph collections are not supported.");
       const graphId=(graph.kind==="implicit"
@@ -2786,6 +2933,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
       if (graph.kind === "polygon") {
         try {
           const vertices = graph.evaluate();
+          const directVertices=polygonVertexSources(expression.text);
           const path = new Path2D();
           const geometry: CurveGeometry = { id: graphId, color: expression.color, segments: [] };
           const screen = vertices.map(([x, y]) => [width / 2 + (x - centerX) * scale, height / 2 - (y - centerY) * verticalScale()]);
@@ -2794,6 +2942,21 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
             else path.lineTo(vertex[0]!, vertex[1]!);
             const next = screen[(index + 1) % screen.length]!;
             geometry.segments.push(vertex[0]!, vertex[1]!, next[0]!, next[1]!);
+            const source=graph.vertexSources?.[index];
+            if(source&&expression.draggable!==false){
+              const point=compileGraphExpression(`(${source.join(",")})`,sliderValues);
+              if(point.kind==="point"){
+                const xVariables=point.xVariables.filter((name)=>!fixedVariables.has(name));
+                const yVariables=point.yVariables.filter((name)=>!fixedVariables.has(name));
+                const direct=Boolean(directVertices&&!point.xVariables.length&&!point.yVariables.length);
+                if((direct||xVariables.length||yVariables.length)&&!xVariables.some((name)=>yVariables.includes(name))){
+                  const [x,y]=vertices[index]!,color=colorAt?.(x,y)??expression.color;
+                  nextDraggableGraphPoints.push({expressionId:expression.id,draggable:true,xVariables,yVariables,x,y,
+                    screenX:vertex[0]!,screenY:vertex[1]!,color,opacity,directSource:direct?expression.text:undefined,vertexIndex:direct?index:undefined});
+                  addPointCandidate(candidates,x,y,"draggable vertex",[graphId],color,width,height);
+                }
+              }
+            }
           }
           path.closePath();
           context.save();
@@ -2860,7 +3023,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
             expressionId: expression.id,
             draggable: expression.draggable!==false&&
               !xVariables.some((name) => yVariables.includes(name)) &&
-              (xVariables.length>0||yVariables.length>0),
+              (xVariables.length>0||yVariables.length>0||Boolean(pointSources(expression.text)&&!graph.xVariables.length&&!graph.yVariables.length)),
             xVariables,
             yVariables,
             x,
@@ -2869,6 +3032,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
             screenY,
             color: pointColor,
             opacity,
+            directSource:pointSources(expression.text)&&!graph.xVariables.length&&!graph.yVariables.length?expression.text:undefined,
           });
           addPointCandidate(
             candidates,x,y,xVariables.length || yVariables.length ? "draggable point" : "point",[graphId],pointColor,width,height,
@@ -2946,7 +3110,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
             const screenX=width/2+(x-centerX)*scale;
             const screenY=height/2-(y-centerY)*verticalScale();
             const pointColor=colorAt?.(x,y)??expression.color;
-            listPoints.push({ x,y,color: pointColor,graphId,opacity });
+            listPoints.push({ x,y,color: pointColor,graphId,opacity,expressionId: expression.id });
             if(screenX>=0&&screenX<=width&&screenY>=0&&screenY<=height) {
               addPointCandidate(
                 candidates,x,y,"list point",[graphId],pointColor,width,height,
@@ -2982,6 +3146,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
       }
       updateExpressionErrorDisplay(expression);
       } finally {
+        context.restore();
         if (expression.evaluationError) evaluationErrors.add(expression.evaluationError);
       }
       }
@@ -3021,13 +3186,9 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
       if(screenX<-6||screenX>width+6||screenY<-6||screenY>height+6) continue;
       context.save();
       context.globalAlpha=point.opacity;
-      context.beginPath();
-      context.arc(screenX,screenY,4,0,Math.PI*2);
-      context.fillStyle=point.color;
-      context.fill();
-      context.strokeStyle=currentThemeColor("text-strong");
-      context.lineWidth=1.5;
-      context.stroke();
+      const expression = expressionById.get(point.expressionId);
+      drawStyledPoint(context, screenX, screenY, expression?.pointSize ?? 4, expression?.pointStyle ?? "filled",
+        point.color, currentThemeColor("text-strong"), 1.5);
       context.restore();
     }
     for(const point of nextDraggableGraphPoints) {
@@ -3035,13 +3196,9 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
         point.screenY<-8||point.screenY>height+8) continue;
       context.save();
       context.globalAlpha=point.opacity;
-      context.beginPath();
-      context.arc(point.screenX,point.screenY,6,0,Math.PI*2);
-      context.fillStyle=point.color;
-      context.fill();
-      context.strokeStyle=currentThemeColor("text-strong");
-      context.lineWidth=2;
-      context.stroke();
+      const expression = expressionById.get(point.expressionId);
+      drawStyledPoint(context, point.screenX, point.screenY, expression?.pointSize ?? 6, expression?.pointStyle ?? "filled",
+        point.color, currentThemeColor("text-strong"), 2);
       context.restore();
     }
     for(const { table,values } of tableData) {
@@ -3071,9 +3228,24 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
   if (renderDetailFactor !== 1) return;
   for (let first = 0; first < explicitCurves.length; first += 1) {
     for (let second = first + 1; second < explicitCurves.length; second += 1) {
+      if(!explicitCurves[first]!.evaluate||!explicitCurves[second]!.evaluate||explicitCurves[first]!.sideways||explicitCurves[second]!.sideways)continue;
       detectExplicitIntersections(
         explicitCurves[first]!, explicitCurves[second]!, candidates, width, height,
       );
+    }
+  }
+  const curves=[...explicitCurves,...implicitCurves];
+  for(let first=0;first<curves.length;first++){
+    for(let second=first+1;second<curves.length;second++){
+      const a=curves[first]!,b=curves[second]!;
+      if(a.id.split(":")[0]===b.id.split(":")[0])continue;
+      if(first<explicitCurves.length&&second<explicitCurves.length&&explicitCurves[first]!.evaluate&&explicitCurves[second]!.evaluate&&!a.sideways&&!b.sideways)continue;
+      const crossings=segmentCrossings(a.segments,b.segments,width,height);
+      if(crossings.limited)setProjectStatus("Intersection analysis reached its numerical work/marker limit; zoom in to inspect additional crossings.");
+      for(const [sx,sy]of crossings.points){
+        const x=centerX+(sx-width/2)/scale,y=centerY+(height/2-sy)/verticalScale();
+        addPointCandidate(candidates,x,y,"intersection",[a.id,b.id],a.colorAt?.(x,y)??a.color,width,height);
+      }
     }
   }
   drawGrid();
@@ -3180,6 +3352,10 @@ function scheduleDraw(): void {
   });
 }
 
+function isGraphConstructor(source:string):boolean{
+  return /^\s*(?:polygon|histogram|dotplot|boxplot|list|parametric|polar|derivative|integral)\s*\(/i.test(source);
+}
+
 function updateScalarResult(expression: Expression): boolean {
   const resultElement = workspaceList.querySelector<HTMLOutputElement>(
     `[data-expression-result-id="${expression.id}"]`,
@@ -3199,6 +3375,90 @@ function updateScalarResult(expression: Expression): boolean {
     }
   };
   const source = expression.text.trim();
+  if (isActionExpression(source)) {
+    if (resultElement) resultElement.hidden = true;
+    return true;
+  }
+  const definedInference=inferenceDefinition(source);
+  const namedInference=expressions.some((expression)=>inferenceDefinition(expression.text)?.target===source.toLowerCase());
+  if (definedInference||namedInference||/^(ztest|ttest|zproptest|chisqtest|chisqgof)\s*\(/i.test(source)) {
+    try {
+      const expanded = expandFunctions(definedInference?.source??source, String(expression.id));
+      const call = inferenceCall(expanded);
+      if (call && !call.property) {
+        const result = readInference(call,
+          (item) => compileExpression(item, sliderValues)(0).value.toNumber(), collectionValues, graphOptions.statisticsMode);
+        expression.evaluationError = undefined;
+        expression.scalarText = undefined;
+        expression.scalarEvaluator = undefined;
+        if (resultElement) {
+          resultElement.textContent = `${definedInference?`${definedInference.target}: `:""}${inferenceSummary(result)}`;
+          resultElement.title = "Numerical inference; null distribution and p-value tails shown on graph. Check sampling assumptions.";
+          resultElement.hidden = false;
+        }
+        updateError();
+        return Boolean(definedInference);
+      }
+    } catch (reason) {
+      expression.evaluationError = reason instanceof Error ? reason.message : "Could not calculate inference.";
+      if (resultElement) resultElement.hidden = true;
+      updateError();
+      return false;
+    }
+  }
+  const definedDistribution = distributionDefinition(source);
+  let expandedDistribution: string;
+  try {
+    expandedDistribution = expandDistributionDefinitions(source, expressions.flatMap((expression) => {
+      const definition = distributionDefinition(expression.text);
+      return definition ? [definition] : [];
+    }));
+  } catch (reason) {
+    expression.evaluationError = reason instanceof Error ? reason.message : "Could not expand distribution.";
+    if (resultElement) resultElement.hidden = true;
+    updateError();
+    return false;
+  }
+  const directDistribution = distributionCall(expandedDistribution);
+  if (definedDistribution || (directDistribution && !expandedDistribution.slice(directDistribution.end).trim())) {
+    expression.scalarText = undefined;
+    expression.scalarEvaluator = undefined;
+    try {
+      const body = definedDistribution?.source ?? source;
+      const expanded = definedDistribution ? expandFunctions(body) : expandFunctions(expandedDistribution);
+      readDistribution(expanded,
+        (item) => compileExpression(item, sliderValues)(0).value.toNumber(), collectionValues, graphOptions.statisticsMode);
+      expression.evaluationError = undefined;
+      if (resultElement) {
+        resultElement.textContent = definedDistribution ? `${definedDistribution.target}: probability distribution` : "Probability distribution (numerical approximation)";
+        resultElement.hidden = false;
+      }
+    } catch (reason) {
+      expression.evaluationError = reason instanceof Error ? reason.message : "Could not evaluate distribution.";
+      if (resultElement) resultElement.hidden = true;
+    }
+    updateError();
+    return Boolean(definedDistribution);
+  }
+  if (/^stats\s*\(/i.test(source)) {
+    expression.scalarText = undefined;
+    expression.scalarEvaluator = undefined;
+    try {
+      const summary = statisticsSummary(expandFunctions(source),
+        (item) => compileExpression(item, sliderValues)(0).value.toNumber(), collectionValues, graphOptions.statisticsMode);
+      expression.evaluationError = undefined;
+      if (resultElement) {
+        resultElement.textContent = summary;
+        resultElement.title = "Numerical descriptive statistics; boxplot shown on graph.";
+        resultElement.hidden = false;
+      }
+    } catch (reason) {
+      expression.evaluationError = reason instanceof Error ? reason.message : "Could not calculate statistics.";
+      if (resultElement) resultElement.hidden = true;
+    }
+    updateError();
+    return false;
+  }
   if (source.includes("~")) {
     expression.scalarText = undefined;
     expression.scalarEvaluator = undefined;
@@ -3210,6 +3470,27 @@ function updateScalarResult(expression: Expression): boolean {
     return false;
   }
   const scalarKey = `${source}\u0000${userFunctionSignature()}\u0000${collectionSignature(source)}`;
+  if(graphOptions.complexMode&&!isGraphConstructor(source)&&!graphRelation(source)&&!pointSources(source)&&
+    !freeIdentifiers(source).some((name)=>["x","y","t"].includes(name))){
+    try{
+      const expanded=expandFunctions(source);
+      const collection=expandCollections(expanded,(item)=>{
+        const value=compileComplexExpression(item,sliderValues,complexValues)(0);
+        if(value.im!==0)throw new Error("This list operation requires real inputs.");
+        return value.re;
+      },collectionValues,graphOptions.statisticsMode);
+      if(!collection.list&&!pointSources(collection.items[0]!)){
+        const value=compileComplexExpression(collection.items[0]!,sliderValues,complexValues)(0);
+        if(resultElement){resultElement.textContent=`≈ ${formatComplex(value)}`;resultElement.hidden=false;}
+        expression.compileError=undefined;expression.evaluationError=undefined;updateError();
+        return value.im===0;
+      }
+    }catch(reason){
+      expression.evaluationError=reason instanceof Error?reason.message:"Could not evaluate complex expression.";
+      if(resultElement)resultElement.hidden=true;
+      updateError();return true;
+    }
+  }
   const tokens = freeIdentifiers(source.replace(/([a-z](?:_[a-z0-9]+)?)\.[xy]\b/gi, "$1"));
   if (!source || graphRelation(source) ||
       /^(?:list|derivative|integral|parametric|polar)\s*\(/i.test(source) ||
@@ -3224,8 +3505,8 @@ function updateScalarResult(expression: Expression): boolean {
     expression.scalarEvaluator = undefined;
     let expandedSource: string | undefined;
     try {
-      expandedSource = expandFunctions(source);
-      let approximate = false;
+      expandedSource = expandFunctions(source, String(expression.id));
+      let approximate = INFERENCE_NAMES.some((name) => new RegExp(`\\b${name}\\s*\\(`, "i").test(source));
       if (hasCollections(expandedSource, collectionValues)) {
         const collection = expandCollections(expandedSource,
           (item) => compileExpression(item, sliderValues)(0).value.toNumber(), collectionValues, graphOptions.statisticsMode);
@@ -3234,7 +3515,7 @@ function updateScalarResult(expression: Expression): boolean {
           return false;
         }
         expandedSource = collection.items[0]!;
-        approximate = collection.approximate ?? false;
+        approximate ||= collection.approximate ?? false;
       }
       const evaluate = compileExpression(expandedSource, sliderValues);
       expression.scalarEvaluator = () => {
@@ -3281,10 +3562,20 @@ function updateScalarResult(expression: Expression): boolean {
 }
 
 function collectionSignature(source: string): string {
-  return hasCollections(source, collectionValues) ||
+  const distributionDefinitions = expressions.flatMap((expression) => {
+    const definition = distributionDefinition(expression.text);
+    return definition ? [definition] : [];
+  });
+  const inferenceDefinitions=expressions.flatMap((expression)=>{
+    const definition=inferenceDefinition(expression.text);return definition?[definition]:[];
+  });
+  const structuredNames = [...DISTRIBUTION_NAMES, ...INFERENCE_NAMES, ...RANDOM_NAMES,
+    ...distributionDefinitions.map((definition) => definition.target),...inferenceDefinitions.map((definition)=>definition.target)];
+  return (source.match(/[a-z]+(?:_[a-z0-9]+)?/gi) ?? []).some((token) => structuredNames.includes(token.toLowerCase())) ||
+    hasCollections(source, collectionValues) ||
     getUserFunctionDefinitions().some(({ definition }) => hasCollections(definition.body, collectionValues))
-    ? JSON.stringify([collectionValues, pointValues, sliderValues, tableColumnErrors, graphOptions.statisticsMode, graphOptions.angleMode]) :
-      JSON.stringify([pointValues, tableColumnErrors, graphOptions.statisticsMode, graphOptions.angleMode]);
+    ? JSON.stringify([collectionValues, pointValues, complexValues, sliderValues, tableColumnErrors, graphOptions.statisticsMode, graphOptions.angleMode, graphOptions.complexMode, getRandomSeed(), distributionDefinitions,inferenceDefinitions]) :
+      JSON.stringify([pointValues, complexValues, tableColumnErrors, graphOptions.statisticsMode, graphOptions.angleMode, graphOptions.complexMode]);
 }
 
 function getCompiled(expression: Expression): CompiledGraph | undefined {
@@ -3303,6 +3594,9 @@ function getCompiled(expression: Expression): CompiledGraph | undefined {
     expression.compileError = undefined;
     expression.evaluationError = undefined;
     const functionDefinition = functionStates.find(({ expression: owner }) => owner === expression);
+    if (distributionDefinition(expression.text)) return undefined;
+    if(inferenceDefinition(expression.text))return undefined;
+    if (isActionExpression(expression.text)) return undefined;
     if (functionDefinition) {
       expression.compileError = functionDefinition.error;
       if (!expression.compileError) {
@@ -3310,8 +3604,10 @@ function getCompiled(expression: Expression): CompiledGraph | undefined {
           const expandedSource = expandFunctions(
             `${functionDefinition.definition.name}(${functionParameters(functionDefinition.definition).map(() => "0").join(",")})`,
           );
-          compileCollectionGraph(expandedSource, sliderValues, collectionValues, false, graphOptions.statisticsMode) ??
-            compileGraphExpression(expandedSource, sliderValues, graphOptions.statisticsMode);
+          if(graphOptions.complexMode&&!hasCollections(expandedSource,collectionValues)&&!graphRelation(expandedSource)){
+            compileComplexExpression(expandedSource,sliderValues,complexValues);
+          }else compileCollectionGraph(expandedSource, sliderValues, collectionValues, false, graphOptions.statisticsMode) ??
+              compileGraphExpression(expandedSource, sliderValues, graphOptions.statisticsMode);
         } catch (reason) {
           expression.compileError = reason instanceof Error ? reason.message : "Invalid function";
         }
@@ -3337,6 +3633,10 @@ function getCompiled(expression: Expression): CompiledGraph | undefined {
     const definition = getVariableDefinition(expression);
     if (definition) {
       expression.compileError = definition.error;
+      if(!definition.error&&complexValues[definition.target]?.im){
+        const value=complexValues[definition.target]!;
+        expression.compiled={kind:"point",xVariables:[],yVariables:[],evaluate:()=>[value.re,value.im]};
+      }
       if (!definition.error && Object.hasOwn(pointValues, definition.target)) {
         try {
           expression.compiled = compileGraphExpression(expandFunctions(definition.target), sliderValues);
@@ -3348,7 +3648,55 @@ function getCompiled(expression: Expression): CompiledGraph | undefined {
       return expression.compiled;
     }
     try {
-      const source = expandFunctions(expression.text);
+      let source = expandFunctions(expression.text, String(expression.id));
+      if(graphOptions.complexMode&&!isGraphConstructor(source)&&hasCollections(source,collectionValues)){
+        const collection=expandCollections(source,(text)=>{
+          const value=compileComplexExpression(text,sliderValues,complexValues)(0);
+          if(value.im!==0)throw new Error("This list operation requires real inputs.");
+          return value.re;
+        },collectionValues,graphOptions.statisticsMode);
+        if(collection.list){
+          const items=collection.items.map((item)=>{
+            if(freeIdentifiers(item).some((name)=>["x","y","t"].includes(name)))return item;
+            const point=pointSources(item);
+            if(point)return`(${point.map((coordinate)=>{
+              const value=compileComplexExpression(coordinate,sliderValues,complexValues)(0);
+              if(value.im!==0)throw new Error("Point coordinates must be real.");
+              return numericSource(value.re);
+            }).join(",")})`;
+            const value=compileComplexExpression(item,sliderValues,complexValues)(0);
+            return value.im===0?numericSource(value.re):`(${numericSource(value.re)},${numericSource(value.im)})`;
+          });
+          if(items.some((item,index)=>item!==collection.items[index]))source=`[${items.join(",")}]`;
+        }else source=collection.items[0]!;
+      }
+      const complexPoint=graphOptions.complexMode?pointSources(source):undefined;
+      if(complexPoint&&(/\b(real|imag|conj|arg)\s*\(/i.test(source)||freeIdentifiers(source).some((name)=>name==="i"||complexValues[name]?.im))){
+        const coordinates=complexPoint.map((coordinate)=>compileComplexExpression(coordinate,sliderValues,complexValues));
+        expression.compiled={kind:"point",xVariables:[],yVariables:[],evaluate:()=>{
+          const a=coordinates[0]!(0),b=coordinates[1]!(0);
+          if(a.im!==0||b.im!==0)throw new Error("Point coordinates must be real; use real(z) or imag(z).");
+          return[a.re,b.re];
+        }};
+        return expression.compiled;
+      }
+      if(graphOptions.complexMode&&!isGraphConstructor(source)&&!inferenceCall(source)&&!distributionCall(source)&&!graphRelation(source)&&!hasCollections(source,collectionValues)&&!pointSources(source)&&
+        !freeIdentifiers(source).some((name)=>["x","y","t"].includes(name))){
+        const value=compileComplexExpression(source,sliderValues,complexValues)(0);
+        if(value.im!==0){expression.compiled={kind:"point",xVariables:[],yVariables:[],evaluate:()=>[value.re,value.im]};return expression.compiled;}
+        return undefined;
+      }
+      const complexSource=source.replace(/^\s*y\s*=\s*/i,"");
+      const identifiers=freeIdentifiers(complexSource);
+      if(graphOptions.complexMode&&(!graphRelation(source)||/^\s*y\s*=/i.test(source))&&!hasCollections(source,collectionValues)&&!pointSources(source)&&
+        identifiers.includes("x")&&!identifiers.includes("y")&&(identifiers.some((name)=>name==="i"||complexValues[name]?.im)||/\b(real|imag|conj|arg)\s*\(/i.test(source))){
+        const evaluate=compileComplexExpression(complexSource,sliderValues,complexValues);
+        const componentOnly=complexExpressionIsReal(complexSource,sliderValues,complexValues);
+        expression.compiled=componentOnly?{kind:"explicit",evaluate:(x)=>{
+          const value=evaluate(x);if(value.im!==0)throw new Error("Expected a real component.");return value.re;
+        }}:{kind:"parametric",start:-10,end:10,evaluate:(x)=>{const value=evaluate(x);return[value.re,value.im];}};
+        return expression.compiled;
+      }
       expression.compiled = compileCollectionGraph(source, sliderValues, collectionValues, graphMode === "desmos", graphOptions.statisticsMode) ?? (graphMode === "desmos"
         ? compileFastGraphExpression(source, sliderValues, graphOptions.statisticsMode)
         : compileGraphExpression(source, sliderValues, graphOptions.statisticsMode));
@@ -3421,7 +3769,16 @@ function getUserFunctionDefinitions(): FunctionState[] {
       "atan", "ln", "log", "exp", "abs", "floor", "ceil", "parametric", "polar",
       "derivative", "integral", "list", "sum", "product", "min", "max", "mean",
       "median", "variance", "stdev", "factorial",
-      "for", "r", "theta", "prod", "int", "derivativeat", ...BUILTIN_NAMES, ...COLLECTION_FUNCTIONS,
+      "for", "r", "theta", "prod", "int", "derivativeat", ...BUILTIN_NAMES, ...COLLECTION_FUNCTIONS, ...STATISTICAL_PLOTS,
+      ...DISTRIBUTION_NAMES, ...PROBABILITY_KERNELS, "pdf", "cdf", "inversecdf",
+      ...INFERENCE_NAMES, "test", "conf", "estimate", "stderr", "dof", "score", "pleft", "pright", "lower", "upper",
+      ...RANDOM_NAMES,
+      ...COMPLEX_FUNCTIONS,"i",
+      ...expressions.flatMap((expression) => {
+        const definition = distributionDefinition(expression.text);
+        return definition ? [definition.target] : [];
+      }),
+      ...expressions.flatMap((expression)=>{const definition=inferenceDefinition(expression.text);return definition?[definition.target]:[];}),
     ].includes(name)) {
       state.error = `"${name}" is reserved and cannot be defined as a function.`;
     }
@@ -3452,7 +3809,32 @@ function userFunctionSignature(
     : JSON.stringify(states.map(({ definition, error }) => ({ ...definition, error })));
 }
 
-function expandFunctions(source: string): string {
+function regressionSlopeInference(target:string):{estimate:number;stderr:number;dof:number}{
+  const owner=expressions.find((expression)=>expression.regressionCache?.result.parameters[target]!==undefined);
+  const result=owner?.regressionCache?.result;
+  if(!owner||!result?.graphSource||Object.keys(result.parameters).length!==2)throw new Error("Slope inference requires a fitted linear regression with slope and intercept.");
+  const sides=regressionSides(expandFunctions(owner.text));
+  if(!sides)throw new Error("Missing regression model.");
+  const lists=[...new Set((sides.right.match(/[a-z]+(?:_[a-z0-9]+)?/gi)??[]).map((name)=>name.toLowerCase()).filter((name)=>Object.hasOwn(collectionValues,name)))];
+  if(lists.length!==1)throw new Error("Slope inference requires one independent data list.");
+  const scope={...sliderValues,...result.parameters};
+  const f=compileExpression(result.graphSource,scope);
+  const original=scope[target]!;
+  const intercept=f(0).value.toNumber(),slope=f(1).value.toNumber()-intercept;
+  for(const x of [-2,0,1,2]){
+    const y=f(x).value.toNumber();
+    if(Math.abs(y-(intercept+slope*x))>1e-8*Math.max(1,Math.abs(y)))throw new Error("Slope inference is available only for linear models.");
+    scope[target]=original+1;
+    const changed=f(x).value.toNumber();scope[target]=original;
+    if(Math.abs(changed-y-x)>1e-8*Math.max(1,Math.abs(y)))throw new Error(`"${target}" is not the linear model's slope coefficient.`);
+  }
+  const evaluate=(text:string)=>compileExpression(text,sliderValues)(0).value.toNumber();
+  const observed=expandCollections(sides.left,evaluate,collectionValues,graphOptions.statisticsMode);
+  const x=collectionValues[lists[0]!]!.map(evaluate),y=observed.items.map(evaluate);
+  return regressionSlopeSummary(x,y);
+}
+
+function expandFunctions(source: string, scope = source, rewriteStructured = true): string {
   const states = getUserFunctionDefinitions();
   const signature = userFunctionSignature(states);
   if (expansionSignature !== signature) {
@@ -3472,10 +3854,50 @@ function expandFunctions(source: string): string {
     expandedSources.set(source, expanded);
   }
   expanded = expandNamedPoints(expanded, pointValues);
+  const inferenceDefinitions=expressions.flatMap((expression)=>{
+    const definition=inferenceDefinition(expression.text);return definition?[definition]:[];
+  });
+  for(const definition of inferenceDefinitions){
+    if(!(expanded.match(/[a-z]+(?:_[a-z0-9]+)?/gi)??[]).some((name)=>name.toLowerCase()===definition.target))continue;
+    if(expressions.some((expression)=>getVariableDefinition(expression)?.target===definition.target||
+      distributionDefinition(expression.text)?.target===definition.target)||
+      tables.some((table)=>tableColumns(table).some((column)=>column.target===definition.target)))throw new Error(`"${definition.target}" is already defined by another object.`);
+  }
+  expanded=expandInferenceDefinitions(expanded,inferenceDefinitions);
+  if(rewriteStructured){
+    expanded=expanded.replace(/\bttest\s*\(\s*([a-z](?:_[a-z0-9]+)?)\s*\)/gi,(original,name:string)=>{
+      const target=name.toLowerCase();
+      if(!expressions.some((expression)=>expression.regressionCache?.result.parameters[target]!==undefined))return original;
+      const summary=regressionSlopeInference(target);
+      const n=summary.dof+1;
+      return `ttest(${numericSource(summary.estimate)},${numericSource(summary.stderr*Math.sqrt(n))},${n})`;
+    });
+  }
+  const distributions = expressions.flatMap((expression) => {
+    const definition = distributionDefinition(expression.text);
+    return definition ? [definition] : [];
+  });
+  for (const definition of distributions) {
+    if (!(expanded.match(/[a-z]+(?:_[a-z0-9]+)?/gi) ?? []).some((name) => name.toLowerCase() === definition.target)) continue;
+    if (expressions.some((expression) => getVariableDefinition(expression)?.target === definition.target) ||
+      tables.some((table) => tableColumns(table).some((column) => column.target === definition.target))) {
+      throw new Error(`"${definition.target}" is already defined as a scalar, list, point, or table column.`);
+    }
+  }
+  expanded = expandDistributionDefinitions(expanded, distributions);
   const invalidColumn = (expanded.match(/[a-z]+(?:_[a-z0-9]+)?/gi) ?? [])
     .map((name) => name.toLowerCase()).find((name) => Object.hasOwn(tableColumnErrors, name));
   if (invalidColumn) throw new Error(tableColumnErrors[invalidColumn]);
-  return expanded;
+  if (!rewriteStructured) return expanded;
+  const distribution = distributionCall(expanded);
+  if (distribution && !expanded.slice(distribution.end).trim()) return expanded;
+  expanded = rewriteRandom(expanded,
+    (item) => compileExpression(item, sliderValues)(0).value.toNumber(), collectionValues, graphOptions.statisticsMode, scope);
+  expanded = rewriteInferenceProperties(expanded, (call) =>
+    `(${numericSource(inferenceProperty(readInference(call, (item) => compileExpression(item, sliderValues)(0).value.toNumber(),
+      collectionValues, graphOptions.statisticsMode), call.property!))})`);
+  return rewriteDistributions(expanded,
+    (item) => compileExpression(item, sliderValues)(0).value.toNumber(), collectionValues, graphOptions.statisticsMode, scope);
 }
 
 function getVariableDefinition(
@@ -3487,6 +3909,9 @@ function getVariableDefinition(
   }
   if (expression.definition) return expression.definition;
   if (expression.text.includes("~")) return undefined;
+  if (actionDefinition(expression.text) || /(?:->|→)/.test(expression.text)) return undefined;
+  if (distributionDefinition(expression.text)) return undefined;
+  if(inferenceDefinition(expression.text))return undefined;
   const match = /^\s*([a-z](?:_[a-z0-9]+)?)\s*=\s*(.+)\s*$/i.exec(expression.text);
   if (!match) return undefined;
   const target = match[1]!.toLowerCase();
@@ -3497,13 +3922,13 @@ function getVariableDefinition(
 
 function variableDefinitionSignature(): string {
   return JSON.stringify([
-    expressions.map(({ text, hsv, label, labelX, labelY }) => [text, hsv, label, labelX, labelY]),
+    expressions.map(({ text, hsv, label, labelX, labelY, clickAction }) => [text, hsv, label, labelX, labelY, clickAction]),
     tables.map(({ id, rows, xColumn, yColumn, xFormula, yFormula, extraColumns }) =>
       [id, rows, xColumn, yColumn, xFormula, yFormula, extraColumns]),
     tickers.map(({ action }) => action),
     photos.map((photo) => PHOTO_FIELDS.map(([key]) => photo[key])),
     sliderValues,
-    graphOptions.statisticsMode, graphOptions.angleMode,
+    graphOptions.statisticsMode, graphOptions.angleMode, graphOptions.complexMode, getRandomSeed(),
   ]);
 }
 
@@ -3525,11 +3950,24 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
   }
   const functionStates = getUserFunctionDefinitions();
   const reserved = new Set([
-    "x", "y", "t", "and", "or", "pi", "e", "sqrt", "sin", "cos", "tan", "asin", "acos",
+    "x", "y", "t", "dt", "and", "or", "pi", "e", "sqrt", "sin", "cos", "tan", "asin", "acos",
     "atan", "ln", "log", "exp", "abs", "floor", "ceil", "parametric", "polar",
     "derivative", "integral", "list", "sum", "product", "min", "max", "mean",
     "median", "variance", "stdev", "factorial",
-    "for", "r", "theta", "prod", "int", "derivativeat", ...BUILTIN_NAMES, ...COLLECTION_FUNCTIONS,
+    "for", "r", "theta", "prod", "int", "derivativeat", ...BUILTIN_NAMES, ...COLLECTION_FUNCTIONS, ...STATISTICAL_PLOTS,
+    ...DISTRIBUTION_NAMES, ...PROBABILITY_KERNELS, "pdf", "cdf", "inversecdf",
+    ...INFERENCE_NAMES, "test", "conf", "estimate", "stderr", "dof", "score", "pleft", "pright", "lower", "upper",
+    ...RANDOM_NAMES,
+    ...COMPLEX_FUNCTIONS,...(graphOptions.complexMode?["i"]:[]),
+    ...expressions.flatMap((expression)=>{const definition=inferenceDefinition(expression.text);return definition?[definition.target]:[];}),
+    ...expressions.flatMap((expression) => {
+      const definition = distributionDefinition(expression.text);
+      return definition ? [definition.target] : [];
+    }),
+    ...expressions.flatMap((expression) => {
+      const definition = actionDefinition(expression.text);
+      return definition ? [definition.target] : [];
+    }),
     ...functionStates.map(({ definition }) => definition.name),
   ]);
   const definitions = expressions
@@ -3583,6 +4021,7 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
   for (const { target } of regressionMembers.keys()) definitionNames.add(target);
   collectionValues = {};
   pointValues = {};
+  complexValues={};
   const counts = new Map<string, number>();
   for (const { target } of definitions) counts.set(target, (counts.get(target) ?? 0) + 1);
   for (const definition of definitions) {
@@ -3590,6 +4029,10 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
     definition.display = undefined;
     definition.error = counts.get(definition.target)! > 1
       ? `"${definition.target}" is defined more than once.`
+      : expressions.some((expression) => distributionDefinition(expression.text)?.target === definition.target)
+        ? `"${definition.target}" is already defined as a probability distribution.`
+      : expressions.some((expression)=>inferenceDefinition(expression.text)?.target===definition.target)
+        ? `"${definition.target}" is already defined as an inference object.`
       : functionStates.some(({ definition: fn }) => fn.name === definition.target)
         ? `"${definition.target}" is already defined as a function.`
         : undefined;
@@ -3619,6 +4062,7 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
       ...[...expression.label?.matchAll(/\$\{([^{}]+)\}/g) ?? []].map((match) => match[1]!),
       expression.labelX ?? "",
       expression.labelY ?? "",
+      expression.clickAction ?? "",
     ];
   }).concat(tickers.map((ticker) => ticker.action),
     photos.flatMap((photo) => PHOTO_FIELDS.map(([key]) => photo[key])),
@@ -3685,7 +4129,7 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
       }
       for (const member of record.members) {
         if (member.target === record.residualName) {
-          collectionValues[member.target] = result.residuals.map((value) => `(${value})`);
+          collectionValues[member.target] = result.residuals.map((value) => `(${numericSource(value)})`);
           delete sliderValues[member.target];
           member.display = `[${result.residuals.map((value) => Number(value.toPrecision(10))).join(", ")}]`;
         } else {
@@ -3721,8 +4165,8 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
     let expanded: string;
     try {
       expanded = columns.has(definition)
-        ? columns.get(definition)!.sources.map(expandFunctions).join("\n")
-        : expandFunctions(definition.source);
+        ? columns.get(definition)!.sources.map((source, row) => expandFunctions(source, `${definition.target}:${row}`, false)).join("\n")
+        : expandFunctions(definition.source, definition.target, false);
     } catch (reason) {
       definition.error = reason instanceof Error ? reason.message : "Could not expand definition.";
       state.set(definition.target, "failed");
@@ -3760,7 +4204,7 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
       const column = columns.get(definition);
       if (column) {
         const rowColumns = tableColumns(column.table).filter((entry) =>
-          entry.axis !== column.axis && (entry.axis === "x" || entry.axis === "y"))
+          entry.axis !== column.axis)
           .map((entry) => ({ target: entry.target, rows: new Map(entry.rows.map((row, index) => [row, index])) }));
         const values = evaluateTableColumn(column, (source, rowIndex) => {
           let rowSource = expandFunctions(source);
@@ -3782,14 +4226,19 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
         state.set(definition.target, "resolved");
         return;
       }
-      expanded = expandFunctions(definition.source);
+      expanded = expandFunctions(definition.source, definition.target);
       const collection = expandCollections(expanded,
         (item) => compileExpression(item, sliderValues)(0).value.toNumber(), collectionValues, graphOptions.statisticsMode);
       const point = !collection.list ? pointSources(collection.items[0]!) : undefined;
       if (point) {
-        const values = point.map((coordinate) => compileExpression(coordinate, sliderValues)(0).value.toNumber());
+        const values = point.map((coordinate) =>{
+          if(!graphOptions.complexMode)return compileExpression(coordinate, sliderValues)(0).value.toNumber();
+          const value=compileComplexExpression(coordinate,sliderValues,complexValues)(0);
+          if(value.im!==0)throw new Error("Point coordinates must be real; use real(z) or imag(z).");
+          return value.re;
+        });
         if (!values.every(Number.isFinite)) throw new Error("Point definitions require finite scalar coordinates.");
-        pointValues[definition.target] = point;
+        pointValues[definition.target] = graphOptions.complexMode?[numericSource(values[0]!),numericSource(values[1]!)]:point;
         delete sliderValues[definition.target];
         definition.display = `(${values.join(", ")})`;
         state.set(definition.target, "resolved");
@@ -3797,6 +4246,7 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
       }
       if (collection.list) {
         const display = collection.items.map((item) => {
+          if(graphOptions.complexMode&&!pointSources(item))return formatComplex(compileComplexExpression(item,sliderValues,complexValues)(0));
           const graph = compileGraphExpression(item, sliderValues, graphOptions.statisticsMode);
           if (graph.kind === "point") {
             const point = graph.evaluate();
@@ -3816,6 +4266,14 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
         return;
       }
       expanded = collection.items[0]!;
+      if(graphOptions.complexMode){
+        const value=compileComplexExpression(expanded,sliderValues,complexValues)(0);
+        complexValues[definition.target]=value;
+        definition.display=`≈ ${formatComplex(value)}`;
+        if(value.im===0){definition.value=value.re;sliderValues[definition.target]=value.re;}
+        else delete sliderValues[definition.target];
+        state.set(definition.target,"resolved");return;
+      }
       const evaluatorKey = `${expanded}\u0000${availableNames.join(",")}\u0000${graphOptions.statisticsMode}`;
       if (definition.evaluatorKey !== evaluatorKey || !definition.evaluator) {
         definition.evaluatorKey = evaluatorKey;
@@ -4297,17 +4755,74 @@ function stopAllTickers(save = true): void {
   for (const id of [...runningTickers.keys()]) stopTicker(id, save);
 }
 
+function isActionExpression(source: string): boolean {
+  return /(?:->|→)/.test(source) || expressions.some((expression) =>
+    actionDefinition(expression.text)?.target === source.trim().toLowerCase());
+}
+
+function prepareActionUpdates(source: string, dt = 0): ActionUpdate[] {
+  synchronizeVariableDefinitions(false);
+  const definitions = expressions.flatMap((expression) => {
+    const definition = actionDefinition(expression.text);
+    return definition ? [definition] : [];
+  });
+  const body = actionDefinition(source)?.source ?? source;
+  const expanded = expandActions(body, definitions);
+  const columns = new Set(tables.flatMap((table) => tableColumns(table).map((column) => column.target)));
+  const available = new Set([
+    ...Object.keys(sliderValues).filter((name) => Number.isFinite(sliderValues[name]) && !columns.has(name)),
+    ...Object.keys(collectionValues).filter((name) => !columns.has(name)),
+    ...Object.keys(pointValues),
+  ]);
+  const values = { ...sliderValues, dt };
+  const lists = { ...collectionValues };
+  const updates = evaluateActions(expanded,
+    (text) => compileExpression(text, values)(0).value.toNumber(), available, lists, graphOptions.statisticsMode,
+    (source)=>expandFunctions(source));
+  for (const update of updates) {
+    const definition = expressions.find((expression) => getVariableDefinition(expression)?.target === update.target);
+    if ((update.list||update.points) && !definition) throw new Error("Point/list actions require a named expression definition.");
+    const text = actionUpdateSource(update);
+    if (definition && text.length > 512) throw new Error(`Updated definition "${update.target}" exceeds the 512-character workspace expression limit.`);
+  }
+  return updates;
+}
+
+function applyActionUpdates(updates: ActionUpdate[], recordHistory = true): void {
+  if (recordHistory) flushPendingHistory();
+  for (const update of updates) {
+    const expression = expressions.find((expression) => getVariableDefinition(expression)?.target === update.target);
+    if (expression) {
+      expression.text = actionUpdateSource(update);
+      const input = workspaceList.querySelector<HTMLElement>(`[data-expression-error-id="${expression.id}"]`)?.parentElement?.querySelector<HTMLInputElement>('input[aria-label^="Expression "]');
+      if (input) input.value = expression.text;
+    } else sliderValues[update.target] = update.values[0]!;
+  }
+  variableDefinitionCache = undefined;
+  renderSliders();
+  scheduleDraw();
+  if (recordHistory) scheduleProjectSave();
+}
+
 function startTicker(ticker: Ticker): void {
   if (runningTickers.has(ticker.id)) return;
   cancelRefinement();
   for (const name of sliderNames()) sliderValues[name] ??= 1;
   renderSliders();
-  let action: ReturnType<typeof compileTickerAction>;
+  let action: () => void;
   try {
-    action = compileTickerAction(expandFunctions(ticker.action), sliderValues);
-    if (expressions.some((expression) =>
-      getVariableDefinition(expression)?.target === action.target)) {
-      throw new Error(`"${action.target}" is defined by an expression and cannot be changed by a ticker.`);
+    if (/(?:->|→)/.test(ticker.action) || isActionExpression(ticker.action)) {
+      prepareActionUpdates(ticker.action, ticker.intervalMs);
+      action = () => applyActionUpdates(prepareActionUpdates(ticker.action, ticker.intervalMs), false);
+    } else {
+      const legacy = compileTickerAction(expandFunctions(ticker.action), sliderValues);
+      if (expressions.some((expression) => getVariableDefinition(expression)?.target === legacy.target)) {
+        throw new Error(`"${legacy.target}" is defined by an expression; use "${legacy.target} -> ..." to update it.`);
+      }
+      action = () => {
+        sliderValues[legacy.target] = legacy.evaluate();
+        updateSliderInputValues(legacy.target);
+      };
     }
   } catch (reason) {
     ticker.error = reason instanceof Error ? reason.message : "Could not start ticker.";
@@ -4328,8 +4843,7 @@ function startTicker(ticker: Ticker): void {
   };
   runtime.timer = window.setInterval(() => {
     try {
-      sliderValues[action.target] = action.evaluate();
-      updateSliderInputValues(action.target);
+      action();
       scheduleDraw();
       if (runtime.remainingTicks !== undefined) {
         runtime.remainingTicks -= 1;
@@ -4768,6 +5282,59 @@ function renderExpressions(): void {
       opacityValue,
     );
     appearanceControls.append(colorControl, lineWidthControl, opacityControl);
+    for (const [title, selected, options, update] of [
+      ["Line style", expression.lineStyle ?? "solid", ["solid", "dashed", "dotted"], (value: string) => {
+        if (value === "solid" || value === "dashed" || value === "dotted") expression.lineStyle = value;
+        else throw new Error("Invalid line style.");
+      }],
+      ["Point style", expression.pointStyle ?? "filled", ["filled", "open", "cross"], (value: string) => {
+        if (value === "filled" || value === "open" || value === "cross") expression.pointStyle = value;
+        else throw new Error("Invalid point style.");
+      }],
+    ] as const) {
+      const label = document.createElement("label");
+      const select = document.createElement("select");
+      select.setAttribute("aria-label", `Expression ${index + 1} ${title}`);
+      for (const value of options) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value[0]!.toUpperCase() + value.slice(1);
+        select.append(option);
+      }
+      select.value = selected;
+      select.addEventListener("change", () => { update(select.value); scheduleDraw(); scheduleProjectSave(); });
+      label.append(document.createTextNode(title), select);
+      appearanceControls.append(label);
+    }
+    const pointSizeControl = document.createElement("label");
+    const pointSize = document.createElement("input");
+    pointSize.type = "range";
+    pointSize.min = "2"; pointSize.max = "12"; pointSize.step = "0.5";
+    pointSize.value = String(expression.pointSize ?? (/^\s*\[/.test(expression.text) ? 4 : 6));
+    pointSize.setAttribute("aria-label", `Expression ${index + 1} point radius`);
+    const pointSizeValue = document.createElement("output");
+    pointSizeValue.textContent = `${pointSize.value}px`;
+    pointSize.addEventListener("input", () => {
+      expression.pointSize = Number(pointSize.value);
+      pointSizeValue.textContent = `${pointSize.value}px`;
+      scheduleDraw(); scheduleProjectSave();
+    });
+    pointSizeControl.className = "appearance-range-control";
+    pointSizeControl.append(document.createTextNode("Point radius"), pointSize, pointSizeValue);
+    appearanceControls.append(pointSizeControl);
+    const clickActionControl = document.createElement("label");
+    const clickAction = document.createElement("input");
+    clickAction.type = "text";
+    clickAction.maxLength = 512;
+    clickAction.value = expression.clickAction ?? "";
+    clickAction.placeholder = "Optional: a -> a+1";
+    clickAction.setAttribute("aria-label", `Expression ${index + 1} click action`);
+    clickAction.addEventListener("input", () => {
+      expression.clickAction = clickAction.value.trim() || undefined;
+      renderSliders(); scheduleProjectSave();
+    });
+    clickActionControl.append(document.createTextNode("Click action"), clickAction);
+    appearanceControls.append(clickActionControl);
     const input = document.createElement("input");
     input.type = "text";
     input.value = expression.text;
@@ -4808,6 +5375,218 @@ function renderExpressions(): void {
       scheduleDraw();
       return;
     });
+    let statisticalControls: HTMLDivElement | undefined;
+    let updatingStatisticalOption = false;
+    const renderStatisticalControls = (): void => {
+      if (updatingStatisticalOption) return;
+      statisticalControls?.remove();
+      statisticalControls = undefined;
+      const plot = statisticalPlotCall(expression.text);
+      if (!plot || plot.name === "stats") return;
+      const controls = document.createElement("div");
+      statisticalControls = controls;
+      controls.className = "statistical-plot-controls";
+      const updateOption = (index: number, value: string): void => {
+        const current = statisticalPlotCall(input.value);
+        if (!current) return;
+        const args = [...current.args];
+        while (args.length <= index) args.push(args.length === 1 ? "1" : current.name === "boxplot" && args.length === 2 ? "1" : "0");
+        args[index] = value;
+        const updated = `${current.name}(${args.join(", ")})`;
+        if (updated.length > input.maxLength) {
+          setProjectStatus(`Expression is too long; use at most ${input.maxLength} characters.`);
+          return;
+        }
+        input.value = updated;
+        updatingStatisticalOption = true;
+        try {
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        } finally {
+          updatingStatisticalOption = false;
+        }
+      };
+      const field = (labelText: string, argument: number, defaultValue: string): void => {
+        const label = document.createElement("label");
+        const field = document.createElement("input");
+        field.type = "text";
+        field.maxLength = 128;
+        field.value = plot.args[argument] ?? defaultValue;
+        field.setAttribute("aria-label", `Expression ${index + 1} ${labelText}`);
+        field.addEventListener("change", () => updateOption(argument, field.value));
+        label.append(document.createTextNode(labelText), field);
+        controls.append(label);
+      };
+      const select = (labelText: string, argument: number, choices: string[]): void => {
+        const label = document.createElement("label");
+        const field = document.createElement("select");
+        field.setAttribute("aria-label", `Expression ${index + 1} ${labelText}`);
+        choices.forEach((text, value) => {
+          const option = document.createElement("option");
+          option.value = String(value);
+          option.textContent = text;
+          field.append(option);
+        });
+        const value = plot.args[argument]?.trim() ?? "0";
+        if (!choices.some((_, index) => String(index) === value)) {
+          const custom = document.createElement("option");
+          custom.value = value;
+          custom.textContent = `From expression: ${value}`;
+          field.append(custom);
+        }
+        field.value = value;
+        field.addEventListener("change", () => updateOption(argument, field.value));
+        label.append(document.createTextNode(labelText), field);
+        controls.append(label);
+      };
+      if (plot.name === "boxplot") {
+        field("Vertical offset", 1, "1");
+        field("Box height", 2, "1");
+        select("Outliers", 3, ["Include in whiskers", "Separate outlier points"]);
+      } else {
+        field("Bin width", 1, "1");
+        if (plot.name === "histogram") {
+          select("Bar height", 2, ["Count", "Relative", "Density"]);
+          select("Bin alignment", 3, ["Centered", "Left"]);
+        } else select("Dot positions", 2, ["Exact", "Binned"]);
+      }
+      appearanceControls.append(controls);
+      if (controls.isConnected) refreshDropdowns();
+    };
+    renderStatisticalControls();
+    input.addEventListener("input", renderStatisticalControls);
+    let inferenceControls: HTMLDivElement | undefined;
+    let updatingInferenceOption = false;
+    const renderInferenceControls = (): void => {
+      if (updatingInferenceOption) return;
+      inferenceControls?.remove();
+      inferenceControls = undefined;
+      let call: ReturnType<typeof inferenceCall>;
+      try { call = inferenceCall(expression.text); }
+      catch (reason) {
+        error.textContent = reason instanceof Error ? reason.message : "Invalid inference options.";
+        input.setAttribute("aria-invalid", "true");
+        return;
+      }
+      if (!call || call.property) return;
+      const controls = document.createElement("div");
+      controls.className = "statistical-plot-controls";
+      inferenceControls = controls;
+      const nullInput = document.createElement("input");
+      nullInput.type = "text";
+      nullInput.value = call.nullSource ?? (call.name === "zproptest" && call.args.length === 2 ? "0.5" : "0");
+      nullInput.maxLength = 128;
+      const confidence = document.createElement("input");
+      confidence.type = "text";
+      confidence.value = call.levelSource ?? "0.95";
+      confidence.maxLength = 128;
+      const tails = document.createElement("select");
+      for (const [value, text] of [["0", "Two-sided"], ["-1", "Left tail"], ["1", "Right tail"]]) {
+        const option = document.createElement("option");
+        option.value = value!;
+        option.textContent = text!;
+        tails.append(option);
+      }
+      const tailValue = call.tailsSource ?? (call.name.startsWith("chisq") ? "1" : "0");
+      if (!["-1", "0", "1"].includes(tailValue)) {
+        const custom = document.createElement("option");
+        custom.value = tailValue;
+        custom.textContent = `From expression: ${tailValue}`;
+        tails.append(custom);
+      }
+      tails.value = tailValue;
+      for (const [text, field] of [["Null hypothesis", nullInput], ["Alternative hypothesis", tails], ["Confidence level", confidence]] as const) {
+        const label = document.createElement("label");
+        field.setAttribute("aria-label", `Expression ${index + 1} ${text}`);
+        label.append(document.createTextNode(text), field);
+        controls.append(label);
+      }
+      nullInput.disabled = call.name.startsWith("chisq");
+      tails.disabled = call.name.startsWith("chisq");
+      confidence.disabled = call.name.startsWith("chisq");
+      const update = (): void => {
+        const current = inferenceCall(input.value);
+        if (!current) return;
+        const value = `${current.name}(${current.args.join(", ")}).test(${nullInput.value}, ${tails.value}, ${confidence.value})`;
+        if (value.length > input.maxLength) {
+          setProjectStatus(`Expression is too long; use at most ${input.maxLength} characters.`);
+          return;
+        }
+        input.value = value;
+        updatingInferenceOption = true;
+        try { input.dispatchEvent(new Event("input", { bubbles: true })); }
+        finally { updatingInferenceOption = false; }
+      };
+      for (const field of [nullInput, tails, confidence]) field.addEventListener("change", update);
+      appearanceControls.append(controls);
+      if (controls.isConnected) refreshDropdowns();
+    };
+    renderInferenceControls();
+    input.addEventListener("input", renderInferenceControls);
+    let probabilityControls: HTMLDivElement | undefined;
+    const renderProbabilityControls = (): void => {
+      probabilityControls?.remove();
+      probabilityControls = undefined;
+      const definition = distributionDefinition(expression.text);
+      const call = distributionCall(definition?.source ?? expression.text);
+      if (!call || (!definition && expression.text.slice(call.end).trim())) return;
+      const body = definition?.target ?? expression.text;
+      const controls = document.createElement("div");
+      controls.className = "statistical-plot-controls";
+      probabilityControls = controls;
+      const field = (text: string, value: string) => {
+        const label = document.createElement("label");
+        const field = document.createElement("input");
+        field.type = "text";
+        field.maxLength = 128;
+        field.value = value;
+        field.setAttribute("aria-label", `Expression ${index + 1} ${text}`);
+        label.append(document.createTextNode(text), field);
+        controls.append(label);
+        return field;
+      };
+      const lower = field("Probability lower bound", "-1");
+      const upper = field("Probability upper bound", "1");
+      const shade = document.createElement("button");
+      shade.type = "button";
+      shade.textContent = "Shade and calculate probability";
+      shade.addEventListener("click", () => {
+        try {
+          const expanded = expandFunctions(body);
+          const distribution = readDistribution(expanded,
+            (text) => compileExpression(text, sliderValues)(0).value.toNumber(), collectionValues, graphOptions.statisticsMode);
+          const lo = compileExpression(expandFunctions(lower.value), sliderValues)(0).value.toNumber();
+          const hi = compileExpression(expandFunctions(upper.value), sliderValues)(0).value.toNumber();
+          if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo > hi) throw new Error("Probability bounds must be finite and lower <= upper.");
+          compileExpression(expandFunctions(`${body}.cdf(${lower.value},${upper.value})`), sliderValues)(0);
+          if (distribution.discrete) {
+            addExpression(`${body}.pdf(x){${lower.value}<=x<=${upper.value}}`);
+          } else addExpression(`y<=${body}.pdf(x){y>=0}{${lower.value}<=x<=${upper.value}}`);
+          addExpression(`${body}.cdf(${lower.value},${upper.value})`);
+          setProjectStatus(distribution.discrete ? "Discrete interval masses plotted and probability calculated." : "Probability interval shaded and calculated.");
+        } catch (reason) {
+          setProjectStatus(reason instanceof Error ? reason.message : "Could not calculate the probability interval.");
+        }
+      });
+      controls.append(shade);
+      const count = field("Sample size", "10");
+      const sample = document.createElement("button");
+      sample.type = "button";
+      sample.textContent = "Add random sample";
+      sample.addEventListener("click", () => {
+        try {
+          const source = `${body}.random(${count.value})`;
+          expandCollections(expandFunctions(source), (text) => compileExpression(text, sliderValues)(0).value.toNumber(),
+            collectionValues, graphOptions.statisticsMode);
+          addExpression(source);
+        } catch (reason) {
+          setProjectStatus(reason instanceof Error ? reason.message : "Could not sample the distribution.");
+        }
+      });
+      controls.append(sample);
+      appearanceControls.append(controls);
+    };
+    renderProbabilityControls();
+    input.addEventListener("input", renderProbabilityControls);
     const visibility = document.createElement("button");
     visibility.type = "button";
     visibility.className = "visibility-button";
@@ -4923,7 +5702,31 @@ function renderExpressions(): void {
     }
     labelControls.append(labelHelp, labelError);
     appearanceDetails.append(labelControls);
-    row.append(marker, input, visibility, remove, error, result, appearanceDetails);
+    const actionButton = document.createElement("button");
+    actionButton.type = "button";
+    actionButton.className = "expression-action";
+    actionButton.textContent = "Run action";
+    actionButton.setAttribute("aria-label", `Run expression ${index + 1} action`);
+    const updateClickActionButton = () => {
+      actionButton.hidden = !isActionExpression(expression.text) && !expression.clickAction;
+      actionButton.textContent = isActionExpression(expression.text) ? "Run action" : "Run click action";
+    };
+    updateClickActionButton();
+    input.addEventListener("input", updateClickActionButton);
+    clickAction.addEventListener("input", updateClickActionButton);
+    actionButton.addEventListener("click", () => {
+      try {
+        applyActionUpdates(prepareActionUpdates(isActionExpression(expression.text) ? expression.text : expression.clickAction ?? ""));
+        expression.evaluationError = undefined;
+        updateExpressionErrorDisplay(expression);
+        setProjectStatus("Action applied; all assignments used the previous state.");
+      } catch (reason) {
+        expression.evaluationError = reason instanceof Error ? reason.message : "Could not run action.";
+        updateExpressionErrorDisplay(expression);
+        setProjectStatus(expression.evaluationError);
+      }
+    });
+    row.append(marker, input, visibility, remove, error, result, actionButton, appearanceDetails);
     container.append(row);
   };
   for (const [index, expression] of expressions.entries()) {
@@ -5782,6 +6585,10 @@ function renderPhotos(): void {
     const image = ensurePhotoImage(photo);
     error.textContent = [image.error, image.transformError].filter(Boolean).join(" ");
     content.append(unitLabel, opacityLabel, error);
+    const help=document.createElement("p");
+    help.className="photo-drag-help";
+    help.textContent="Alt+drag moves; Shift+Alt+drag scales; Ctrl/Command+Alt+drag rotates. Undo restores formulas.";
+    content.append(help);
     panel.append(heading, content);
     wrapper.append(panel);
     photoList.append(wrapper);
@@ -6131,8 +6938,8 @@ function currentProjectState(): ProjectState {
   return {
     version: 1,
     expressions: expressions.map((
-      { id, text, color, lineWidth, opacity, folderId, hidden, draggable, hsv, label, labelX, labelY },
-    ) => ({ id, text, color, lineWidth, opacity, folderId, hidden, draggable, hsv, label, labelX, labelY })),
+      { id, text, color, lineWidth, lineStyle, pointStyle, pointSize, clickAction, opacity, folderId, hidden, draggable, hsv, label, labelX, labelY },
+    ) => ({ id, text, color, lineWidth, lineStyle, pointStyle, pointSize, clickAction, opacity, folderId, hidden, draggable, hsv, label, labelX, labelY })),
     tables: tables.map(({ id, rows, name, collapsed, sourceExpressionId, regressionDegree, regressionKind, color, folderId, xColumn, yColumn, xFormula, yFormula, extraColumns }) =>
       ({ id, rows, name, collapsed, sourceExpressionId, regressionDegree, regressionKind, color, folderId, xColumn, yColumn, xFormula, yFormula, extraColumns })),
     texts: textBlocks.map(({ id, text, folderId }) => ({ id, text, folderId })),
@@ -6280,6 +7087,15 @@ function applyProjectState(project: ProjectState, recordHistory = true): void {
   });
   graphOptions.angleMode = project.graphOptions?.angleMode ?? "radians";
   setAngleMode(graphOptions.angleMode);
+  graphOptions.randomSeed = project.graphOptions?.randomSeed ?? 1;
+  setRandomSeed(graphOptions.randomSeed);
+  graphOptions.gridMode = project.graphOptions?.gridMode ?? "cartesian";
+  graphOptions.minorGrid = project.graphOptions?.minorGrid ?? false;
+  graphOptions.xStep = project.graphOptions?.xStep;
+  graphOptions.yStep = project.graphOptions?.yStep;
+  graphOptions.xAxisLabel = project.graphOptions?.xAxisLabel;
+  graphOptions.yAxisLabel = project.graphOptions?.yAxisLabel;
+  graphOptions.complexMode = project.graphOptions?.complexMode ?? false;
   updateGraphOptionControls();
   nextId = expressions.reduce((next, expression) => Math.max(next, expression.id + 1), 1);
   nextTableId = tables.reduce((next, table) => Math.max(next, table.id + 1), 1);
@@ -6630,8 +7446,183 @@ document.querySelector("#reset-view")!.addEventListener("click", () => {
   scale = 48;
   draw();
 });
+document.querySelector("#rerandomize")!.addEventListener("click", () => {
+  const seed = new Uint32Array(1);
+  crypto.getRandomValues(seed);
+  graphOptions.randomSeed = seed[0]!;
+  setRandomSeed(graphOptions.randomSeed);
+  variableDefinitionCache = undefined;
+  renderSliders();
+  scheduleDraw();
+  setProjectStatus("Random samples rerandomized.");
+});
 const settingsDialog = document.querySelector<HTMLDialogElement>("#settings-dialog")!;
-document.querySelector("#open-settings")!.addEventListener("click", () => settingsDialog.showModal());
+const audioDialog=document.querySelector<HTMLDialogElement>("#audio-trace-dialog")!;
+const audioPlayer=new AudioTracePlayer();
+const audioSelection=document.querySelector<HTMLSelectElement>("#audio-trace-expression")!;
+const audioPosition=document.querySelector<HTMLInputElement>("#audio-trace-position")!;
+const audioOutput=document.querySelector<HTMLOutputElement>("#audio-trace-result")!;
+let audioGraphs:CompiledGraph[]=[];
+let audioPoints:Array<TracePoint|undefined>=[];
+let audioBounds:[number,number,number,number]=[-10,10,-10,10];
+let audioGeneration=0;
+const showAudioPoint=(index:number,point:TracePoint|undefined):void=>{
+  audioPosition.value=String(Math.min(audioPoints.length-1,index));
+  audioOutput.textContent=index>=audioPoints.length?"Trace complete.":point?
+    `x ≈ ${Number(point.x.toPrecision(8))}, y ≈ ${Number(point.y.toPrecision(8))}`:"Undefined point (silent).";
+};
+function prepareAudioTrace():void{
+  audioGeneration++;
+  audioPlayer.stop();
+  const graph=audioGraphs[Number(audioSelection.value)];
+  if(!graph)throw new Error("Select an available curve.");
+  const bounds=canvasWrap.getBoundingClientRect();
+  audioBounds=[centerX-bounds.width/(2*scale),centerX+bounds.width/(2*scale),
+    centerY-bounds.height/(2*verticalScale()),centerY+bounds.height/(2*verticalScale())];
+  if(graph.kind==="parametric"){
+    audioPoints=Array.from({length:201},(_,index)=>{
+      try{const [x,y]=graph.evaluate(graph.start+(graph.end-graph.start)*index/200);return Number.isFinite(x)&&Number.isFinite(y)?{x,y}:undefined;}
+      catch(reason){if(!(reason instanceof Error))throw reason;return undefined;}
+    });
+  }else if(graph.kind==="explicit"||graph.kind==="sideways"){
+    const evaluate=(x:number):number=>{
+      try{const result=graph.evaluate(x);return typeof result==="number"?result:result.value.toNumber();}
+      catch(reason){if(!(reason instanceof Error))throw reason;return NaN;}
+    };
+    audioPoints=graph.kind==="explicit"?tracePoints(evaluate,audioBounds[0],audioBounds[1]):
+      tracePoints(evaluate,audioBounds[2],audioBounds[3]).map((point)=>point?{x:point.y,y:point.x}:undefined);
+  }else if(graph.kind==="point"){
+    const [x,y]=graph.evaluate();audioPoints=[{x,y}];
+  }else if(graph.kind==="list"){
+    audioPoints=graph.evaluate().map((y,index)=>y===undefined?undefined:{x:index+1,y});
+  }else throw new Error("Audio trace supports explicit, sideways, parametric, polar, list, and point graphs.");
+  audioPosition.max=String(Math.max(0,audioPoints.length-1));
+  const gaps=audioPoints.filter((point)=>!point).length;
+  audioOutput.textContent=`${audioPoints.length} trace samples${gaps?`; ${gaps} undefined samples are silent`:""}. Press Play or use Arrow keys.`;
+}
+document.querySelector("#open-audio-trace")!.addEventListener("click",()=>{
+  try{
+    audioGraphs=[];audioSelection.replaceChildren();
+    synchronizeVariableDefinitions();
+    for(const [index,expression]of expressions.entries()){
+      if(expression.hidden)continue;
+      const graph=getCompiled(expression);
+      const members=graph?.kind==="collection"?graph.graphs:graph?[graph]:[];
+      for(const member of members){
+        if(!["explicit","sideways","parametric","point","list"].includes(member.kind))continue;
+        const option=document.createElement("option");option.value=String(audioGraphs.length);
+        option.textContent=`Expression ${index+1}: ${expression.text.slice(0,60)}${members.length>1?` (${member.kind})`:""}`;
+        audioGraphs.push(member);audioSelection.append(option);
+      }
+    }
+    prepareAudioTrace();refreshDropdowns();audioDialog.showModal();
+  }catch(reason){setProjectStatus(reason instanceof Error?reason.message:"Could not open audio trace.");}
+});
+audioSelection.addEventListener("change",()=>{
+  try{prepareAudioTrace();}catch(reason){audioOutput.textContent=reason instanceof Error?reason.message:"Could not trace curve.";}
+});
+const playPoint=async(index:number):Promise<void>=>{
+  try{
+    const generation=++audioGeneration;
+    audioPlayer.stop();await audioPlayer.start();
+    if(!audioDialog.open||generation!==audioGeneration)return;
+    index=Math.max(0,Math.min(audioPoints.length-1,index));
+    const point=audioPoints[index];showAudioPoint(index,point);
+    if(point)audioPlayer.tone(point,...audioBounds);
+  }catch(reason){audioOutput.textContent=reason instanceof Error?reason.message:"Could not play trace point.";}
+};
+document.querySelector("#play-audio-trace")!.addEventListener("click",async()=>{
+  const generation=++audioGeneration;
+  try{audioPlayer.stop();await audioPlayer.start();if(audioDialog.open&&generation===audioGeneration)audioPlayer.sequence(audioPoints,audioBounds,showAudioPoint,
+    (error)=>{audioOutput.textContent=error.message;});}
+  catch(reason){audioOutput.textContent=reason instanceof Error?reason.message:"Could not play audio trace.";}
+});
+document.querySelector("#stop-audio-trace")!.addEventListener("click",()=>{audioGeneration++;audioPlayer.stop();audioOutput.textContent="Trace stopped.";});
+document.querySelector("#previous-audio-point")!.addEventListener("click",()=>void playPoint(Number(audioPosition.value)-1));
+document.querySelector("#next-audio-point")!.addEventListener("click",()=>void playPoint(Number(audioPosition.value)+1));
+audioPosition.addEventListener("input",()=>void playPoint(Number(audioPosition.value)));
+audioDialog.addEventListener("keydown",(event)=>{
+  if(event.target===audioSelection||audioSelection.parentElement?.contains(event.target as Node))return;
+  const keys=["ArrowLeft","ArrowRight","Home","End"];
+  if(!keys.includes(event.key)||event.target===audioPosition)return;
+  event.preventDefault();
+  void playPoint(event.key==="Home"?0:event.key==="End"?audioPoints.length-1:Number(audioPosition.value)+(event.key==="ArrowLeft"?-1:1));
+});
+document.querySelector("#close-audio-trace")!.addEventListener("click",()=>audioDialog.close());
+audioDialog.addEventListener("close",()=>{audioGeneration++;audioPlayer.stop();});
+window.addEventListener("pagehide",()=>{void audioPlayer.close();});
+
+const keypadDialog=document.querySelector<HTMLDialogElement>("#math-keypad-dialog")!;
+const keypadSelection=document.querySelector<HTMLSelectElement>("#math-keypad-expression")!;
+const keypadInput=document.querySelector<HTMLInputElement>("#math-keypad-input")!;
+const keypadPreview=document.querySelector<HTMLDivElement>("#math-keypad-preview")!;
+const keypadError=document.querySelector<HTMLParagraphElement>("#math-keypad-error")!;
+let keypadExpression:Expression|undefined;
+let focusedExpressionId:number|undefined;
+workspaceList.addEventListener("focusin",(event)=>{
+  if(!(event.target instanceof HTMLInputElement))return;
+  const row=event.target.closest<HTMLElement>("[data-expression-id]");
+  if(row)focusedExpressionId=Number(row.dataset.expressionId);
+});
+function updateKeypadPreview():void{
+  try{keypadPreview.innerHTML=expressionMathML(keypadInput.value);keypadError.textContent="";}
+  catch(reason){keypadPreview.textContent=keypadInput.value;keypadError.textContent=reason instanceof Error?reason.message:"Could not format expression.";}
+}
+function applyKeypadInput():void{
+  if(!keypadExpression)return;
+  keypadExpression.text=keypadInput.value;keypadExpression.evaluationError=undefined;
+  updateKeypadPreview();renderSliders();scheduleDraw();scheduleProjectSave();
+}
+keypadInput.addEventListener("input",applyKeypadInput);
+document.querySelector("#open-keypad")!.addEventListener("click",()=>{
+  if(!expressions.length)addExpression();
+  keypadSelection.replaceChildren();
+  for(const [index,expression]of expressions.entries()){
+    const option=document.createElement("option");option.value=String(expression.id);option.textContent=`Expression ${index+1}`;keypadSelection.append(option);
+  }
+  keypadExpression=expressions.find((expression)=>expression.id===focusedExpressionId)??expressions[0];
+  keypadSelection.value=String(keypadExpression!.id);keypadInput.value=keypadExpression!.text;
+  updateKeypadPreview();refreshDropdowns();keypadDialog.showModal();keypadInput.focus();
+});
+keypadSelection.addEventListener("change",()=>{
+  keypadExpression=expressions.find((expression)=>expression.id===Number(keypadSelection.value));
+  keypadInput.value=keypadExpression?.text??"";updateKeypadPreview();keypadInput.focus();
+});
+const keypadKeys=document.querySelector("#math-keypad-keys")!;
+for(const [label,text]of [
+  ["7","7"],["8","8"],["9","9"],["+","+"],["sin","sin()"],["cos","cos()"],
+  ["4","4"],["5","5"],["6","6"],["−","-"],["tan","tan()"],["√","sqrt()"],
+  ["1","1"],["2","2"],["3","3"],["×","*"],["ln","ln()"],["log","log()"],
+  ["0","0"],[".","."],["π","pi"],["÷","/"],["x","x"],["y","y"],
+  ["(","("],[")",")"],["power","^()"],["absolute","abs()"],["[","["],["]","]"],
+  ["integral","int_{0}^{1} x dx"],["sum","sum_{n=1}^{10} n"],["product","prod_{n=1}^{10} n"],["θ","theta"],["i","i"],["=","="],
+  ["←","left"],["→","right"],["Backspace","backspace"],["Clear","clear"],[",",","],["restriction","{}"],
+]as const){
+  const button=document.createElement("button");button.type="button";button.textContent=label;
+  button.setAttribute("aria-label",`Insert ${label}`);
+  button.addEventListener("pointerdown",(event)=>event.preventDefault());
+  button.addEventListener("click",()=>{
+    const start=keypadInput.selectionStart??keypadInput.value.length,end=keypadInput.selectionEnd??start;
+    if(text==="left"||text==="right"){const caret=Math.max(0,Math.min(keypadInput.value.length,start+(text==="left"?-1:1)));keypadInput.setSelectionRange(caret,caret);}
+    else if(text==="clear"){keypadInput.value="";applyKeypadInput();}
+    else{
+      const from=text==="backspace"&&start===end?Math.max(0,start-1):start;
+      const insertion=text==="backspace"?"":text;
+      if(keypadInput.value.length-(end-from)+insertion.length>512){keypadError.textContent="Expressions are limited to 512 characters.";return;}
+      keypadInput.setRangeText(insertion,from,end,"end");
+      const inner=insertion.indexOf("()");
+      if(inner>=0)keypadInput.setSelectionRange(from+inner+1,from+inner+1);
+      applyKeypadInput();
+    }
+    keypadInput.focus();
+  });keypadKeys.append(button);
+}
+document.querySelector("#close-math-keypad")!.addEventListener("click",()=>keypadDialog.close());
+keypadDialog.addEventListener("close",()=>{renderExpressions();scheduleDraw();});
+document.querySelector("#open-settings")!.addEventListener("click", () => {
+  updateGraphOptionControls();
+  settingsDialog.showModal();
+});
 document.querySelector("#close-settings")!.addEventListener("click", () => settingsDialog.close());
 settingsDialog.addEventListener("keydown", (event) => {
   if (event.key === "Escape") settingsDialog.close();
@@ -6807,19 +7798,44 @@ function updateGraphOptionControls(): void {
   document.querySelector<HTMLInputElement>("#show-x-axis-setting")!.checked = graphOptions.showXAxis;
   document.querySelector<HTMLInputElement>("#show-y-axis-setting")!.checked = graphOptions.showYAxis;
   document.querySelector<HTMLInputElement>("#show-labels-setting")!.checked = graphOptions.showLabels;
-  document.querySelector<HTMLSelectElement>("#aspect-ratio-setting")!.value =
-    String(graphOptions.aspectRatio);
+  const ratio = document.querySelector<HTMLSelectElement>("#aspect-ratio-setting")!;
+  ratio.querySelector('option[data-custom-ratio]')?.remove();
+  if (![0.5,1,2].includes(graphOptions.aspectRatio)) {
+    const option = document.createElement("option");
+    option.value = String(graphOptions.aspectRatio);
+    option.textContent = `Custom (${Number(graphOptions.aspectRatio.toPrecision(5))})`;
+    option.dataset.customRatio = "";
+    ratio.append(option);
+  }
+  ratio.value = String(graphOptions.aspectRatio);
+  document.querySelector<HTMLSelectElement>("#grid-mode-setting")!.value = graphOptions.gridMode ?? "cartesian";
+  document.querySelector<HTMLInputElement>("#minor-grid-setting")!.checked = graphOptions.minorGrid ?? false;
+  document.querySelector<HTMLInputElement>("#complex-mode-setting")!.checked = graphOptions.complexMode ?? false;
+  document.querySelector<HTMLInputElement>("#x-step-setting")!.value = graphOptions.xStep?.toString() ?? "";
+  document.querySelector<HTMLInputElement>("#y-step-setting")!.value = graphOptions.yStep?.toString() ?? "";
+  document.querySelector<HTMLInputElement>("#x-axis-label-setting")!.value = graphOptions.xAxisLabel ?? "";
+  document.querySelector<HTMLInputElement>("#y-axis-label-setting")!.value = graphOptions.yAxisLabel ?? "";
+  const bounds = canvasWrap.getBoundingClientRect();
+  for (const [id,value] of [
+    ["x-min",centerX - bounds.width / (2 * scale)], ["x-max",centerX + bounds.width / (2 * scale)],
+    ["y-min",centerY - bounds.height / (2 * verticalScale())], ["y-max",centerY + bounds.height / (2 * verticalScale())],
+  ] as const) document.querySelector<HTMLInputElement>(`#${id}-setting`)!.value = String(value);
   document.querySelector<HTMLSelectElement>("#angle-mode-setting")!.value = graphOptions.angleMode;
   document.querySelector<HTMLSelectElement>("#statistics-mode-setting")!.value = graphOptions.statisticsMode;
   refreshDropdowns();
 }
 updateGraphOptionControls();
+document.querySelector<HTMLInputElement>("#complex-mode-setting")!.addEventListener("change",(event)=>{
+  graphOptions.complexMode=(event.currentTarget as HTMLInputElement).checked;
+  variableDefinitionCache=undefined;renderSliders();draw();
+});
 
-const graphOptionInputs: Array<[keyof Omit<GraphOptions, "aspectRatio" | "statisticsMode" | "angleMode">, string]> = [
+const graphOptionInputs: Array<[keyof Pick<GraphOptions, "showGrid" | "showXAxis" | "showYAxis" | "showLabels" | "minorGrid">, string]> = [
   ["showGrid", "#show-grid-setting"],
   ["showXAxis", "#show-x-axis-setting"],
   ["showYAxis", "#show-y-axis-setting"],
   ["showLabels", "#show-labels-setting"],
+  ["minorGrid", "#minor-grid-setting"],
 ];
 for (const [option, selector] of graphOptionInputs) {
   const input = document.querySelector<HTMLInputElement>(selector)!;
@@ -6828,6 +7844,48 @@ for (const [option, selector] of graphOptionInputs) {
     draw();
   });
 }
+document.querySelector<HTMLSelectElement>("#grid-mode-setting")!.addEventListener("change", (event) => {
+  const value = (event.currentTarget as HTMLSelectElement).value;
+  if (value !== "cartesian" && value !== "polar") throw new Error("Invalid grid coordinate mode.");
+  graphOptions.gridMode = value;
+  draw();
+});
+for (const [key, selector] of [["xStep","#x-step-setting"],["yStep","#y-step-setting"]] as const) {
+  const input = document.querySelector<HTMLInputElement>(selector)!;
+  input.addEventListener("change", () => {
+    try {
+      graphOptions[key] = axisStep(input.value);
+      input.removeAttribute("aria-invalid");
+      draw();
+    } catch (reason) {
+      input.setAttribute("aria-invalid","true");
+      const message = reason instanceof Error ? reason.message : "Invalid axis step.";
+      document.querySelector("#grid-step-warning")!.textContent = message;
+      setProjectStatus(message);
+    }
+  });
+}
+for (const [key, selector] of [["xAxisLabel","#x-axis-label-setting"],["yAxisLabel","#y-axis-label-setting"]] as const) {
+  const input = document.querySelector<HTMLInputElement>(selector)!;
+  input.addEventListener("input", () => { graphOptions[key] = input.value; draw(); });
+}
+document.querySelector("#apply-view-bounds")!.addEventListener("click", () => {
+  try {
+    const bounds = canvasWrap.getBoundingClientRect();
+    const fields = ["x-min","x-max","y-min","y-max"].map((id) => document.querySelector<HTMLInputElement>(`#${id}-setting`)!);
+    if (fields.some((input) => !input.value.trim())) throw new Error("Enter all four viewport bounds.");
+    const fitted = fitViewportBounds(bounds.width,bounds.height,
+      Number(fields[0]!.value),Number(fields[1]!.value),Number(fields[2]!.value),Number(fields[3]!.value));
+    centerX = fitted.centerX; centerY = fitted.centerY; scale = fitted.scale;
+    graphOptions.aspectRatio = fitted.aspectRatio;
+    updateGraphOptionControls(); draw();
+    setProjectStatus("Viewport fitted to the exact requested bounds.");
+  } catch (reason) {
+    const message = reason instanceof Error ? reason.message : "Could not apply viewport bounds.";
+    document.querySelector("#grid-step-warning")!.textContent = message;
+    setProjectStatus(message);
+  }
+});
 const aspectRatioInput = document.querySelector<HTMLSelectElement>("#aspect-ratio-setting")!;
 document.querySelector<HTMLSelectElement>("#statistics-mode-setting")!.addEventListener("change", (event) => {
   const mode = (event.currentTarget as HTMLSelectElement).value;
@@ -6840,7 +7898,7 @@ document.querySelector<HTMLSelectElement>("#statistics-mode-setting")!.addEventL
 aspectRatioInput.value = String(graphOptions.aspectRatio);
 aspectRatioInput.addEventListener("change", () => {
   const aspectRatio = Number(aspectRatioInput.value);
-  if (aspectRatio !== 0.5 && aspectRatio !== 1 && aspectRatio !== 2) {
+  if (!Number.isFinite(aspectRatio) || aspectRatio < 0.001 || aspectRatio > 1000) {
     throw new Error("Unsupported axis scale ratio.");
   }
   graphOptions.aspectRatio = aspectRatio;
@@ -6958,6 +8016,17 @@ function moveDraggablePoint(
     pointerOffsetX;
   const requestedY = centerY +
     (bounds.height * GRAPH_BUFFER_SCALE / 2 - graphY) / verticalScale() - pointerOffsetY;
+  if(point.directSource!==undefined){
+    const expression=expressions.find((expression)=>expression.id===point.expressionId);
+    if(!expression)throw new Error("The dragged expression no longer exists.");
+    const text=point.vertexIndex===undefined?`(${numericSource(Number(requestedX.toPrecision(12)))},${numericSource(Number(requestedY.toPrecision(12)))})`:
+      replacePolygonVertex(point.directSource,point.vertexIndex,requestedX,requestedY);
+    if(text.length>512){setProjectStatus("Dragged coordinates would exceed the 512-character expression limit.");return;}
+    expression.text=text;
+    const input=workspaceList.querySelector<HTMLInputElement>(`[data-expression-id="${expression.id}"] input`);
+    if(input)input.value=text;
+    return;
+  }
   const updateCoordinateSliders = (names: string[], delta: number): void => {
     for (const name of names) {
       const options = sliderOptions[name]!;
@@ -6977,12 +8046,30 @@ canvas.addEventListener("pointerdown", (event) => {
   const bounds = canvasWrap.getBoundingClientRect();
   const screenX = event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS;
   const screenY = event.clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS;
-  const point = findDraggablePoint(screenX, screenY);
+  const point = event.altKey ? undefined : findDraggablePoint(screenX, screenY);
   const pointerGraphX = centerX +
     (screenX - bounds.width * GRAPH_BUFFER_SCALE / 2) / scale;
   const pointerGraphY = centerY +
     (bounds.height * GRAPH_BUFFER_SCALE / 2 - screenY) / verticalScale();
+  let photoDrag: NonNullable<typeof drag>["photo"];
+  if(event.altKey){
+    for(const item of workspaceBlocks().flatMap((block)=>block.items).filter((item)=>item.type==="photo")
+      .flatMap((item)=>photos.filter((photo)=>photo.id===item.id))){
+      if(item.hidden)continue;
+      try{
+        const transform=evaluatePhotoTransform(item,sliderValues,expandFunctions);
+        const [x,y]=photoLocalPoint(transform,pointerGraphX,pointerGraphY);
+        if(Math.abs(x)<=Math.abs(transform.width)/2&&Math.abs(y)<=Math.abs(transform.height)/2){
+          photoDrag={item,transform,start:[pointerGraphX,pointerGraphY],mode:event.shiftKey?"scale":event.ctrlKey||event.metaKey?"rotate":"move",
+            original:{centerX:item.centerX,centerY:item.centerY,width:item.width,height:item.height,rotation:item.rotation}};
+          flushPendingHistory();
+          break;
+        }
+      }catch(reason){setProjectStatus(reason instanceof Error?reason.message:"Could not manipulate photo.");}
+    }
+  }
   if (point) {
+    flushPendingHistory();
     for (const name of new Set([...point.xVariables, ...point.yVariables])) {
       stopSliderAnimation(name);
     }
@@ -6993,6 +8080,7 @@ canvas.addEventListener("pointerdown", (event) => {
     centerX,
     centerY,
     moved: false,
+    photo: photoDrag,
     point,
     startSliderValues: point
       ? Object.fromEntries([...new Set([...point.xVariables, ...point.yVariables])]
@@ -7002,7 +8090,7 @@ canvas.addEventListener("pointerdown", (event) => {
     pointerOffsetY: point ? pointerGraphY - point.y : undefined,
   };
   canvas.setPointerCapture(event.pointerId);
-  canvas.style.cursor = point ? "grabbing" : "crosshair";
+  canvas.style.cursor = point || photoDrag ? "grabbing" : "crosshair";
   hoverPosition = {
     x: screenX,
     y: screenY,
@@ -7012,6 +8100,26 @@ canvas.addEventListener("pointerdown", (event) => {
 canvas.addEventListener("pointermove", (event) => {
   const bounds = canvasWrap.getBoundingClientRect();
   if (drag) {
+    if(drag.photo){
+      if(!drag.moved&&Math.hypot(event.clientX-drag.x,event.clientY-drag.y)<=2)return;
+      const state=drag.photo;
+      const end:[number,number]=[centerX+(event.clientX-bounds.left-bounds.width/2)/scale,
+        centerY+(bounds.height/2-event.clientY+bounds.top)/verticalScale()];
+      try{
+        const transform=photoDragTransform(state.transform,state.mode,state.start,end);
+        if(Math.hypot(event.clientX-drag.x,event.clientY-drag.y)>2)drag.moved=true;
+        state.item.centerX=numericSource(transform.centerX);state.item.centerY=numericSource(transform.centerY);
+        state.item.width=numericSource(transform.width/state.item.initialWidth);
+        state.item.height=numericSource(transform.height/state.item.initialHeight);
+        state.item.rotation=numericSource(state.item.rotationUnit==="degrees"?transform.rotation*180/Math.PI:transform.rotation);
+        for(const [key]of PHOTO_FIELDS){
+          const input=photoList.querySelector<HTMLInputElement>(`[data-workspace-key="photo:${state.item.id}"] input[data-photo-field="${key}"]`);
+          if(input)input.value=state.item[key];
+        }
+        scheduleDraw();
+      }catch(reason){setProjectStatus(reason instanceof Error?reason.message:"Could not manipulate photo.");}
+      return;
+    }
     if (drag.moved || Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 4) {
       drag.moved = true;
       if (drag.point) {
@@ -7049,16 +8157,35 @@ canvas.addEventListener("pointermove", (event) => {
 canvas.addEventListener("pointerup", (event) => {
   const bounds = canvasWrap.getBoundingClientRect();
   const finishedDrag = drag;
-  if (finishedDrag && !finishedDrag.point && !finishedDrag.moved) {
+  if (finishedDrag && !finishedDrag.moved && !finishedDrag.photo) {
     const screenX = event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS;
     const screenY = event.clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS;
     hoverPosition = { x: screenX, y: screenY };
-    addGraphPointAt(screenX, screenY);
+    const priority = hoverCurvePriorities();
+    const nearest = selectHoverPoint(hoverSegmentsNear(screenX, screenY, true), screenX, screenY,
+      (curve) => priority.get(curve.id.split(":")[0]!) ?? Infinity);
+    const ids = hoverCandidates.filter((point) => Math.hypot(point.screenX - screenX, point.screenY - screenY) <= 10)
+      .flatMap((point) => point.graphIds);
+    if (nearest) ids.push(nearest.curve.id);
+    const expression = ids.map((id) => /^(?:expression|implicit)-(\d+)/.exec(id))
+      .map((match) => match && expressions.find((expression) => expression.id === Number(match[1])))
+      .find((expression) => expression?.clickAction);
+    if (expression?.clickAction) {
+      try { applyActionUpdates(prepareActionUpdates(expression.clickAction)); }
+      catch (reason) { setProjectStatus(reason instanceof Error ? reason.message : "Could not run graph click action."); }
+    } else if (!finishedDrag.point) addGraphPointAt(screenX, screenY);
   }
   const moved = finishedDrag?.moved ?? false;
   drag = undefined;
   canvas.style.cursor = "crosshair";
-  if (finishedDrag?.point && moved) {
+  if(finishedDrag?.photo){
+    renderPhotos();
+    scheduleDraw();
+    if(moved){
+      scheduleProjectSave();
+      setProjectStatus("Photo transform updated. Undo restores the original formulas.");
+    }
+  }else if (finishedDrag?.point && moved) {
     hoverPosition = undefined;
     scheduleDraw();
     scheduleProjectSave();
@@ -7074,7 +8201,12 @@ canvas.addEventListener("pointerup", (event) => {
   }
 });
 canvas.addEventListener("pointercancel", () => {
+  if(drag?.photo){Object.assign(drag.photo.item,drag.photo.original);renderPhotos();}
   if (drag?.point && drag.moved) {
+    if(drag.point.directSource!==undefined){
+      const expression=expressions.find((expression)=>expression.id===drag!.point!.expressionId);
+      if(expression){expression.text=drag.point.directSource;renderExpressions();}
+    }
     for (const [name, value] of Object.entries(drag.startSliderValues ?? {})) {
       sliderValues[name] = value;
       updateSliderInputValues(name);

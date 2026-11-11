@@ -1,3 +1,11 @@
+import { DESCRIPTIVE_FUNCTIONS, meanAbsoluteDeviation, pairedStatistic, quantile, quartile } from "./statistics";
+import { DISTRIBUTION_NAMES, makeDistribution } from "./probability";
+import { randomGenerator, randomKey, sampleCount } from "./random";
+import { expandPointOperations,pointSources } from "./geometry";
+import { numericSource } from "./numericSource";
+
+export const INTERNAL_COLLECTION_FUNCTIONS = ["randomsample", "shufflesample", "distributionsample"];
+
 export interface CollectionExpansion {
   items: string[];
   list: boolean;
@@ -9,11 +17,15 @@ export type StatisticsMode = "population" | "sample";
 export const COLLECTION_FUNCTIONS = [
   "join", "sort", "reverse", "unique", "length", "count", "total",
   "mean", "median", "min", "max", "sum", "product", "variance", "stdev", "variancep", "stdevp", "var", "varp",
+  ...DESCRIPTIVE_FUNCTIONS,
+  "random", "shuffle",
+  "distance", "midpoint",
 ];
 
 export function hasCollections(source: string, lists: Record<string, string[]> = {}): boolean {
-  return source.includes("[") || /\sfor\s/i.test(source) ||
-    (source.match(/[a-z]+(?:_[a-z0-9]+)?/gi) ?? []).some((name) => Object.hasOwn(lists, name.toLowerCase()));
+  return source.includes("[") || (source.includes(",")&&/\)\s*(?:[+\-*/^]|\.[xy])|^[+\-]\s*\(/i.test(source)&&!pointSources(source)) || /\sfor\s/i.test(source) ||
+    (source.match(/[a-z]+(?:_[a-z0-9]+)?/gi) ?? []).some((name) => Object.hasOwn(lists, name.toLowerCase()) ||
+      ["random", "shuffle", "distance", "midpoint", ...INTERNAL_COLLECTION_FUNCTIONS].includes(name.toLowerCase()));
 }
 
 function bounded(items: string[], list = true): CollectionExpansion {
@@ -94,22 +106,14 @@ export function expandCollections(
     const items = splitCollectionParts(text).flatMap((part) => expand(part).items);
     return bounded(items.map((item) => `(${item})`));
   };
-  const select = (base: CollectionExpansion, indexText: string, name?: string): CollectionExpansion => {
+  const select = (base: CollectionExpansion, indexText: string): CollectionExpansion => {
     if (!base.list) throw new Error("Indexing requires a list.");
-    const filter = name && new RegExp(`^${name}\\s*(<=|>=|!=|=|<|>)\\s*(.+)$`, "i").exec(indexText.trim());
-    if (filter) {
-      const limit = scalarNumber(filter[2]!);
-      return bounded(base.items.filter((item) => {
-        const value = number(item);
-        switch (filter[1]) {
-          case "<": return value < limit;
-          case "<=": return value <= limit;
-          case ">": return value > limit;
-          case ">=": return value >= limit;
-          case "=": return value === limit;
-          default: return value !== limit;
-        }
-      }));
+    if (/[<>=!]/.test(indexText)) {
+      const conditions = expand(indexText);
+      if (!conditions.list) throw new Error("List filters require a list-valued condition.");
+      const size = Math.min(base.items.length, conditions.items.length);
+      return bounded(base.items.slice(0,size).filter((_,index) =>
+        number(`{${conditions.items[index]}:1,0}`) === 1));
     }
     const indices = literal(indexText);
     const items = indices.items.map((item) => {
@@ -162,7 +166,6 @@ export function expandCollections(
     while (index < text.length) {
       const identifier = /^[a-z]+(?:_[a-z0-9]+)?/i.exec(text.slice(index));
       let part: CollectionExpansion;
-      let listName: string | undefined;
       if (identifier) {
         const token = identifier[0];
         const name = token.toLowerCase();
@@ -172,14 +175,110 @@ export function expandCollections(
         if (text[next] === "(") {
           const call = group(next);
           index = call.end;
-          const args = splitCollectionParts(call.text).map(expand);
+          let args = call.text.trim() ? splitCollectionParts(call.text).map(expand) : [];
           const aggregate = COLLECTION_FUNCTIONS.includes(name) && args.some((arg) => arg.list);
-          if (aggregate) {
+          if (["random", "shuffle", ...INTERNAL_COLLECTION_FUNCTIONS].includes(name)) {
+            approximate = true;
+            const scalar = (argument: CollectionExpansion | undefined): number => {
+              if (!argument || argument.list || argument.items.length !== 1) throw new Error("Random parameters and sample sizes must be scalar.");
+              return number(argument.items[0]!);
+            };
+            let key = randomKey(`${source}:${next}`);
+            if (INTERNAL_COLLECTION_FUNCTIONS.includes(name)) {
+              key = scalar(args[name === "distributionsample" ? 1 : 0]);
+              if (!Number.isSafeInteger(key) || key < 0 || key > 0xffffffff) throw new Error("Invalid sampling key.");
+            }
+            const rng = randomGenerator(String(key));
+            if (name === "distributionsample") {
+              const type = scalar(args[0]);
+              const distributionName = DISTRIBUTION_NAMES[type];
+              if (!distributionName) throw new Error("Invalid distribution sample type.");
+              const countValue = scalar(args[2]);
+              const count = countValue === -1 ? 1 : sampleCount(countValue);
+              const parameters = args.slice(3);
+              const distribution = distributionName === "discretedist" ? (() => {
+                if (parameters.length < 1 || parameters.length > 2 || parameters.some((arg) => !arg.list)) throw new Error("Discrete samples need values and optional matching weights.");
+                return makeDistribution(distributionName, [], parameters[0]!.items.map(number), parameters[1]?.items.map(number));
+              })() : makeDistribution(distributionName, parameters.map(scalar));
+              part = bounded(Array.from({ length: count }, () => {
+                const value = distribution.inverse(Math.max(Number.EPSILON, Math.min(1 - Number.EPSILON, rng())));
+                if (!Number.isFinite(value)) throw new Error("Random sample exceeds the supported numeric range.");
+                return numericSource(value);
+              }), countValue !== -1);
+            } else {
+              if (name === "randomsample" || name === "shufflesample") args = args.slice(1);
+              if (name === "shuffle" || name === "shufflesample") {
+                if (args.length !== 1 || !args[0]!.list || !args[0]!.items.length) throw new Error("Use shuffle(L) with a nonempty list.");
+                const items = [...args[0]!.items];
+                for (let i = items.length - 1; i > 0; i -= 1) {
+                  const j = Math.floor(rng() * (i + 1));
+                  [items[i], items[j]] = [items[j]!, items[i]!];
+                }
+                part = bounded(items);
+              } else {
+                if (args.length > 2 || (args.length === 2 && !args[0]!.list)) throw new Error("Use random(), random(n), or random(L[,n]).");
+                const population = args[0]?.list ? args[0]!.items : undefined;
+                if (population && !population.length) throw new Error("Cannot sample an empty list.");
+                const countArg = population ? args[1] : args[0];
+                const count = countArg ? sampleCount(scalar(countArg)) : 1;
+                part = bounded(Array.from({ length: count }, () => population ? population[Math.floor(rng() * population.length)]! : numericSource(rng())), Boolean(countArg));
+              }
+            }
+          } else if (name === "distance" || name === "midpoint") {
+            if (args.length !== 2) throw new Error(`${name} requires two points or point lists.`);
+            const coordinates = (item: string): [string,string] => {
+              let text = item.trim();
+              while (text.startsWith("(") && text.endsWith(")")) {
+                const parts = splitCollectionParts(text.slice(1,-1));
+                if (parts.length === 2 && parts.every(Boolean)) return [parts[0]!,parts[1]!];
+                if (parts.length !== 1) break;
+                text = parts[0]!;
+              }
+              throw new Error(`${name} requires point arguments.`);
+            };
+            const size = args[0]!.list && args[1]!.list ? Math.min(args[0]!.items.length,args[1]!.items.length) :
+              args[0]!.list ? args[0]!.items.length : args[1]!.list ? args[1]!.items.length : 1;
+            part = bounded(Array.from({length:size},(_,index) => {
+              const a = coordinates(args[0]!.items[args[0]!.list ? index : 0]!);
+              const b = coordinates(args[1]!.items[args[1]!.list ? index : 0]!);
+              return name === "midpoint" ? `(((${a[0]})+(${b[0]}))/2,((${a[1]})+(${b[1]}))/2)` :
+                `sqrt(((${a[0]})-(${b[0]}))^2+((${a[1]})-(${b[1]}))^2)`;
+            }),args.some((arg)=>arg.list));
+          } else if (DESCRIPTIVE_FUNCTIONS.some((functionName) => functionName === name)) {
+            approximate = true;
+            const listValues = (argument: CollectionExpansion | undefined): number[] => {
+              if (!argument?.list) throw new Error(`${name} requires a list.`);
+              if (!argument.items.length) throw new Error(`${name} requires a nonempty list.`);
+              return argument.items.map(number);
+            };
+            const expected = name === "mad" ? 1 : 2;
+            if (args.length !== expected) throw new Error(`${name} requires ${expected} argument${expected === 1 ? "" : "s"}.`);
+            const values = listValues(args[0]);
+            if (name === "quantile" || name === "quartile") {
+              const parameter = args[1]!;
+              part = {
+                items: parameter.items.map((item) => numericSource((name === "quantile" ? quantile : quartile)(values, number(item)))),
+                list: parameter.list,
+              };
+            } else {
+              let value: number;
+              if (name === "mad") value = meanAbsoluteDeviation(values);
+              else if (name === "cov" || name === "covp" || name === "corr" || name === "spearman") {
+                value = pairedStatistic(name, values, listValues(args[1]));
+              } else throw new Error(`Unsupported statistic "${name}".`);
+              part = { items: [`(${numericSource(value)})`], list: false };
+            }
+          } else if (aggregate) {
             const items = bounded(args.flatMap((arg) => arg.items)).items;
             if (name === "join") part = bounded(items);
             else if (name === "length" || name === "count") part = { items: [String(items.length)], list: false };
             else if (["sort", "reverse", "unique"].includes(name)) {
-              const values = items.map((item) => ({ item, value: number(item) }));
+              if (name === "sort" && (args.length > 2 || args.length === 2 && (!args[0]!.list || !args[1]!.list))) {
+                throw new Error("Use sort(L) or sort(L,keys) with two lists.");
+              }
+              if (name !== "sort" && args.length !== 1) throw new Error(`${name} requires one list.`);
+              const sortedItems = name === "sort" && args.length === 2 ? args[0]!.items.slice(0,args[1]!.items.length) : items;
+              const values = sortedItems.map((item,index) => ({ item, value: number(name === "sort" && args.length === 2 ? args[1]!.items[index]! : item) }));
               const seen = new Set<number>();
               const sorted = name === "reverse" ? values.reverse() : name === "sort"
                 ? values.sort((a, b) => a.value - b.value) : values.filter(({ value }) => {
@@ -218,7 +317,7 @@ export function expandCollections(
                 const variance = squareSum / denominator;
                 const value = name.startsWith("stdev") ? Math.sqrt(variance) : variance;
                 if (!Number.isFinite(value)) throw new Error(`${name} exceeds the supported numeric range.`);
-                valueSource = String(value);
+                valueSource = numericSource(value);
               } else {
                 valueSource = items.length ? items.map((item) => `(${item})`).join(name === "product" ? "*" : "+") :
                   name === "product" ? "1" : "0";
@@ -236,7 +335,6 @@ export function expandCollections(
           }
         } else if (Object.hasOwn(lists, name)) {
           part = bounded(lists[name]!.map((item) => `(${item})`));
-          listName = name;
         } else part = { items: [token], list: false };
       } else if (text[index] === "[" || text[index] === "(" || text[index] === "{") {
         const open = text[index]!;
@@ -256,16 +354,24 @@ export function expandCollections(
       while (part.list && text[nextIndex] === "[") {
         index = nextIndex;
         const indices = group(index);
-        part = select(part, indices.text, listName);
+        part = select(part, indices.text);
         index = indices.end;
         nextIndex = index;
         while (nextIndex < text.length && /\s/.test(text[nextIndex]!)) nextIndex += 1;
-        listName = undefined;
         if (!part.list && text[nextIndex] === "[") throw new Error("Indexing requires a list.");
+      }
+      if(/^\.[xy]\b/i.test(text.slice(nextIndex))){
+        const coordinate=text[nextIndex+1]!.toLowerCase()==="x"?0:1;
+        part={...part,items:part.items.map((item)=>{
+          const point=pointSources(expandPointOperations(item));
+          if(!point)throw new Error("Coordinate projection requires points or a point list.");
+          return`(${point[coordinate]})`;
+        })};
+        index=nextIndex+2;
       }
       result = combine(result, part);
     }
-    return result;
+    return{...result,items:result.items.map((item)=>item.includes(",")?expandPointOperations(item):item)};
   };
   const expand = (text: string): CollectionExpansion => {
     if (++depth > 128) throw new Error("List expressions may nest at most 128 levels.");

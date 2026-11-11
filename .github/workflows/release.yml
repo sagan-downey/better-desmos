@@ -27,7 +27,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$GITHUB_REF_NAME" = "v3.6.0" ]; then
+          if [ "$GITHUB_REF_NAME" = "v4.0.0" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
+              --title "Better Desmos 4.0 — Expanded math and graphing tools" \
+              --notes-file - <<'NOTES'
+          ## What's new
+
+          - **Statistics and probability:** Descriptive statistics, histogram/dotplot/boxplot displays, eight probability distributions, interval probabilities, and reproducible random sampling.
+          - **Inference:** Mean/proportion/chi-square tests, confidence intervals, named test objects, and linear regression slope inference with live data updates.
+          - **Lists and actions:** Logical/parallel-list filters, keyed sorting, point arithmetic and coordinate projections, simultaneous scalar/point/list updates, reusable actions, and graph click actions.
+          - **Complex numbers:** Principal-branch arithmetic and functions, complex definitions/lists, component graphing, and bounded numerical calculus.
+          - **Editing and tracing:** A formatted MathML keypad, keyboard-operable audio trace, direct photo move/scale/rotate, draggable points and polygon vertices, and polygon restrictions.
+          - **Graph tools:** Line/point styles, Cartesian/polar/minor grids, axis labels and exact viewport bounds, refined roots/extrema, and additional sampled intersections.
+          - **Tables and reliability:** Dependencies between extra table columns, corrected object-property dependency analysis, and safe generated numeric values.
+
+          ## Download and run
+
+          Download **better-desmos.html** below and open it in your browser. It is self-contained and needs no installation or server. Existing project save/import/export formats are preserved.
+
+          ## Validation and limitations
+
+          All 228 tests, TypeScript checks, production build, and whitespace checks passed. Isolated browser checks covered live inference and table formulas, complex results, keypad formatting/selection, audio playback, polygon vertex dragging, and photo manipulation with undo.
+
+          This release does not certify exhaustive Desmos parity or superior accuracy/performance. Numerical sampling, finite precision, bounded calculus, and editing limits remain documented in the README.
+          NOTES
+          elif [ "$GITHUB_REF_NAME" = "v3.6.0" ]; then
             gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
               --title "Better Desmos 3.6 — Workspace and editing upgrades" \
               --notes-file - <<'NOTES'
