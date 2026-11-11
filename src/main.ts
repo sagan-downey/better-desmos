@@ -43,6 +43,9 @@ import {
 } from "./customRegression";
 import { fitLogistic, type FitResult } from "./regression";
 import { filterFunctionReference } from "./functionReference";
+import { installFunctionAutocomplete } from "./autocomplete";
+import { installWorkspaceResize } from "./workspaceResize";
+import { MAX_TABLE_ROWS, nextTableCell, spreadsheetCells, tableAxisAt, validateSpreadsheetPaste } from "./spreadsheet";
 import { imageExportSize } from "./image-export";
 import { refreshDropdowns } from "./dropdowns";
 import { tableColumns, tableColumnName, tableColumnFormula, tableCell, tableRowSource, validateTableColumnName, evaluateTableColumn, type TableColumn, type TableAxis } from "./tables";
@@ -965,7 +968,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 3.5 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">3.5</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 3.6 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">3.6</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -1011,6 +1014,7 @@ app.innerHTML = `
         <section class="sliders-panel" id="sliders" aria-label="Parameter sliders"></section>
       </div>
     </aside>
+    <div id="workspace-divider" class="workspace-divider" role="separator" tabindex="0" aria-label="Workspace width" aria-orientation="vertical" aria-controls="workspace-items" title="Drag to resize workspace. Arrow keys resize; Home resets."></div>
     <section class="graph-panel" aria-label="Coordinate graph">
       <div class="graph-toolbar">
         <div class="view-controls">
@@ -4768,6 +4772,9 @@ function renderExpressions(): void {
     input.type = "text";
     input.value = expression.text;
     input.maxLength = 512;
+    input.dataset.functionAutocomplete = "";
+    input.autocomplete = "off";
+    input.spellcheck = false;
     input.setAttribute("aria-label", `Expression ${index + 1}`);
     const error = document.createElement("p");
     error.className = "expression-error";
@@ -5177,6 +5184,24 @@ function updateRegressionSummary(summary: HTMLParagraphElement, table: DataTable
 
 const tableContainers = new WeakMap<DataTable, HTMLElement>();
 
+function setTableCell(table: DataTable, row: number, axis: TableAxis, value: string): void {
+  const dataRow = table.rows[row]!;
+  if (typeof axis === "number") {
+    dataRow.extra ??= [];
+    while (dataRow.extra.length <= axis) dataRow.extra.push("");
+    dataRow.extra[axis] = value;
+  } else dataRow[axis] = value;
+}
+
+function focusTableCell(table: DataTable, row: number, column: number, selection?: [number, number]): void {
+  const field = tableContainers.get(table)?.querySelector<HTMLInputElement>(
+    `[data-table-row="${row}"][data-table-axis="${tableAxisAt(column)}"]`,
+  );
+  field?.focus();
+  if (selection) field?.setSelectionRange(...selection);
+  else field?.select();
+}
+
 function renderTables(): void {
   synchronizeVariableDefinitions(false);
   tableList.replaceChildren();
@@ -5304,15 +5329,18 @@ function renderTables(): void {
         input.dataset.tableRow = String(rowIndex);
         input.value = tableCell(table, rowIndex, axis);
         input.setAttribute("aria-label", `Table ${tableIndex + 1} ${axisLabel(axis)} value ${rowIndex + 1}`);
-        input.addEventListener("input", () => {
+        input.addEventListener("input", (event) => {
           if (!tableColumnFormula(table, axis)) {
-            if (typeof axis === "number") {
-              dataRow.extra ??= Array.from({ length: table.extraColumns!.length }, () => "");
-              while (dataRow.extra.length <= axis) dataRow.extra.push("");
-              dataRow.extra[axis] = input.value;
-            } else dataRow[axis] = input.value;
+            setTableCell(table, rowIndex, axis, input.value);
           }
           invalidateTableData(table);
+          if (!(event instanceof InputEvent && event.isComposing) && rowIndex === table.rows.length - 1 &&
+              input.value.trim() && table.rows.length < MAX_TABLE_ROWS) {
+            const selection: [number, number] = [input.selectionStart ?? 0, input.selectionEnd ?? 0];
+            table.rows.push({ id: nextRowId++, x: "", y: "" });
+            renderTables();
+            focusTableCell(table, rowIndex, axes.indexOf(axis), selection);
+          }
           renderSliders();
           const values = tableValues(table);
           updateTableRegression(table);
@@ -5320,6 +5348,69 @@ function renderTables(): void {
           updateRegressionSummary(summary, table, tableIndex);
           stats.textContent = tableStatistics(table);
           scheduleDraw();
+          scheduleProjectSave();
+        });
+        input.addEventListener("keydown", (event) => {
+          if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey ||
+              !["Tab", "Enter", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
+          if (event.shiftKey && event.key !== "Tab" && event.key !== "Enter") return;
+          if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+            if (input.selectionStart !== input.selectionEnd ||
+                (event.key === "ArrowLeft" ? input.selectionStart !== 0 : input.selectionEnd !== input.value.length)) return;
+          }
+          const editable = axes.flatMap((candidate, index) => tableColumnFormula(table, candidate) ? [] : [index]);
+          const target = nextTableCell(rowIndex, axes.indexOf(axis), table.rows.length, editable, event.key, event.shiftKey);
+          if (!target) return;
+          if (target.row === table.rows.length && table.rows.length >= MAX_TABLE_ROWS) {
+            if (event.key === "Tab") return;
+            event.preventDefault();
+            setProjectStatus(`Tables are limited to ${MAX_TABLE_ROWS} rows.`);
+            return;
+          }
+          event.preventDefault();
+          if (target.row === table.rows.length) {
+            table.rows.push({ id: nextRowId++, x: "", y: "" });
+            invalidateTableData(table);
+            renderTables();
+            scheduleDraw();
+          }
+          focusTableCell(table, target.row, target.column);
+        });
+        input.addEventListener("paste", (event) => {
+          const text = event.clipboardData?.getData("text/plain");
+          if (text === undefined || !/[\t\r\n]/.test(text)) return;
+          event.preventDefault();
+          let cells: string[][];
+          let size: { rows: number; columns: number };
+          const startColumn = axes.indexOf(axis);
+          try {
+            cells = spreadsheetCells(text)!;
+            size = validateSpreadsheetPaste(table, cells, rowIndex, startColumn);
+          } catch (reason) {
+            setProjectStatus(reason instanceof Error ? reason.message : "Could not paste spreadsheet cells.");
+            return;
+          }
+          captureProjectHistory();
+          table.extraColumns ??= [];
+          let columnId = Math.max(0, ...table.extraColumns.map((column) => column.id)) + 1;
+          while (table.extraColumns.length + 2 < size.columns) table.extraColumns.push({ id: columnId++ });
+          while (table.rows.length < size.rows) table.rows.push({ id: nextRowId++, x: "", y: "" });
+          for (const [offset, values] of cells.entries()) {
+            for (const [column, value] of values.entries()) {
+              setTableCell(table, rowIndex + offset, tableAxisAt(startColumn + column), value);
+            }
+          }
+          const last = table.rows.at(-1);
+          if (last && (last.x.trim() || last.y.trim() || last.extra?.some((value) => value.trim())) &&
+              table.rows.length < MAX_TABLE_ROWS) table.rows.push({ id: nextRowId++, x: "", y: "" });
+          invalidateTableData(table);
+          renderTables();
+          renderSliders();
+          draw();
+          captureProjectHistory();
+          scheduleProjectSave();
+          focusTableCell(table, rowIndex, startColumn);
+          setProjectStatus(`Pasted ${cells.length} row${cells.length === 1 ? "" : "s"} into the table.`);
         });
         const cell = document.createElement("div");
         cell.className = "table-cell";
@@ -5351,6 +5442,7 @@ function renderTables(): void {
     const addRow = document.createElement("button");
     addRow.type = "button";
     addRow.textContent = "Add row";
+    addRow.disabled = table.rows.length >= MAX_TABLE_ROWS;
     addRow.addEventListener("click", () => {
       table.rows.push({ id: nextRowId++, x: "", y: "" });
       invalidateTableData(table);
@@ -5450,7 +5542,10 @@ function renderTables(): void {
     const stats = document.createElement("p");
     stats.className = "table-stats";
     stats.textContent = tableStatistics(table);
-    content.append(grid, actions, summary, stats, error);
+    const help = document.createElement("p");
+    help.className = "table-keyboard-help";
+    help.textContent = "Tab: next cell · Enter: next row · Paste cells from a spreadsheet";
+    content.append(grid, actions, help, summary, stats, error);
     container.append(heading, content);
     wrapper.append(container);
     tableList.append(wrapper);
@@ -7016,6 +7111,11 @@ canvas.addEventListener("wheel", (event) => {
 }, { passive: false });
 
 window.addEventListener("resize", draw);
+installWorkspaceResize(
+  document.querySelector<HTMLElement>(".workspace")!,
+  document.querySelector<HTMLElement>("#workspace-divider")!, scheduleDraw, setProjectStatus,
+);
+installFunctionAutocomplete(workspaceList, setProjectStatus);
 desmosModeInput.checked = true;
 desmosModeInput.dispatchEvent(new Event("change"));
 setProjectStatus(projectStatus);

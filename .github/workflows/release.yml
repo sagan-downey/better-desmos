@@ -27,7 +27,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$GITHUB_REF_NAME" = "v3.5.0" ]; then
+          if [ "$GITHUB_REF_NAME" = "v3.6.0" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
+              --title "Better Desmos 3.6 — Workspace and editing upgrades" \
+              --notes-file - <<'NOTES'
+          ## What's new
+
+          - **Resizable workspace:** Drag the divider or use keyboard controls to adjust the sidebar. Width is remembered on this browser.
+          - **Spreadsheet navigation:** Tab, Enter, and arrow keys move between editable table cells. Typing in the last row adds a blank row.
+          - **Spreadsheet paste:** Paste tab-separated blocks from Excel or Google Sheets with automatic row/column expansion and single-action undo/redo. Formula columns are protected; invalid or oversized pastes report errors without changing data.
+          - **Function autocomplete:** Type two letters to see supported functions and argument hints. Arrow keys select; Enter, Tab, or a click inserts with the cursor inside parentheses.
+          - **Version 3.6:** Calculator badge, accessible brand, page title, and package metadata are updated.
+
+          ## Download and run
+
+          Download **better-desmos.html** below and open it in your browser. It is self-contained and needs no installation or server.
+
+          ## Validation
+
+          All 141 tests, TypeScript checks, production build, and whitespace checks passed. Browser checks covered divider dragging and keyboard controls, remembered width, autocomplete, table navigation, paste undo/redo, formula-column protection, and persistence.
+          NOTES
+          elif [ "$GITHUB_REF_NAME" = "v3.5.0" ]; then
             gh release create "$GITHUB_REF_NAME" dist/better-desmos.html \
               --title "Better Desmos 3.5 — Functions list in Settings" \
               --notes-file - <<'NOTES'
