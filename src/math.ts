@@ -76,6 +76,7 @@ export interface UserFunctionDefinition {
   parameter: string;
   parameters?: string[];
   body: string;
+  baseCases?: Array<{ arguments: number[]; body: string }>;
 }
 
 export function functionParameters(definition: UserFunctionDefinition): string[] {
@@ -92,7 +93,7 @@ export function expandUserFunctions(
   source: string,
   definitions: UserFunctionDefinition[],
 ): string {
-  if (source.length > MAX_EXPRESSION_LENGTH) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
+  if (expressionLength(source) > MAX_EXPRESSION_LENGTH || source.length > MAX_RECURSIVE_PAYLOAD_LENGTH * 8) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
   const functionsByName = new Map<string, UserFunctionDefinition>();
   for (const definition of definitions) {
     const name = definition.name.toLowerCase();
@@ -105,6 +106,28 @@ export function expandUserFunctions(
     }
     functionsByName.set(name, { ...definition, name });
   }
+
+  const dependencies = (definition: UserFunctionDefinition): string[] => {
+    const sources = [definition.body, ...(definition.baseCases ?? []).map((item) => item.body)];
+    return [...new Set(sources.flatMap((text) =>
+      [...text.matchAll(/\b([a-z](?:_[a-z0-9]+)?)\s*\(/gi)]
+        .map((match) => match[1]!.toLowerCase()).filter((name) => functionsByName.has(name))))];
+  };
+  const reachesCycle = (name: string, active = new Set<string>(), done = new Set<string>()): boolean => {
+    if (active.has(name)) return true;
+    if (done.has(name)) return false;
+    active.add(name);
+    const cyclic = dependencies(functionsByName.get(name)!).some((next) => reachesCycle(next, active, done));
+    active.delete(name);
+    done.add(name);
+    return cyclic;
+  };
+  const reachesBase = (name: string, seen = new Set<string>()): boolean => {
+    if (seen.has(name)) return false;
+    seen.add(name);
+    const definition = functionsByName.get(name)!;
+    return Boolean(definition.baseCases?.length) || dependencies(definition).some((next) => reachesBase(next, seen));
+  };
 
   const expand = (expression: string, callStack: string[]): string => {
     let result = "";
@@ -163,6 +186,27 @@ export function expandUserFunctions(
         throw new Error(`Function "${name}" requires ${parameters.length === 1 ? "one argument" : `${parameters.length} arguments`}.`);
       }
       const argumentsExpanded = argumentsSource.map((argument) => expand(argument, callStack));
+      if (reachesCycle(name) || reachesBase(name)) {
+        if (primes) throw new Error("Prime notation is not supported for recursive functions.");
+        const reachable = new Set<string>();
+        const collect = (current: string) => {
+          if (reachable.has(current)) return;
+          reachable.add(current);
+          dependencies(functionsByName.get(current)!).forEach(collect);
+        };
+        collect(name);
+        const program = [...reachable].map((current) => functionsByName.get(current)!);
+        if (!program.some((item) => item.baseCases?.length)) {
+          throw new Error(`Circular function definition involving "${name}": recursive functions need an explicit base case.`);
+        }
+        validateRecursiveProgram(program);
+        const payload = [...new TextEncoder().encode(JSON.stringify(program))]
+          .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+        if (payload.length > MAX_RECURSIVE_PAYLOAD_LENGTH) throw new Error("Recursive function definitions exceed the work limit.");
+        result += `recur_${payload}(${argumentsExpanded.join(",")})`;
+        offset = close;
+        continue;
+      }
       if ([...definition.body.matchAll(/\b([a-z](?:_[a-z0-9]+)?)\s*=\s*\[/gi)]
         .some((match) => parameters.includes(match[1]!.toLowerCase()))) {
         throw new Error("Use different names for function parameters and for bindings.");
@@ -182,14 +226,66 @@ export function expandUserFunctions(
       );
       result += `(${expand(body, [...callStack, name])})`;
       offset = close;
-      if (result.length > MAX_EXPRESSION_LENGTH) {
+      if (expressionLength(result) > MAX_EXPRESSION_LENGTH) {
         throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
       }
+    }
+    if (expressionLength(result) > MAX_EXPRESSION_LENGTH || result.length > MAX_RECURSIVE_PAYLOAD_LENGTH * 8) {
+      throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
     }
     return result;
   };
 
   return expand(source, []);
+}
+
+const MAX_RECURSIVE_PAYLOAD_LENGTH = 16384;
+const MAX_RECURSION_DEPTH = 128;
+const MAX_RECURSION_WORK = 4096;
+
+function validateRecursiveProgram(program: UserFunctionDefinition[]): void {
+  if (program.length > 64) throw new Error("Recursive function definitions exceed the work limit.");
+  for (const definition of program) {
+    const parameters = functionParameters(definition);
+    if (!definition.body.trim() || definition.body.length > MAX_EXPRESSION_LENGTH) throw new Error("Invalid recursive function body.");
+    if (definition.baseCases !== undefined && !Array.isArray(definition.baseCases)) throw new Error("Invalid recursive base cases.");
+    if (definition.baseCases && definition.baseCases.length > 128) throw new Error("Recursive base cases exceed the work limit.");
+    const seen = new Set<string>();
+    for (const base of definition.baseCases ?? []) {
+      if (!base || !Array.isArray(base.arguments) || base.arguments.length !== parameters.length ||
+          base.arguments.some((value) => typeof value !== "number" || !Number.isFinite(value)) ||
+          typeof base.body !== "string" || !base.body.trim() || base.body.length > MAX_EXPRESSION_LENGTH) {
+        throw new Error(`Invalid numeric base case for "${definition.name}".`);
+      }
+      const key = JSON.stringify(base.arguments);
+      if (seen.has(key)) throw new Error(`Duplicate base case for "${definition.name}".`);
+      seen.add(key);
+    }
+  }
+}
+
+function decodeRecursiveProgram(name: string): UserFunctionDefinition[] {
+  const payload = name.slice(6);
+  if (!payload || payload.length > MAX_RECURSIVE_PAYLOAD_LENGTH || payload.length % 2 || !/^[0-9a-f]+$/.test(payload)) {
+    throw new Error("Invalid recursive function encoding.");
+  }
+  try {
+    const bytes = new Uint8Array(payload.match(/../g)!.map((byte) => parseInt(byte, 16)));
+    const program: UserFunctionDefinition[] = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (!Array.isArray(program) || !program.length || program.length > 64 ||
+        program.some((item) => !item || typeof item.name !== "string" ||
+          !/^[a-z](?:_[a-z0-9]+)?$/.test(item.name) || typeof item.body !== "string" ||
+          (item.baseCases !== undefined && !Array.isArray(item.baseCases))) ||
+        new Set(program.map((item) => item.name)).size !== program.length) throw new Error();
+    validateRecursiveProgram(program);
+    return program;
+  } catch {
+    throw new Error("Invalid recursive function encoding.");
+  }
+}
+
+function expressionLength(source: string): number {
+  return source.replace(/\brecur_[0-9a-f]+/gi, "recur").replace(/\brecurcall_\d+/gi, "f").length;
 }
 
 function substituteScopedBody(source: string, parameters: string[], argumentsSource: string[]): string {
@@ -214,7 +310,13 @@ function substituteScopedBody(source: string, parameters: string[], argumentsSou
       case "unary": return `(${node.operator}${write(node.operand, bound)})`;
       case "binary": return `(${write(node.left, bound)}${node.operator}${write(node.right, bound)})`;
       case "call": return `${node.name}(${write(node.argument, bound)})`;
-      case "multicall": return `${node.name}(${node.args.map((arg) => write(arg, bound)).join(",")})`;
+      case "multicall": {
+        if (node.name.startsWith("recur_") &&
+            freeIdentifiers(`${node.name}(0)`).some((name) => bound.has(name))) {
+          throw new Error("A recursive function cannot capture a renamed calculus binding in an expanded function.");
+        }
+        return `${node.name}(${node.args.map((arg) => write(arg, bound)).join(",")})`;
+      }
       case "restricted": return `(${write(node.value, bound)}{${condition(node.condition, bound)}})`;
       case "piecewise": return `{${[...node.branches.map((branch) => `${condition(branch.condition, bound)}:${write(branch.value, bound)}`), ...(node.fallback ? [write(node.fallback, bound)] : [])].join(",")}}`;
       case "bound": {
@@ -327,7 +429,22 @@ export function freeIdentifiers(source: string): string[] {
       case "unary": walk(node.operand, bound); break;
       case "binary": walk(node.left, bound); walk(node.right, bound); break;
       case "call": walk(node.argument, bound); break;
-      case "multicall": node.args.forEach((arg) => walk(arg, bound)); break;
+      case "multicall": {
+        node.args.forEach((arg) => walk(arg, bound));
+        if (node.name.startsWith("recur_")) {
+          const program = decodeRecursiveProgram(node.name);
+          const names = new Set(program.map((item) => item.name));
+          for (const item of program) {
+            const parameters = new Set(functionParameters(item));
+            for (const text of [item.body, ...(item.baseCases ?? []).map((base) => base.body)]) {
+              const masked = text.replace(/\b([a-z](?:_[a-z0-9]+)?)\s*(?=\()/gi,
+                (token, name: string) => names.has(name.toLowerCase()) ? "sin" : token);
+              for (const name of freeIdentifiers(masked)) if (!parameters.has(name) && !bound.has(name)) found.add(name);
+            }
+          }
+        }
+        break;
+      }
       case "bound": {
         const scope = new Set([...bound, node.variable]);
         walk(node.lower, bound);
@@ -439,7 +556,7 @@ function parse(
   variableNames: string[] = [],
   functionNames: string[] = [],
 ): Node {
-  if (source.length > MAX_EXPRESSION_LENGTH) {
+  if (expressionLength(source) > MAX_EXPRESSION_LENGTH || source.length > MAX_RECURSIVE_PAYLOAD_LENGTH * 8) {
     throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
   }
   const normalized = source.replace(/θ/g, "theta").replace(/[Σ∑]/g, "sum").replace(/[Π∏]/g, "prod").replace(/∫/g, "int");
@@ -565,7 +682,7 @@ function parse(
         }
         if (differential < 0) throw new Error("An integral needs a trailing differential, for example dx");
         variable = tokens[differential]!.slice(1);
-        const body = parse(tokens.slice(position, differential).join(" "), allowY, false, [...variableNames, ...boundNames, variable]);
+        const body = parse(tokens.slice(position, differential).join(" "), allowY, false, [...variableNames, ...boundNames, variable], functionNames);
         position = differential + 1;
         return { type: "bound", operation: "integral", variable, body, lower, upper };
       }
@@ -574,10 +691,18 @@ function parse(
     }
     if (name.startsWith("log_") || (name === "log" && peek() === "_")) {
       let base: Node;
-      if (name.startsWith("log_")) base = parse(name.slice(4), allowY, false, [...variableNames, ...boundNames]);
+      if (name.startsWith("log_")) base = parse(name.slice(4), allowY, false, [...variableNames, ...boundNames], functionNames);
       else { take(); expect("{"); base = sum(); expect("}"); }
       expect("("); const argument = sum(); expect(")");
       return { type: "multicall", name: "logbase", args: [argument, base] };
+    }
+    if (name.startsWith("recur_") || (functionNames.includes(name) && peek() === "(")) {
+      expect("(");
+      const args = [sum()];
+      while (peek() === ",") { take(); args.push(sum()); }
+      expect(")");
+      if (name.startsWith("recur_")) decodeRecursiveProgram(name);
+      return { type: "multicall", name, args };
     }
     if (name === "x" || variableNames.includes(name) || boundNames.includes(name)) {
       return { type: "variable", name };
@@ -625,7 +750,7 @@ function parse(
     }
     const name = token.toLowerCase();
     return name === "x" || boundNames.includes(name) || variableNames.includes(name) || name.startsWith("log_") || ["sum", "prod", "int", "d"].includes(name) || name === "pi" || name === "e" ||
-      (allowY && name === "y") || functions.has(name);
+      (allowY && name === "y") || functions.has(name) || name.startsWith("recur_") || functionNames.includes(name);
   }
 
   function product(): Node {
@@ -719,6 +844,89 @@ function parse(
   return result;
 }
 
+type RecursiveProgram = Array<{
+  parameters: string[];
+  body: Node;
+  bases: Array<{ arguments: number[]; body: Node }>;
+}>;
+const recursivePrograms = new WeakMap<Node, Map<string, RecursiveProgram>>();
+
+function recursiveProgram(node: Extract<Node, { type: "multicall" }>, variableNames: string[]): RecursiveProgram {
+  const key = [...variableNames].sort().join(",");
+  let cache = recursivePrograms.get(node);
+  if (!cache) { cache = new Map(); recursivePrograms.set(node, cache); }
+  const cached = cache.get(key);
+  if (cached) return cached;
+  const definitions = decodeRecursiveProgram(node.name);
+  const names = definitions.map((_, index) => `recurcall_${index}`);
+  const possibleBindings = [...new Set(definitions.flatMap((definition) =>
+    [definition.body, ...(definition.baseCases ?? []).map((base) => base.body)]
+      .flatMap((text) => (text.match(/[a-z]+(?:_[a-z0-9]+)?/gi) ?? []).map((name) => name.toLowerCase()))))]
+    .filter((name) => !functions.has(name) && !definitions.some((item) => item.name === name));
+  const translate = (text: string) => text.replace(/\b([a-z](?:_[a-z0-9]+)?)\s*(?=\()/gi, (token, name: string) => {
+    const index = definitions.findIndex((definition) => definition.name === name.toLowerCase());
+    return index < 0 ? token : names[index]!;
+  });
+  const program = definitions.map((definition) => {
+    const parameters = functionParameters(definition);
+    if ([...definition.body.matchAll(/\b([a-z](?:_[a-z0-9]+)?)\s*=\s*\[/gi)]
+      .some((match) => parameters.includes(match[1]!.toLowerCase()))) {
+      throw new Error("Use different names for function parameters and for bindings.");
+    }
+    const read = (text: string) => parse(translate(text), true, false, [...variableNames, ...possibleBindings, ...parameters], names);
+    return { parameters, body: read(definition.body), bases: (definition.baseCases ?? []).map((base) => ({
+      arguments: base.arguments, body: read(base.body),
+    })) };
+  });
+  cache.set(key, program);
+  return program;
+}
+
+type RealRecursion = {
+  program: RecursiveProgram;
+  frames: Array<{ parameters: Map<string, Value>; bindings: Map<string, Value> }>;
+  active: Set<string>;
+  memo: Map<string, Value>;
+  work: number;
+};
+let realRecursion: RealRecursion | undefined;
+
+function recursionValueKey(value: Value): string {
+  return value.kind === "rational" ? `r${value.numerator}/${value.denominator}` : `d${value.value.toString()}`;
+}
+
+function matchesNumericBase(value: Value, base: number): boolean {
+  if (value.kind !== "rational") return value.value.eq(base);
+  const [numerator, denominator] = new Decimal(base.toString()).toFraction();
+  return value.numerator * BigInt(denominator.toFixed()) === BigInt(numerator.toFixed()) * value.denominator;
+}
+
+function recursiveRealCall(context: RealRecursion, index: number, args: Value[], x: Decimal,
+  y: Decimal | undefined, variables: Record<string, number>): Value {
+  const definition = context.program[index];
+  if (!definition || args.length !== definition.parameters.length) throw new Error("Recursive function called with the wrong number of arguments.");
+  if (++context.work > MAX_RECURSION_WORK) throw new Error("Recursive function work limit exceeded.");
+  const key = `${index}:${args.map(recursionValueKey).join(",")}|${[...boundValues].map(([name, value]) => `${name}=${recursionValueKey(value)}`).join(",")}`;
+  const cached = context.memo.get(key);
+  if (cached) return cached;
+  if (context.active.has(key)) throw new Error("Recursive function does not converge: repeated arguments.");
+  if (context.frames.length >= MAX_RECURSION_DEPTH) throw new Error("Recursive function depth limit exceeded; a base case may be missing or unreachable.");
+  const base = definition.bases.find((item) => item.arguments.every((value, i) => matchesNumericBase(args[i]!, value)));
+  context.active.add(key);
+  context.frames.push({
+    parameters: new Map(definition.parameters.map((name, i) => [name, args[i]!])),
+    bindings: new Map(boundValues),
+  });
+  try {
+    const result = evaluate(base?.body ?? definition.body, x, y, variables);
+    context.memo.set(key, result);
+    return result;
+  } finally {
+    context.frames.pop();
+    context.active.delete(key);
+  }
+}
+
 const constantNodes = new WeakMap<Node, boolean>();
 const constantValues = new WeakMap<Node, { precision: number; mode: AngleMode; value: Value }>();
 
@@ -735,7 +943,7 @@ function isConstantExpression(node: Node): boolean {
     : node.type === "unary" ? isConstantExpression(node.operand)
       : node.type === "binary" ? isConstantExpression(node.left) && isConstantExpression(node.right)
         : node.type === "bound" ? false
-        : node.type === "multicall" ? node.args.every(isConstantExpression)
+        : node.type === "multicall" ? !node.name.startsWith("recur_") && !node.name.startsWith("recurcall_") && node.args.every(isConstantExpression)
         : node.type === "call" ? isConstantExpression(node.argument)
           : node.type === "restricted" ? isConstantExpression(node.value) && conditionIsConstant(node.condition)
             : node.type === "piecewise" ? node.branches.every((branch) =>
@@ -747,7 +955,7 @@ function isConstantExpression(node: Node): boolean {
 }
 
 function evaluate(node: Node, x: Decimal, y?: Decimal, variables: Record<string, number> = {}): Value {
-  if (!isConstantExpression(node)) return evaluateNode(node, x, y, variables);
+  if (realRecursion || !isConstantExpression(node)) return evaluateNode(node, x, y, variables);
   const cached = constantValues.get(node);
   if (cached?.precision === Decimal.precision && cached.mode === angleMode) return cached.value;
   const value = evaluateNode(node, x, y, variables);
@@ -757,8 +965,20 @@ function evaluate(node: Node, x: Decimal, y?: Decimal, variables: Record<string,
 
 function evaluateNode(node: Node, x: Decimal, y: Decimal | undefined, variables: Record<string, number>): Value {
   switch (node.type) {
-    case "multicall":
+    case "multicall": {
+      if (node.name.startsWith("recurcall_") && realRecursion) {
+        return recursiveRealCall(realRecursion, Number(node.name.slice(10)), node.args.map((arg) => evaluate(arg, x, y, variables)), x, y, variables);
+      }
+      if (node.name.startsWith("recur_")) {
+        const args = node.args.map((arg) => evaluate(arg, x, y, variables));
+        const previous = realRecursion;
+        const context: RealRecursion = { program: recursiveProgram(node, [...Object.keys(variables), ...boundValues.keys()]), frames: [], active: new Set(), memo: new Map(), work: 0 };
+        realRecursion = context;
+        try { return recursiveRealCall(context, 0, args, x, y, variables); }
+        finally { realRecursion = previous; }
+      }
       return evaluateBuiltin(node.name, node.args.map((arg) => evaluate(arg, x, y, variables)));
+    }
     case "bound":
       return evaluateBound(node, x, y, variables);
     case "restricted":
@@ -775,6 +995,12 @@ function evaluateNode(node: Node, x: Decimal, y: Decimal | undefined, variables:
     case "number":
       return node.value;
     case "variable":
+      if (realRecursion) {
+        const frame = realRecursion.frames[realRecursion.frames.length - 1];
+        if (frame?.parameters.has(node.name) && boundValues.get(node.name) === frame.bindings.get(node.name)) {
+          return frame.parameters.get(node.name)!;
+        }
+      }
       if (boundValues.has(node.name)) return boundValues.get(node.name)!;
       if (node.name === "y") {
         if (!y) {
@@ -1137,6 +1363,9 @@ function compileFastEvaluator(node: Node, variables: Record<string, number>): Fa
 function compileFastEvaluatorNode(node: Node, variables: Record<string, number>): FastEvaluator {
   switch (node.type) {
     case "multicall": {
+      if (node.name.startsWith("recur_") || node.name.startsWith("recurcall_")) {
+        return (x, y) => roundFast(asDecimal(evaluate(node, new Decimal(x), y === undefined ? undefined : new Decimal(y), variables)).toNumber());
+      }
       if (["tan", "sec", "csc", "cot", "gcd", "lcm", "ncr", "npr", "factorial", "round"].includes(node.name)) {
         return (x, y) => roundFast(asDecimal(evaluateBuiltin(node.name, node.args.map((arg) => evaluate(arg, new Decimal(x), y === undefined ? undefined : new Decimal(y), variables)))).toNumber());
       }
@@ -1431,7 +1660,7 @@ function containsVariable(node: Node, variable: "x" | "y"): boolean {
       return containsVariable(node.operand, variable);
     case "binary":
       return containsVariable(node.left, variable) || containsVariable(node.right, variable);
-    case "multicall": return node.args.some((arg) => containsVariable(arg, variable));
+    case "multicall": return node.name.startsWith("recur_") || node.args.some((arg) => containsVariable(arg, variable));
     case "bound": return containsVariable(node.lower, variable) || Boolean(node.upper && containsVariable(node.upper, variable)) || (node.variable !== variable && containsVariable(node.body, variable));
     case "call":
       return containsVariable(node.argument, variable);
@@ -1996,6 +2225,31 @@ export function compileComplexExpression(
 ):(x:number,y?:number)=>Complex{
   const tree=parse(source,true,true,[...Object.keys(variables),...Object.keys(values),"i"]);
   const local=new Map<string,Complex>();
+  type ComplexRecursion = {
+    program: RecursiveProgram;
+    frames: Array<{ parameters: Map<string, Complex>; bindings: Map<string, Complex> }>;
+    active: Set<string>; memo: Map<string, Complex>; work: number;
+  };
+  let recursion: ComplexRecursion | undefined;
+  const recursiveCall = (context: ComplexRecursion, index: number, args: Complex[], x: number, y: number): Complex => {
+    const definition = context.program[index];
+    if (!definition || args.length !== definition.parameters.length) throw new Error("Recursive function called with the wrong number of arguments.");
+    if (args.some((arg) => !Number.isFinite(arg.re) || !Number.isFinite(arg.im))) throw new Error("Recursive function arguments must be finite.");
+    if (++context.work > MAX_RECURSION_WORK) throw new Error("Recursive function work limit exceeded.");
+    const key = `${index}:${args.map((arg) => `${arg.re},${arg.im}`).join(";")}|${[...local].map(([name, value]) => `${name}=${value.re},${value.im}`).join(";")}`;
+    const cached = context.memo.get(key);
+    if (cached) return cached;
+    if (context.active.has(key)) throw new Error("Recursive function does not converge: repeated arguments.");
+    if (context.frames.length >= MAX_RECURSION_DEPTH) throw new Error("Recursive function depth limit exceeded; a base case may be missing or unreachable.");
+    const base = definition.bases.find((item) => item.arguments.every((value, i) => args[i]!.im === 0 && args[i]!.re === value));
+    context.active.add(key);
+    context.frames.push({ parameters: new Map(definition.parameters.map((name, i) => [name, args[i]!])), bindings: new Map(local) });
+    try {
+      const result = visit(base?.body ?? definition.body, x, y);
+      context.memo.set(key, result);
+      return result;
+    } finally { context.frames.pop(); context.active.delete(key); }
+  };
   const real=(value:Complex):number=>{
     if(value.im!==0)throw new Error("Comparisons and calculus bounds require real values.");
     return value.re;
@@ -2011,6 +2265,8 @@ export function compileComplexExpression(
     if(node.type==="number")return complex(asDecimal(node.value).toNumber());
     if(node.type==="constant")return complex(node.value==="pi"?Math.PI:Math.E);
     if(node.type==="variable"){
+      const frame=recursion?.frames[recursion.frames.length-1];
+      if(frame?.parameters.has(node.name)&&local.get(node.name)===frame.bindings.get(node.name))return frame.parameters.get(node.name)!;
       if(local.has(node.name))return local.get(node.name)!;
       if(node.name==="i")return complex(0,1);
       if(node.name==="x")return complex(x);
@@ -2049,6 +2305,13 @@ export function compileComplexExpression(
       }finally{if(previous)local.set(node.variable,previous);else local.delete(node.variable);}
     }
     const args=node.type==="call"?[visit(node.argument,x,y)]:node.args.map((arg)=>visit(arg,x,y));
+    if(node.type==="multicall"&&node.name.startsWith("recurcall_")&&recursion)return recursiveCall(recursion,Number(node.name.slice(10)),args,x,y);
+    if(node.type==="multicall"&&node.name.startsWith("recur_")){
+      const previous=recursion;
+      const context:ComplexRecursion={program:recursiveProgram(node,[...Object.keys(variables),...Object.keys(values),...local.keys(),"i"]),frames:[],active:new Set(),memo:new Map(),work:0};
+      recursion=context;
+      try{return recursiveCall(context,0,args,x,y);}finally{recursion=previous;}
+    }
     if(args.length===1){
       try{return complexFunction(node.name,args[0]!,angleMode==="degrees");}
       catch(reason){if(args[0]!.im!==0||!BUILTIN_NAMES.some((name)=>name===node.name))throw reason;}
@@ -2070,6 +2333,7 @@ export function complexExpressionIsReal(source:string,variables:Record<string,nu
     if(node.type==="restricted")return nonreal(node.value);
     if(node.type==="piecewise")return node.branches.some((branch)=>nonreal(branch.value))||Boolean(node.fallback&&nonreal(node.fallback));
     if(node.type==="bound")return nonreal(node.body);
+    if(node.type==="multicall"&&node.name.startsWith("recur_"))return true;
     if(["real","imag","abs","arg"].includes(node.name))return false;
     return(node.type==="call"?[node.argument]:node.args).some(nonreal);
   };
@@ -2711,7 +2975,7 @@ export function compileGraphExpression(
   statisticsMode: StatisticsMode = "population",
 ):
   GraphExpression {
-  if (source.length > MAX_EXPRESSION_LENGTH) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
+  if (expressionLength(source) > MAX_EXPRESSION_LENGTH || source.length > MAX_RECURSIVE_PAYLOAD_LENGTH * 8) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
   const trimmed = source.trim();
   const collection = compileCollectionGraph(trimmed, variables, {}, false, statisticsMode);
   if (collection) return collection;
@@ -2780,7 +3044,7 @@ export function compileCollectionGraph(
   lists: Record<string, string[]> = {}, fast = false,
   statisticsMode: StatisticsMode = "population",
 ): GraphExpression | undefined {
-  if (source.length > MAX_EXPRESSION_LENGTH) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
+  if (expressionLength(source) > MAX_EXPRESSION_LENGTH || source.length > MAX_RECURSIVE_PAYLOAD_LENGTH * 8) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
   source = rewriteRandom(source, (text) => compileExpression(text, variables)(0).value.toNumber(), lists, statisticsMode);
   const inference = inferenceCall(source);
   if (inference && !inference.property) {
@@ -2901,7 +3165,7 @@ export function compileFastGraphExpression(
   variables: Record<string, number> = {},
   statisticsMode: StatisticsMode = "population",
 ): GraphExpression {
-  if (source.length > MAX_EXPRESSION_LENGTH) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
+  if (expressionLength(source) > MAX_EXPRESSION_LENGTH || source.length > MAX_RECURSIVE_PAYLOAD_LENGTH * 8) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
   const trimmed = source.trim();
   const collection = compileCollectionGraph(trimmed, variables, {}, true, statisticsMode);
   if (collection) return collection;

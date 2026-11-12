@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { axisStep, fitViewportBounds } from "./viewport";
+import { axisStep, fitViewportBounds, projectCoordinate, unprojectCoordinate, logarithmicTicks } from "./viewport";
 
 describe("viewport controls", () => {
+  it("projects logarithmic coordinates reversibly and excludes nonpositive data",()=>{
+    for(const value of [0.001,1,10,10000])expect(unprojectCoordinate(projectCoordinate(value,"log"),"log")).toBeCloseTo(value,10);
+    expect(projectCoordinate(0,"log")).toBeNaN();expect(projectCoordinate(-1,"log")).toBeNaN();
+    expect(projectCoordinate(-3)).toBe(-3);
+    expect(logarithmicTicks(-1,2).filter(tick=>tick.major).map(tick=>tick.value)).toEqual([0.1,1,10,100]);
+    expect(logarithmicTicks(-300,300).length).toBeLessThan(110);
+  });
   it("fits both axes exactly, including custom aspect ratios", () => {
     const bounds = fitViewportBounds(1000, 600, -2, 8, -10, 20);
     expect(bounds.centerX).toBe(3);

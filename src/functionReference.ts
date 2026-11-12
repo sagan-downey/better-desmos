@@ -12,6 +12,12 @@ export interface FunctionReferenceCategory {
 
 export const FUNCTION_REFERENCE: FunctionReferenceCategory[] = [
   {
+    title: "Sound",
+    entries: [
+      {name:"tone",syntax:"tone(frequency, gain)",description:"Type a tone expression to play a continuous sine tone. Frequency 20–20000 Hz; optional gain 0–1 (default 1). A mute control appears next to Project tools; loaded projects start muted."},
+    ],
+  },
+  {
     title: "Arithmetic & rounding",
     entries: [
       { name: "sqrt", syntax: "sqrt(x)", description: "Square root; x must be ≥ 0." },

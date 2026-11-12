@@ -17,3 +17,22 @@ export function axisStep(value: string): number | undefined {
   if (!Number.isFinite(step) || step <= 0) throw new Error("Axis steps must be positive finite numbers, or blank for automatic.");
   return step;
 }
+export type AxisScale = "linear" | "log";
+export function projectCoordinate(value: number, mode: AxisScale = "linear"): number {
+  return mode === "log" ? value > 0 ? Math.log10(value) : NaN : value;
+}
+export function unprojectCoordinate(value: number, mode: AxisScale = "linear"): number {
+  return mode === "log" ? 10 ** value : value;
+}
+export function logarithmicTicks(lower: number, upper: number): Array<{value:number; major:boolean}> {
+  if (!Number.isFinite(lower) || !Number.isFinite(upper) || lower >= upper) throw new Error("Invalid logarithmic tick interval.");
+  const stride = Math.max(1, Math.ceil((upper - lower) / 100));
+  const ticks: Array<{value:number;major:boolean}> = [];
+  for (let exponent = Math.max(-323, Math.floor(lower / stride) * stride); exponent <= Math.min(308, Math.ceil(upper)); exponent += stride) {
+    for (const multiplier of stride === 1 ? [1,2,3,4,5,6,7,8,9] : [1]) {
+      const position = exponent + Math.log10(multiplier);
+      if (position >= lower && position <= upper) ticks.push({value: 10 ** exponent * multiplier, major:multiplier===1});
+    }
+  }
+  return ticks;
+}

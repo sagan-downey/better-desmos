@@ -52,14 +52,16 @@ import { RANDOM_NAMES, getRandomSeed, setRandomSeed } from "./random";
 import { rewriteRandom } from "./randomSyntax";
 import { actionDefinition, actionUpdateSource, evaluateActions, expandActions, type ActionUpdate } from "./actions";
 import { dashedSegments, drawStyledPoint, lineDash, type LineStyle, type PointStyle } from "./graphAppearance";
-import { axisStep, fitViewportBounds } from "./viewport";
-import { compileComplexExpression,complexExpressionIsReal,expressionMathML } from "./math";
+import { axisStep, fitViewportBounds, projectCoordinate, unprojectCoordinate, logarithmicTicks, type AxisScale } from "./viewport";
+import { compileComplexExpression,complexExpressionIsReal } from "./math";
 import { COMPLEX_FUNCTIONS, formatComplex, type Complex } from "./complex";
 import { AudioTracePlayer,tracePoints,type TracePoint } from "./audioTrace";
 import { bracketedRoot,bracketedExtremum,segmentCrossings,polygonSignedDistance } from "./graphAnalysis";
 import { traceContour,tracePolyline,traceRegion } from "./regionTrace";
 import { numericSource } from "./numericSource";
-import { installVisualMath } from "./visualMath";
+import { advanceSlider, PLAYBACK_MODES, type PlaybackMode } from "./sliderPlayback";
+import { TonePlayer, evaluateTone, isTone } from "./tones";
+import { detectRestrictionEndpoints } from "./restrictionEndpoints";
 import { installWorkspaceResize } from "./workspaceResize";
 import { MAX_TABLE_ROWS, nextTableCell, spreadsheetCells, tableAxisAt, validateSpreadsheetPaste } from "./spreadsheet";
 import { imageExportSize } from "./image-export";
@@ -212,6 +214,8 @@ interface GraphOptions {
   xAxisLabel?: string;
   yAxisLabel?: string;
   complexMode?: boolean;
+  xScale?: AxisScale;
+  yScale?: AxisScale;
   statisticsMode: StatisticsMode;
   angleMode: AngleMode;
   randomSeed?: number;
@@ -232,6 +236,7 @@ interface SliderOptions {
   min: number;
   max: number;
   speed: number;
+  mode?: PlaybackMode;
 }
 
 type RegressionFit =
@@ -483,6 +488,7 @@ function parseProjectState(text: string): ProjectState {
         (graphOptions.gridMode !== undefined && !["cartesian", "polar"].includes(String(graphOptions.gridMode))) ||
         (graphOptions.minorGrid !== undefined && typeof graphOptions.minorGrid !== "boolean") ||
         (graphOptions.complexMode !== undefined && typeof graphOptions.complexMode !== "boolean") ||
+        (["xScale","yScale"].some((key)=>graphOptions[key] !== undefined && !["linear","log"].includes(String(graphOptions[key])))) ||
         (["xStep", "yStep"].some((key) => graphOptions[key] !== undefined &&
           (typeof graphOptions[key] !== "number" || !Number.isFinite(graphOptions[key]) || graphOptions[key] <= 0))) ||
         (["xAxisLabel", "yAxisLabel"].some((key) => graphOptions[key] !== undefined &&
@@ -687,13 +693,15 @@ function parseProjectState(text: string): ProjectState {
           options.max <= options.min || Math.abs(options.min) > 1_000_000 ||
           Math.abs(options.max) > 1_000_000 ||
           typeof options.speed !== "number" || !Number.isFinite(options.speed) ||
-          options.speed <= 0 || options.speed > 100) {
+          options.speed <= 0 || options.speed > 100 ||
+          options.mode !== undefined && !PLAYBACK_MODES.includes(options.mode as PlaybackMode)) {
         throw new Error(`Project contains invalid settings for slider "${name}".`);
       }
       sliderOptions[name] = {
         min: options.min,
         max: options.max,
         speed: options.speed,
+        mode: options.mode as PlaybackMode | undefined,
       };
     }
   }
@@ -816,6 +824,8 @@ function parseProjectState(text: string): ProjectState {
       gridMode: graphOptions.gridMode === "polar" ? "polar" : "cartesian",
       minorGrid: graphOptions.minorGrid === true,
       complexMode: graphOptions.complexMode === true,
+      xScale: graphOptions.xScale === "log" ? "log" : "linear",
+      yScale: graphOptions.yScale === "log" ? "log" : "linear",
       xStep: typeof graphOptions.xStep === "number" ? graphOptions.xStep : undefined,
       yStep: typeof graphOptions.yStep === "number" ? graphOptions.yStep : undefined,
       xAxisLabel: typeof graphOptions.xAxisLabel === "string" ? graphOptions.xAxisLabel : undefined,
@@ -932,6 +942,59 @@ const explicitEvaluationCaches = new WeakMap<
     values: BoundedCache<number, { value: number } | { error: string }>;
   }
 >();
+const tonePlayer=new TonePlayer();
+const enabledTones=new Set<number>();
+const pendingTones=new Map<number,number>();
+let toneRequest=0;
+let tonesMutedByUser=false;
+function muteTones():void{
+  pendingTones.clear();enabledTones.clear();tonePlayer.stop();updateToneControl();
+}
+function updateToneControl():void{
+  const control=document.querySelector<HTMLButtonElement>("#mute-all-tones");
+  if(control){
+    const hasTones=expressions.some(expression=>isTone(expression.text));
+    if(!hasTones)tonesMutedByUser=false;
+    control.hidden=!hasTones;
+    const playing=enabledTones.size>0||pendingTones.size>0;
+    control.innerHTML=`<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4Z" fill="none"/>${playing?'<path d="M15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14" fill="none"/>':'<path d="m3 3 18 18" fill="none"/>'}</svg>`;
+    control.setAttribute("aria-label",playing?"Mute tones":"Play tones");
+    control.title=playing?"Mute tones":"Play tones";
+    control.setAttribute("aria-pressed",String(playing));
+  }
+}
+async function playExpressionTone(expression:Expression):Promise<void>{
+  const request=++toneRequest,source=expression.text;
+  pendingTones.delete(expression.id);
+  if(!isTone(source)||expression.hidden||tonesMutedByUser){updateToneControl();return;}
+  try{
+    evaluateTone(source,sliderValues,expandFunctions);
+    pendingTones.set(expression.id,request);updateToneControl();
+    const generation=await tonePlayer.start();
+    if(!tonePlayer.valid(generation)||pendingTones.get(expression.id)!==request||
+      expression.text!==source||expression.hidden||!expressions.includes(expression))return;
+    enabledTones.add(expression.id);draw();
+  }catch(reason){
+    enabledTones.delete(expression.id);tonePlayer.stop(expression.id);
+    expression.evaluationError=reason instanceof Error?reason.message:"Could not play tone.";
+    updateExpressionErrorDisplay(expression);setProjectStatus(expression.evaluationError);
+  }finally{if(pendingTones.get(expression.id)===request)pendingTones.delete(expression.id);updateToneControl();}
+}
+function synchronizeTones():void{
+  for(const id of enabledTones){
+    const expression=expressions.find(expression=>expression.id===id);
+    if(!expression||expression.hidden||!isTone(expression.text)){enabledTones.delete(id);tonePlayer.stop(id);continue;}
+    try{
+      const {frequency,gain}=evaluateTone(expression.text,sliderValues,expandFunctions);
+      tonePlayer.update(id,frequency,gain);
+    }catch(reason){
+      enabledTones.delete(id);tonePlayer.stop(id);
+      expression.evaluationError=reason instanceof Error?reason.message:"Could not play tone.";
+      updateExpressionErrorDisplay(expression);setProjectStatus(expression.evaluationError);
+    }
+  }
+  updateToneControl();
+}
 const MAX_EXPRESSION_SAMPLE_CACHE_SIZE = 32_768;
 const expressionCurveCaches = new WeakMap<Expression, {
   key: string;
@@ -1028,7 +1091,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 4.1 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">4.1</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 4.2 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">4.2</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -1036,12 +1099,14 @@ app.innerHTML = `
             <button type="button" class="icon-control" id="project-tools-toggle" aria-label="Project tools" title="Project tools" aria-expanded="false" aria-controls="project-tools-dropdown">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 6.5a5 5 0 0 0-6.3 6.3L3 18a2.1 2.1 0 0 0 3 3l5.2-5.2a5 5 0 0 0 6.3-6.3L14 13l-3-3 3.5-3.5Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
             </button>
+            <button type="button" class="icon-control tone-control" id="mute-all-tones" aria-label="Play tones" title="Play tones" aria-pressed="false" hidden></button>
             <div id="project-tools-dropdown" class="project-tools-dropdown" hidden>
               <button type="button" id="save-project" aria-haspopup="dialog">Save</button>
               <button type="button" id="export-project">Export</button>
               <button type="button" id="export-image" aria-haspopup="dialog">PNG</button>
               <button type="button" id="import-project">Import</button>
               <button type="button" id="share-project">Share</button>
+              <button type="button" id="open-audio-trace" aria-haspopup="dialog">Audio trace</button>
             </div>
           </div>
           <div class="project-history">
@@ -1091,8 +1156,6 @@ app.innerHTML = `
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7h-6v7H4a1 1 0 0 1-1-1Z"/></svg>
           </button>
           <button type="button" class="icon-control" id="rerandomize" aria-label="Rerandomize samples" title="Rerandomize samples">↻</button>
-          <button type="button" class="icon-control" id="open-audio-trace" aria-label="Audio trace" title="Audio trace">♫</button>
-          <button type="button" class="icon-control" id="open-keypad" aria-label="Math keypad" title="Math keypad">⌨</button>
         </div>
       </div>
       <div class="canvas-wrap"><canvas id="graph" aria-label="Graph of the entered expressions"></canvas><canvas id="graph-detail" aria-hidden="true" hidden></canvas><canvas id="graph-grid" aria-hidden="true"></canvas><canvas id="graph-points" aria-hidden="true"></canvas></div>
@@ -1112,12 +1175,8 @@ app.innerHTML = `
   <dialog class="settings-dialog" id="math-keypad-dialog" aria-labelledby="math-keypad-title">
     <div class="settings-dialog-heading"><h2 id="math-keypad-title">Math keypad</h2><button type="button" id="close-math-keypad" aria-label="Close math keypad">×</button></div>
     <label class="setting-control">Expression<select id="math-keypad-expression" aria-label="Keypad expression"></select></label>
-    <div id="visual-math-editor" class="visual-math-editor"></div>
-    <p id="visual-math-help">Click inside fractions, powers, and roots to edit them. Arrow keys move the math cursor; Tab moves between placeholders. Text syntax below remains available.</p>
-    <p id="visual-math-error" class="expression-error" role="status"></p>
-    <label class="keypad-source-label" for="math-keypad-input">Text syntax</label>
-    <input id="math-keypad-input" type="text" maxlength="512" aria-label="Formatted expression editor" autocomplete="off" />
-    <details class="keypad-preview-details"><summary>Read-only preview</summary><div id="math-keypad-preview" class="math-preview" aria-label="Formatted expression"></div></details>
+    <label class="keypad-source-label" for="math-keypad-input">Expression text</label>
+    <input id="math-keypad-input" type="text" maxlength="512" aria-label="Expression text editor" autocomplete="off" spellcheck="false" />
     <div id="math-keypad-keys" class="math-keypad-keys"></div>
     <p id="math-keypad-error" class="expression-error" role="status"></p>
   </dialog>
@@ -1145,6 +1204,11 @@ app.innerHTML = `
       <h2 id="settings-title">Settings</h2>
       <button type="button" id="close-settings" aria-label="Close settings">×</button>
     </div>
+    <section class="settings-section" aria-labelledby="input-settings-heading">
+      <h3 id="input-settings-heading">Math input</h3>
+      <label class="setting-check" for="auto-keypad-setting"><span>Open math keypad when clicking a math box</span><input id="auto-keypad-setting" type="checkbox" /></label>
+      <p>Opens the keypad for expressions, table values, and table formulas. Other text fields stay unchanged.</p>
+    </section>
     <section class="settings-section theme-settings" aria-labelledby="color-scheme-heading">
       <h3 id="color-scheme-heading">Color scheme</h3>
       <div class="setting-control">
@@ -1177,6 +1241,9 @@ app.innerHTML = `
       <div class="setting-control"><label for="grid-mode-setting">Grid coordinates</label><select id="grid-mode-setting"><option value="cartesian">Cartesian</option><option value="polar">Polar</option></select></div>
       <label class="setting-check" for="minor-grid-setting"><span>Minor grid</span><input id="minor-grid-setting" type="checkbox" /></label>
       <label class="setting-check" for="complex-mode-setting"><span>Complex numbers (principal branches)</span><input id="complex-mode-setting" type="checkbox" /></label>
+      <div class="setting-control"><label for="x-scale-setting">X-axis scale</label><select id="x-scale-setting"><option value="linear">Linear</option><option value="log">Logarithmic (base 10)</option></select></div>
+      <div class="setting-control"><label for="y-scale-setting">Y-axis scale</label><select id="y-scale-setting"><option value="linear">Linear</option><option value="log">Logarithmic (base 10)</option></select></div>
+      <p>Logarithmic axes show positive coordinates only. Bounds remain actual values; grid steps on a log axis are automatic.</p>
       <div class="setting-control"><label for="x-step-setting">X / radial step</label><input id="x-step-setting" type="number" step="any" placeholder="Automatic" /></div>
       <div class="setting-control"><label for="y-step-setting">Y step</label><input id="y-step-setting" type="number" step="any" placeholder="Automatic" /></div>
       <p id="grid-step-warning" class="expression-error" role="status"></p>
@@ -1415,6 +1482,18 @@ function tickStep(pixelsPerUnit = scale): number {
 function verticalScale(): number {
   return scale / graphOptions.aspectRatio;
 }
+function screenXAt(x: number, width: number): number {
+  return width / 2 + (projectCoordinate(x, graphOptions.xScale) - centerX) * scale;
+}
+function screenYAt(y: number, height: number): number {
+  return height / 2 - (projectCoordinate(y, graphOptions.yScale) - centerY) * verticalScale();
+}
+function worldXAt(pixel: number, width: number): number {
+  return unprojectCoordinate((pixel - width / 2) / scale + centerX, graphOptions.xScale);
+}
+function worldYAt(pixel: number, height: number): number {
+  return unprojectCoordinate((height / 2 - pixel) / verticalScale() + centerY, graphOptions.yScale);
+}
 
 function currentThemeColor(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(`--${name}`).trim();
@@ -1433,6 +1512,50 @@ function alignCanvasStrokeCenter(coordinate: number, dpr: number, lineWidth: num
   const halfPixel = devicePixels % 2 === 1 ? 0.5 : 0;
   return (Math.round(coordinate * dpr) + halfPixel) / dpr;
 }
+function drawLogarithmicGrid(ctx: CanvasRenderingContext2D, width:number, height:number):void {
+  const warnings:string[]=graphOptions.gridMode==="polar"?["Polar grid is displayed as Cartesian while logarithmic axes are active."]:[];
+  const axisX = graphOptions.xScale === "log" ? 0 : Math.max(0,Math.min(width,screenXAt(0,width)));
+  const axisY = graphOptions.yScale === "log" ? height : Math.max(0,Math.min(height,screenYAt(0,height)));
+  ctx.font="12px ui-sans-serif, system-ui, sans-serif";ctx.lineWidth=1;
+  for(const axis of ["x","y"] as const){
+    const horizontal=axis==="x", mode=horizontal?graphOptions.xScale:graphOptions.yScale;
+    const pixels=horizontal?width:height, unit=horizontal?scale:verticalScale(), center=horizontal?centerX:centerY;
+    const lower=center-pixels/(2*unit),upper=center+pixels/(2*unit);
+    const requested=horizontal?graphOptions.xStep:graphOptions.yStep;
+    const tooDense=requested!==undefined&&(upper-lower)/requested>1000;
+    if(mode!=="log"&&tooDense)warnings.push("Manual grid step is too small at this zoom; displaying automatic steps.");
+    const step=mode==="log"||tooDense?tickStep(unit):requested??tickStep(unit);
+    const minorStep=graphOptions.minorGrid?step/5:step;
+    const firstTick=Math.ceil(lower/minorStep);
+    const ticks=mode==="log"?logarithmicTicks(lower,upper):
+      Array.from({length:Math.min(5000,Math.ceil((upper-lower)/minorStep)+1)},(_,i)=>({
+        value:(firstTick+i)*minorStep,major:!graphOptions.minorGrid||(firstTick+i)%5===0,
+      }));
+    for(const tick of ticks){
+      const position=horizontal?screenXAt(tick.value,width):screenYAt(tick.value,height);
+      if(!Number.isFinite(position)||position<0||position>pixels)continue;
+      if(graphOptions.showGrid&&(tick.major||graphOptions.minorGrid)){
+        ctx.beginPath();ctx.strokeStyle=themeColorWithAlpha("text",tick.major?0.22:0.09);
+        if(horizontal){ctx.moveTo(position,0);ctx.lineTo(position,height);}
+        else{ctx.moveTo(0,position);ctx.lineTo(width,position);}ctx.stroke();
+      }
+      if(tick.major&&graphOptions.showLabels&&(horizontal?graphOptions.showXAxis:graphOptions.showYAxis)){
+        ctx.fillStyle=currentThemeColor("text-strong");
+        const label=Number(tick.value.toPrecision(4)).toString();
+        if(horizontal)ctx.fillText(label,position+4,Math.min(height-8,axisY+16));
+        else ctx.fillText(label,Math.min(width-60,axisX+6),position-5);
+      }
+    }
+  }
+  ctx.beginPath();ctx.strokeStyle=themeColorWithAlpha("text",0.72);
+  if(graphOptions.showXAxis){ctx.moveTo(0,axisY);ctx.lineTo(width,axisY);}
+  if(graphOptions.showYAxis){ctx.moveTo(axisX,0);ctx.lineTo(axisX,height);}ctx.stroke();
+  ctx.fillStyle=currentThemeColor("text");
+  if(graphOptions.showXAxis&&graphOptions.xAxisLabel)ctx.fillText(graphOptions.xAxisLabel,width-70,Math.max(14,axisY-8));
+  if(graphOptions.showYAxis&&graphOptions.yAxisLabel)ctx.fillText(graphOptions.yAxisLabel,Math.min(width-80,axisX+8),18);
+  const warning=document.querySelector("#grid-step-warning");
+  if(warning)warning.textContent=[...new Set(warnings)].join(" ");
+}
 
 function drawGrid(target = gridCanvas, exportWidth?: number, exportHeight?: number, exportDpr?: number): void {
   const bounds = canvasWrap.getBoundingClientRect();
@@ -1449,6 +1572,7 @@ function drawGrid(target = gridCanvas, exportWidth?: number, exportHeight?: numb
   if (!context) throw new Error("Could not create the grid canvas.");
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   context.clearRect(0, 0, width, height);
+  if(graphOptions.xScale==="log"||graphOptions.yScale==="log"){drawLogarithmicGrid(context,width,height);return;}
   const yScale = verticalScale();
   const originX = width / 2 - centerX * scale;
   const originY = height / 2 + centerY * yScale;
@@ -1635,8 +1759,8 @@ function strokeColoredSegments(
     const y1 = geometrySegments[index + 1]!;
     const x2 = geometrySegments[index + 2]!;
     const y2 = geometrySegments[index + 3]!;
-    const x = ((x1 + x2) / 2 - width / 2) / scale + centerX;
-    const y = (height / 2 - (y1 + y2) / 2) / verticalScale() + centerY;
+    const x = worldXAt((x1 + x2) / 2, width);
+    const y = worldYAt((y1 + y2) / 2, height);
     let color: string;
     try {
       color = colorAt(x, y);
@@ -1692,9 +1816,9 @@ function drawImplicit(
   const screenY = (row: number) => Math.min(row * step, height);
   const screenXs = Float64Array.from({ length: columns }, (_, column) => screenX(column));
   const screenYs = Float64Array.from({ length: rows }, (_, row) => screenY(row));
-  const xCoordinates = Float64Array.from(screenXs, (px) => (px - width / 2) / scale + centerX);
+  const xCoordinates = Float64Array.from(screenXs, (px) => worldXAt(px, width));
   const yCoordinates = Float64Array.from(
-    screenYs, (py) => (height / 2 - py) / verticalScale() + centerY,
+    screenYs, (py) => worldYAt(py, height),
   );
   const values = new Float64Array(columns * rows);
   const regions = regionAt ? new Array<string | undefined>(columns * rows) : undefined;
@@ -1856,8 +1980,8 @@ function addPointCandidate(
   width: number,
   height: number,
 ): void {
-  const screenX = width / 2 + (x - centerX) * scale;
-  const screenY = height / 2 - (y - centerY) * verticalScale();
+  const screenX = screenXAt(x, width);
+  const screenY = screenYAt(y, height);
   if (!Number.isFinite(screenX) || !Number.isFinite(screenY) ||
       screenX < -8 || screenX > width + 8 || screenY < -8 || screenY > height + 8) {
     return;
@@ -1894,10 +2018,10 @@ function drawExplicitCurve(
 ): ExplicitCurveData {
   const source = expression ? expandFunctions(expression.text) : "";
   const cacheKey = expression ? `${graphMode}:${getPrecisionDigits()}:${getAngleMode()}:${source}:${collectionSignature(source)}:${
-    referencedVariableSignature(source, sliderValues)
+    graphVariableSignature(source)
   }:${centerX}:${centerY}:${scale}:${graphOptions.aspectRatio}:${width}:${height}:${
     graphSettings.explicitSampleSpacing
-  }:${sideways}` : "";
+  }:${sideways}:${graphOptions.xScale}:${graphOptions.yScale}` : "";
   const cached = expression && renderDetailFactor === 1 && performanceProfile.cacheEnabled
     ? expressionCurveCaches.get(expression)
     : undefined;
@@ -1922,13 +2046,12 @@ function drawExplicitCurve(
   const samples: GraphSample[] = [];
   const geometry: ExplicitCurveData = { id, color, samples, segments: [], colorAt, sideways,evaluate };
   const yScale = verticalScale();
-  const originY = height / 2 + centerY * yScale;
   const parameterLength = sideways ? height : width;
   const outputLength = sideways ? width : height;
   const coordinateAt = (screenParameter: number) => sideways
-    ? (height / 2 - screenParameter) / yScale + centerY
-    : (screenParameter - width / 2) / scale + centerX;
-  if (tangent) {
+    ? worldYAt(screenParameter, height)
+    : worldXAt(screenParameter, width);
+  if (tangent && graphOptions.xScale !== "log" && graphOptions.yScale !== "log") {
     const { slope, offset } = tangent();
     if (slope !== 0) {
       if (!Number.isFinite(slope) || !Number.isFinite(offset)) {
@@ -2066,8 +2189,8 @@ function drawExplicitCurve(
       const value = evaluate(parameter);
       const x = sideways ? value : parameter;
       const y = sideways ? parameter : value;
-      const screenX = sideways ? width / 2 + (value - centerX) * scale : screenParameter;
-      const screenY = sideways ? screenParameter : originY - value * yScale;
+      const screenX = sideways ? screenXAt(value, width) : screenParameter;
+      const screenY = sideways ? screenParameter : screenYAt(value, height);
       return {
         x,
         y,
@@ -2100,11 +2223,10 @@ function drawExplicitCurve(
     const secondValid = Number.isFinite(secondOutput) &&
       secondOutput >= -outputLength * 2 && secondOutput <= outputLength * 3;
     const screenDelta = Math.abs(secondOutput - firstOutput);
-    const midpointParameter = (sideways ? first.y + second.y : first.x + second.x) / 2;
     const firstScreenParameter = sideways ? first.screenY : first.screenX;
     const secondScreenParameter = sideways ? second.screenY : second.screenX;
     const midpointScreenParameter = (firstScreenParameter + secondScreenParameter) / 2;
-    const midpoint = sampleAt(midpointParameter, midpointScreenParameter);
+    const midpoint = sampleAt(coordinateAt(midpointScreenParameter), midpointScreenParameter);
     const midpointOutput = sideways ? midpoint.screenX : midpoint.screenY;
     const midpointValid = Number.isFinite(midpointOutput) &&
       midpointOutput >= -outputLength * 2 && midpointOutput <= outputLength * 3;
@@ -2426,12 +2548,14 @@ function detectImplicitAxisIntercepts(
   ];
 
   for (const { axis, min, max } of axes) {
+    if(axis==="x"?graphOptions.yScale==="log":graphOptions.xScale==="log")continue;
+    const mode=axis==="x"?graphOptions.xScale:graphOptions.yScale;
     const steps = Math.max(1, Math.ceil(
       (max - min) * (axis === "x" ? scale : verticalScale()) / sampleSpacing,
     ));
     const valueAt = (value: number): number => axis === "x"
-      ? implicitValue(evaluate, value, 0)
-      : implicitValue(evaluate, 0, value);
+      ? implicitValue(evaluate, unprojectCoordinate(value,mode), 0)
+      : implicitValue(evaluate, 0, unprojectCoordinate(value,mode));
     for (let index = 0; index < steps; index += 1) {
       const start = min + (max - min) * index / steps;
       const end = min + (max - min) * (index + 1) / steps;
@@ -2471,7 +2595,7 @@ function detectImplicitAxisIntercepts(
         low = startValue === 0 ? start : end;
         high = low;
       }
-      const root = (low + high) / 2;
+      const root = unprojectCoordinate((low + high) / 2,mode);
       addPointCandidate(
         intercepts,
         axis === "x" ? root : 0,
@@ -2536,7 +2660,7 @@ function addGraphPointAt(screenX: number, screenY: number): void {
         Math.hypot(left.screenX - screenX, left.screenY - screenY) -
         Math.hypot(right.screenX - screenX, right.screenY - screenY))[0]
     : undefined;
-  let x = pointCandidate?.x ?? (nearest.x - width / 2) / scale + centerX;
+  let x = pointCandidate?.x ?? worldXAt(nearest.x, width);
   let y: number;
   if (graph.kind === "explicit") {
     try {
@@ -2546,7 +2670,7 @@ function addGraphPointAt(screenX: number, screenY: number): void {
       return;
     }
   } else if (graph.kind === "sideways") {
-    y = pointCandidate?.y ?? (height / 2 - nearest.y) / verticalScale() + centerY;
+    y = pointCandidate?.y ?? worldYAt(nearest.y, height);
     try {
       const result = graph.evaluate(y);
       x = typeof result === "number" ? result : result.value.toNumber();
@@ -2554,7 +2678,7 @@ function addGraphPointAt(screenX: number, screenY: number): void {
       return;
     }
   } else {
-    y = (height / 2 - nearest.y) / verticalScale() + centerY;
+    y = worldYAt(nearest.y, height);
   }
   if (!Number.isFinite(x) || !Number.isFinite(y)) {
     return;
@@ -2666,13 +2790,13 @@ function drawHoverOverlay(buildIndex = true): void {
     pointX = nearest.x - bufferX;
     pointY = nearest.y - bufferY;
     label = `${nearest.curve.id.startsWith("implicit-") ? "implicit curve" : "curve"} · (${formatTick(
-      (nearest.x - graphWidth / 2) / scale + centerX,
+      worldXAt(nearest.x, graphWidth),
     )}, ${formatTick(
-      (graphHeight / 2 - nearest.y) / verticalScale() + centerY,
+      worldYAt(nearest.y, graphHeight),
     )})`;
     color = nearest.curve.colorAt?.(
-      (nearest.x - graphWidth / 2) / scale + centerX,
-      (graphHeight / 2 - nearest.y) / verticalScale() + centerY,
+      worldXAt(nearest.x, graphWidth),
+      worldYAt(nearest.y, graphHeight),
     ) ?? nearest.curve.color;
   }
   if (pointX === undefined || pointY === undefined || !label) {
@@ -2731,8 +2855,8 @@ function drawParametricCurve(
     try {
       const [x, y] = evaluate(parameter);
       const region = regionAt?.(parameter);
-      const screenX = width / 2 + (x - centerX) * scale;
-      const screenY = height / 2 - (y - centerY) * verticalScale();
+      const screenX = screenXAt(x, width);
+      const screenY = screenYAt(y, height);
       const valid = Number.isFinite(screenX) && Number.isFinite(screenY) &&
         screenX >= -width * 2 && screenX <= width * 3 &&
         screenY >= -height * 2 && screenY <= height * 3;
@@ -2780,9 +2904,9 @@ function drawInequality(
   context.save();
   context.globalAlpha = 0.18 * opacity;
   for (let screenY = 0; screenY < height; screenY += cellSize) {
-    const y = (height / 2 - (screenY + cellSize / 2)) / verticalScale() + centerY;
+    const y = worldYAt(screenY + cellSize / 2, height);
     for (let screenX = 0; screenX < width; screenX += cellSize) {
-      const x = (screenX + cellSize / 2 - width / 2) / scale + centerX;
+      const x = worldXAt(screenX + cellSize / 2, width);
       try {
         const residual = evaluate(x, y);
         const value = typeof residual === "number" ? residual : residual.toNumber();
@@ -2850,8 +2974,8 @@ function drawExpressionLabel(expression: Expression, width: number, height: numb
       context.lineWidth = 4;
       context.strokeStyle = currentThemeColor("app-bg");
       context.fillStyle = expression.color;
-      const sx = width / 2 + (x - centerX) * scale + 10;
-      const sy = height / 2 - (y - centerY) * verticalScale() - 10;
+      const sx = screenXAt(x, width) + 10;
+      const sy = screenYAt(y, height) - 10;
       context.strokeText(label, sx, sy);
       context.fillText(label, sx, sy);
     } finally {
@@ -2872,6 +2996,7 @@ function draw(): void {
   detailCanvas.height = 1;
   delete detailCanvas.dataset.resolution;
   synchronizeVariableDefinitions();
+  synchronizeTones();
   const bounds = canvasWrap.getBoundingClientRect();
   renderGraph(
     canvas, Math.max(1, bounds.width * GRAPH_BUFFER_SCALE),
@@ -2910,6 +3035,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
   const expressionById = new Map(expressions.map((expression) => [expression.id, expression]));
   const tableById = new Map(tables.map((table) => [table.id, table]));
   const drawWorkspaceItem=(item: WorkspaceItem): void => {
+    const endpointMarkers:Array<{x:number;y:number;closed:boolean;color:string;opacity:number;radius:number;graphId:string}>=[];
     if (item.type === "photo") {
       const photo = photos.find((entry) => entry.id === item.id);
       if (photo) drawPhoto(photo, width, height);
@@ -2939,18 +3065,30 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
       const colorAt=compileSpatialColor(expression);
       const lineWidth=expression.lineWidth??2;
       const opacity=expression.opacity??1;
+      if(graph.kind==="explicit"||graph.kind==="sideways"||graph.kind==="parametric"){
+        const source=expandFunctions(expression.text);
+        if(source.includes("{")){
+          const parameterDomain=graph.kind==="sideways"?{min:worldYAt(height,height),max:worldYAt(0,height)}:
+            {min:worldXAt(0,width),max:worldXAt(width,width)};
+          for(const endpoint of detectRestrictionEndpoints(source,graph,{variables:sliderValues,sliderBounds:sliderOptions,parameterDomain})){
+            endpointMarkers.push({...endpoint,color:colorAt?.(endpoint.x,endpoint.y)??expression.color,
+              opacity,radius:Math.max(4,lineWidth+2),graphId});
+          }
+        }
+      }
       if (graph.kind === "polygon") {
         try {
           const vertices = graph.evaluate();
           const directVertices=polygonVertexSources(expression.text);
           const path = new Path2D();
           const geometry: CurveGeometry = { id: graphId, color: expression.color, segments: [] };
-          const screen = vertices.map(([x, y]) => [width / 2 + (x - centerX) * scale, height / 2 - (y - centerY) * verticalScale()]);
+          const logarithmic=graphOptions.xScale==="log"||graphOptions.yScale==="log";
+          const screen = vertices.map(([x, y]) => [screenXAt(x, width), screenYAt(y, height)]);
           for (const [index, vertex] of screen.entries()) {
-            if (index === 0) path.moveTo(vertex[0]!, vertex[1]!);
-            else path.lineTo(vertex[0]!, vertex[1]!);
+            if (!logarithmic){if (index === 0) path.moveTo(vertex[0]!, vertex[1]!);
+            else path.lineTo(vertex[0]!, vertex[1]!);}
             const next = screen[(index + 1) % screen.length]!;
-            geometry.segments.push(vertex[0]!, vertex[1]!, next[0]!, next[1]!);
+            if(!logarithmic)geometry.segments.push(vertex[0]!, vertex[1]!, next[0]!, next[1]!);
             const source=graph.vertexSources?.[index];
             if(source&&expression.draggable!==false){
               const point=compileGraphExpression(`(${source.join(",")})`,sliderValues);
@@ -2963,6 +3101,11 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
                   nextDraggableGraphPoints.push({expressionId:expression.id,draggable:true,xVariables,yVariables,x,y,
                     screenX:vertex[0]!,screenY:vertex[1]!,color,opacity,directSource:direct?expression.text:undefined,vertexIndex:direct?index:undefined});
                   addPointCandidate(candidates,x,y,"draggable vertex",[graphId],color,width,height);
+                }
+                if(logarithmic){
+                  const evaluate=(x:number,y:number)=>polygonSignedDistance(vertices,x,y);
+                  implicitCurves.push(drawInequality(evaluate,"<=",graphId,expression.color,width,height,colorAt,lineWidth,opacity));
+                  updateExpressionErrorDisplay(expression);continue;
                 }
               }
             }
@@ -2980,8 +3123,8 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
               const maxY = Math.min(height, Math.max(...screen.map((point) => point[1]!)));
               for (let sy = minY; sy < maxY; sy += step) {
                 for (let sx = minX; sx < maxX; sx += step) {
-                  context.fillStyle = colorAt((sx + step / 2 - width / 2) / scale + centerX,
-                    (height / 2 - sy - step / 2) / verticalScale() + centerY);
+                  context.fillStyle = colorAt(worldXAt(sx + step / 2, width),
+                    worldYAt(sy + step / 2, height));
                   context.fillRect(sx, sy, step, step);
                 }
               }
@@ -3017,12 +3160,12 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
           }
           const pointColor=colorAt?.(x,y)??expression.color;
           const screenX=alignCanvasStrokeCenter(
-            width/2+(x-centerX)*scale,
+            screenXAt(x,width),
             dpr,
             1,
           );
           const screenY=alignCanvasStrokeCenter(
-            height/2-(y-centerY)*verticalScale(),
+            screenYAt(y,height),
             dpr,
             1,
           );
@@ -3116,8 +3259,8 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
           values.forEach((y,index) => {
             if (y === undefined) return;
             const x=index+1;
-            const screenX=width/2+(x-centerX)*scale;
-            const screenY=height/2-(y-centerY)*verticalScale();
+            const screenX=screenXAt(x,width);
+            const screenY=screenYAt(y,height);
             const pointColor=colorAt?.(x,y)??expression.color;
             listPoints.push({ x,y,color: pointColor,graphId,opacity,expressionId: expression.id });
             if(screenX>=0&&screenX<=width&&screenY>=0&&screenY<=height) {
@@ -3167,8 +3310,8 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
     const tableData=table? [{ table,values: tableValues(table) }]:[];
     for(const { table,values } of tableData) {
       for(const [x,y] of tablePlotPoints(values)) {
-        const screenX=width/2+(x-centerX)*scale;
-        const screenY=height/2-(y-centerY)*verticalScale();
+        const screenX=screenXAt(x,width);
+        const screenY=screenYAt(y,height);
         if(screenX<0||screenX>width||screenY<0||screenY>height) {
           continue;
         }
@@ -3190,8 +3333,8 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
     }
 
     for(const point of listPoints) {
-      const screenX=width/2+(point.x-centerX)*scale;
-      const screenY=height/2-(point.y-centerY)*verticalScale();
+      const screenX=screenXAt(point.x,width);
+      const screenY=screenYAt(point.y,height);
       if(screenX<-6||screenX>width+6||screenY<-6||screenY>height+6) continue;
       context.save();
       context.globalAlpha=point.opacity;
@@ -3215,8 +3358,8 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
       context.strokeStyle=currentThemeColor("text-strong");
       context.lineWidth=1.5;
       for(const [x,y] of tablePlotPoints(values)) {
-        const screenX=width/2+(x-centerX)*scale;
-        const screenY=height/2-(y-centerY)*verticalScale();
+        const screenX=screenXAt(x,width);
+        const screenY=screenYAt(y,height);
         if(screenX<-6||screenX>width+6||screenY<-6||screenY>height+6) {
           continue;
         }
@@ -3225,6 +3368,15 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
         context.fill();
         context.stroke();
       }
+    }
+    for(const endpoint of endpointMarkers){
+      const sx=screenXAt(endpoint.x,width),sy=screenYAt(endpoint.y,height);
+      if(!Number.isFinite(sx)||!Number.isFinite(sy)||sx<0||sx>width||sy<0||sy>height)continue;
+      context.save();context.setLineDash([]);context.globalAlpha=endpoint.opacity;
+      context.beginPath();context.arc(sx,sy,endpoint.radius,0,Math.PI*2);
+      context.fillStyle=endpoint.closed?endpoint.color:currentThemeColor("app-bg");context.fill();
+      context.strokeStyle=endpoint.color;context.lineWidth=2;context.stroke();context.restore();
+      addPointCandidate(candidates,endpoint.x,endpoint.y,endpoint.closed?"closed endpoint":"open endpoint",[endpoint.graphId],endpoint.color,width,height);
     }
     if (entry && !entry.hidden) drawExpressionLabel(entry, width, height);
     allDraggableGraphPoints.push(...nextDraggableGraphPoints);
@@ -3252,7 +3404,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
       const crossings=segmentCrossings(a.segments,b.segments,width,height);
       if(crossings.limited)setProjectStatus("Intersection analysis reached its numerical work/marker limit; zoom in to inspect additional crossings.");
       for(const [sx,sy]of crossings.points){
-        const x=centerX+(sx-width/2)/scale,y=centerY+(height/2-sy)/verticalScale();
+        const x=worldXAt(sx,width),y=worldYAt(sy,height);
         addPointCandidate(candidates,x,y,"intersection",[a.id,b.id],a.colorAt?.(x,y)??a.color,width,height);
       }
     }
@@ -3384,6 +3536,18 @@ function updateScalarResult(expression: Expression): boolean {
     }
   };
   const source = expression.text.trim();
+  if(isTone(source)){
+    expression.compileError=undefined;
+    try{
+      const {frequency,gain}=evaluateTone(source,sliderValues,expandFunctions);
+      expression.evaluationError=undefined;
+      if(resultElement){resultElement.textContent=`${frequency} Hz · gain ${gain} · ${enabledTones.has(expression.id)?"playing":"muted"}`;resultElement.hidden=false;}
+    }catch(reason){
+      expression.evaluationError=reason instanceof Error?reason.message:"Invalid tone.";
+      if(resultElement)resultElement.hidden=true;
+    }
+    updateError();return true;
+  }
   if (isActionExpression(source)) {
     if (resultElement) resultElement.hidden = true;
     return true;
@@ -3606,12 +3770,14 @@ function getCompiled(expression: Expression): CompiledGraph | undefined {
     if (distributionDefinition(expression.text)) return undefined;
     if(inferenceDefinition(expression.text))return undefined;
     if (isActionExpression(expression.text)) return undefined;
+    if (isTone(expression.text)) return undefined;
     if (functionDefinition) {
       expression.compileError = functionDefinition.error;
       if (!expression.compileError) {
         try {
-          const expandedSource = expandFunctions(
-            `${functionDefinition.definition.name}(${functionParameters(functionDefinition.definition).map(() => "0").join(",")})`,
+          const expandedSource = expandFunctions(functionDefinition.baseCase?functionDefinition.baseCase.body:
+            `${functionDefinition.definition.name}(${functionParameters(functionDefinition.definition).map((_,index) =>
+              numericSource(functionDefinition.definition.baseCases?.[0]?.arguments[index]??0)).join(",")})`,
           );
           if(graphOptions.complexMode&&!hasCollections(expandedSource,collectionValues)&&!graphRelation(expandedSource)){
             compileComplexExpression(expandedSource,sliderValues,complexValues);
@@ -3735,6 +3901,7 @@ function updateExpressionErrorDisplay(expression: Expression): void {
 type FunctionState = {
   expression: Expression;
   definition: UserFunctionDefinition;
+  baseCase?: {arguments:number[];body:string};
   error?: string;
 };
 
@@ -3766,6 +3933,12 @@ function getUserFunctionDefinitions(): FunctionState[] {
       body: match[3]!.trim(),
     };
     const state: (typeof found)[number] = { expression, definition };
+    const baseArguments=parameter.split(",").map(value=>value.trim());
+    if(baseArguments.every(value=>/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value))){
+      state.baseCase={arguments:baseArguments.map(Number),body:definition.body};
+      if(!state.baseCase.arguments.every(Number.isFinite)||!definition.body)state.error="Base cases need finite numeric inputs and a value.";
+      found.push(state);continue;
+    }
     try {
       functionParameters(definition);
     } catch (reason) {
@@ -3782,7 +3955,7 @@ function getUserFunctionDefinitions(): FunctionState[] {
       ...DISTRIBUTION_NAMES, ...PROBABILITY_KERNELS, "pdf", "cdf", "inversecdf",
       ...INFERENCE_NAMES, "test", "conf", "estimate", "stderr", "dof", "score", "pleft", "pright", "lower", "upper",
       ...RANDOM_NAMES,
-      ...COMPLEX_FUNCTIONS,"i",
+      ...COMPLEX_FUNCTIONS,"i","tone",
       ...expressions.flatMap((expression) => {
         const definition = distributionDefinition(expression.text);
         return definition ? [definition.target] : [];
@@ -3794,13 +3967,28 @@ function getUserFunctionDefinitions(): FunctionState[] {
     found.push(state);
   }
   const counts = new Map<string, number>();
-  for (const { definition } of found) {
+  for (const { definition,baseCase } of found) {
+    if(baseCase)continue;
     counts.set(definition.name, (counts.get(definition.name) ?? 0) + 1);
   }
   for (const state of found) {
-    if (counts.get(state.definition.name)! > 1) {
+    if (!state.baseCase&&counts.get(state.definition.name)! > 1) {
       state.error = `Function "${state.definition.name}" is defined more than once.`;
     }
+  }
+  for(const base of found.filter(state=>state.baseCase)){
+    const general=found.filter(state=>!state.baseCase&&state.definition.name===base.definition.name);
+    if(general.length!==1){base.error=`Base case "${base.definition.name}" needs exactly one general function definition.`;continue;}
+    const owner=general[0]!,tuple=base.baseCase!;
+    if(owner.error){base.error=owner.error;continue;}
+    if(tuple.arguments.length!==functionParameters(owner.definition).length){
+      base.error="Base case argument count must match the general function.";owner.error=base.error;continue;
+    }
+    const duplicate=found.filter(state=>state.baseCase&&state.definition.name===base.definition.name&&
+      JSON.stringify(state.baseCase.arguments)===JSON.stringify(tuple.arguments));
+    if(duplicate.length>1){base.error="This numeric base case is defined more than once.";owner.error=base.error;continue;}
+    if(base.error){owner.error=base.error;continue;}
+    (owner.definition.baseCases??=[]).push(tuple);
   }
   functionAnalysis = {
     inputs: expressions.map((expression) => ({ expression, text: expression.text })),
@@ -3816,6 +4004,11 @@ function userFunctionSignature(
   return functionAnalysis?.states === states
     ? functionAnalysis.signature
     : JSON.stringify(states.map(({ definition, error }) => ({ ...definition, error })));
+}
+function graphVariableSignature(source:string):string{
+  const definitions=getUserFunctionDefinitions().filter(state=>!state.baseCase).map(({definition})=>
+    [definition.body,...(definition.baseCases??[]).map(base=>base.body)].join(" "));
+  return referencedVariableSignature([source,...definitions].join(" "),sliderValues);
 }
 
 function regressionSlopeInference(target:string):{estimate:number;stderr:number;dof:number}{
@@ -3858,7 +4051,7 @@ function expandFunctions(source: string, scope = source, rewriteStructured = tru
     if (invalidDefinition) throw new Error(invalidDefinition.error);
     expanded = expandUserFunctions(
       source,
-      states.filter(({ error }) => !error).map(({ definition }) => definition),
+      states.filter(({ error,baseCase }) => !error&&!baseCase).map(({ definition }) => definition),
     );
     expandedSources.set(source, expanded);
   }
@@ -3967,7 +4160,7 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
     ...DISTRIBUTION_NAMES, ...PROBABILITY_KERNELS, "pdf", "cdf", "inversecdf",
     ...INFERENCE_NAMES, "test", "conf", "estimate", "stderr", "dof", "score", "pleft", "pright", "lower", "upper",
     ...RANDOM_NAMES,
-    ...COMPLEX_FUNCTIONS,...(graphOptions.complexMode?["i"]:[]),
+    ...COMPLEX_FUNCTIONS,"tone",...(graphOptions.complexMode?["i"]:[]),
     ...expressions.flatMap((expression)=>{const definition=inferenceDefinition(expression.text);return definition?[definition.target]:[];}),
     ...expressions.flatMap((expression) => {
       const definition = distributionDefinition(expression.text);
@@ -4055,12 +4248,13 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
   }
 
   const functionByExpression = new Map(
-    functionStates.map((state) => [state.expression, state.definition]),
+    functionStates.map((state) => [state.expression, state]),
   );
   const sources = expressions.flatMap((expression) => {
-    const functionDefinition = functionByExpression.get(expression);
-    const expressionSource = functionDefinition
-      ? functionDefinition.body.replace(/[a-z]+(?:_[a-z0-9]+)?/gi, (name) =>
+    const functionState = functionByExpression.get(expression);
+    const functionDefinition=functionState?.definition;
+    const expressionSource = functionState?.baseCase?functionState.baseCase.body:functionDefinition
+      ? [functionDefinition.body,...(functionDefinition.baseCases??[]).map(base=>base.body)].join(" ").replace(/[a-z]+(?:_[a-z0-9]+)?/gi, (name) =>
         (functionDefinition.parameters ?? [functionDefinition.parameter]).includes(name.toLowerCase()) ? "" : name)
       : expression.text;
     return [
@@ -4408,7 +4602,7 @@ function cachedExplicitEvaluator(
     };
   }
   const source = expandFunctions(expression.text);
-  const sliderSignature = referencedVariableSignature(source, sliderValues);
+  const sliderSignature = graphVariableSignature(source);
   const key = `${graphMode}:${graphSettings.precisionDigits}:${getAngleMode()}\u0000${source}\u0000${sliderSignature}\u0000${collectionSignature(source)}`;
   let cache = explicitEvaluationCaches.get(expression);
   if (!cache || cache.key !== key) {
@@ -4540,7 +4734,7 @@ function renderSliders(): void {
   const help = document.createElement("p");
   help.className = "slider-help";
   help.textContent = names.length > 0
-    ? "Play animates this parameter back and forth. Fast mode favors smoother playback; higher detail may update more slowly."
+    ? "Choose bounce, repeat, play once, or continuous playback. Continuous playback ignores bounds."
     : "These parameter values are defined by expressions.";
   sliderList.append(heading, help);
   for (const definition of definitions) {
@@ -4560,7 +4754,7 @@ function renderSliders(): void {
     sliderValues[name] ??= 1;
     sliderOptions[name] ??= { min: -10, max: 10, speed: 1 };
     const options = sliderOptions[name]!;
-    if (sliderValues[name]! < options.min || sliderValues[name]! > options.max) {
+    if (options.mode !== "continuous" && (sliderValues[name]! < options.min || sliderValues[name]! > options.max)) {
       sliderValues[name] = Math.min(options.max, Math.max(options.min, sliderValues[name]!));
     }
     const row = document.createElement("label");
@@ -4581,15 +4775,15 @@ function renderSliders(): void {
     range.setAttribute("aria-label", `Slider ${name}`);
     const number = document.createElement("input");
     number.type = "number";
-    number.min = String(options.min);
-    number.max = String(options.max);
+    if (options.mode !== "continuous") { number.min = String(options.min); number.max = String(options.max); }
     number.step = "any";
     number.value = String(sliderValues[name]);
     number.setAttribute("aria-label", `Slider ${name} value`);
     const update = (value: string) => {
       const parsed = Number(value);
-      if (!Number.isFinite(parsed)) return;
-      sliderValues[name] = Math.min(options.max, Math.max(options.min, parsed));
+      if (!value.trim()||!Number.isFinite(parsed)) {number.setAttribute("aria-invalid","true");setProjectStatus("Slider value must be finite.");return;}
+      number.removeAttribute("aria-invalid");
+      sliderValues[name] = options.mode === "continuous" ? parsed : Math.min(options.max, Math.max(options.min, parsed));
       range.value = String(sliderValues[name]);
       number.value = String(sliderValues[name]);
       scheduleDraw();
@@ -4640,6 +4834,7 @@ function renderSliders(): void {
         minInput.setAttribute("aria-invalid", String(!Number.isFinite(min) || min >= max));
         maxInput.setAttribute("aria-invalid", String(!Number.isFinite(max) || max <= min));
         speedInput.setAttribute("aria-invalid", String(!Number.isFinite(speed) || speed <= 0 || speed > 100));
+        setProjectStatus("Slider bounds must increase within +/-1000000; speed must be greater than 0 and at most 100.");
         return;
       }
       minInput.removeAttribute("aria-invalid");
@@ -4648,12 +4843,11 @@ function renderSliders(): void {
       options.min = min;
       options.max = max;
       options.speed = speed;
-      sliderValues[name] = Math.min(max, Math.max(min, sliderValues[name]!));
+      if(options.mode!=="continuous")sliderValues[name] = Math.min(max, Math.max(min, sliderValues[name]!));
       range.min = String(min);
       range.max = String(max);
       range.value = String(sliderValues[name]);
-      number.min = String(min);
-      number.max = String(max);
+      if(options.mode!=="continuous"){number.min = String(min);number.max = String(max);}
       number.value = String(sliderValues[name]);
       scheduleDraw();
       scheduleProjectSave();
@@ -4679,7 +4873,22 @@ function renderSliders(): void {
       speedInput,
     );
     sliderList.append(boundsRow);
+    const modeRow = document.createElement("label");
+    modeRow.className = "slider-mode-row";
+    modeRow.textContent = "Playback ";
+    const mode = document.createElement("select");
+    mode.setAttribute("aria-label", `Slider ${name} playback mode`);
+    for (const [value, label] of [["bounce","Back and forth"],["repeat","Repeat forward"],["once","Play once"],["continuous","Continuous forward"]] as const) {
+      const option = document.createElement("option"); option.value = value; option.textContent = label; mode.append(option);
+    }
+    mode.value = options.mode ?? "bounce";
+    mode.addEventListener("change", () => {
+      stopSliderAnimation(name); options.mode = mode.value as PlaybackMode;
+      renderSliders(); refreshDropdowns(); scheduleProjectSave();
+    });
+    modeRow.append(mode); sliderList.append(modeRow);
   }
+  refreshDropdowns();
 }
 
 function stopSliderAnimation(name?: string): void {
@@ -4705,6 +4914,7 @@ function startSliderAnimation(name: string): void {
   if (!options) return;
   cancelRefinement();
   if (sliderAnimations.size === 0) flushPendingHistory();
+  if ((options.mode === "once" || options.mode === "repeat") && sliderValues[name]! >= options.max) sliderValues[name] = options.min;
   sliderAnimations.set(name, { direction: 1, lastTime: performance.now() });
   if (sliderAnimationTimer !== undefined) return;
   sliderAnimationTimer = window.setInterval(() => {
@@ -4718,15 +4928,11 @@ function startSliderAnimation(name: string): void {
       }
       const elapsedSeconds = Math.min(0.25, Math.max(0, now - animation.lastTime) / 1000);
       animation.lastTime = now;
-      const span = activeOptions.max - activeOptions.min;
-      const currentOffset = sliderValues[sliderName]! - activeOptions.min;
-      const phase = animation.direction > 0 ? currentOffset : 2 * span - currentOffset;
-      const nextPhase = (phase + activeOptions.speed * elapsedSeconds) % (2 * span);
-      const movingForward = nextPhase <= span;
-      const value = movingForward
-        ? activeOptions.min + nextPhase
-        : activeOptions.max - (nextPhase - span);
-      animation.direction = movingForward ? 1 : -1;
+      let next: ReturnType<typeof advanceSlider>;
+      try { next = advanceSlider(sliderValues[sliderName]!, animation.direction, elapsedSeconds, activeOptions); }
+      catch (reason) { stopSliderAnimation(sliderName); setProjectStatus(reason instanceof Error ? reason.message : "Slider playback failed."); renderSliders(); continue; }
+      const value = next.value;
+      animation.direction = next.direction;
       sliderValues[sliderName] = value;
       const number = sliderList.querySelector<HTMLInputElement>(
         `[aria-label="Slider ${sliderName} value"]`,
@@ -4736,6 +4942,7 @@ function startSliderAnimation(name: string): void {
       );
       if (number) number.value = String(Number(value.toPrecision(8)));
       if (range) range.value = String(value);
+      if (next.complete) { stopSliderAnimation(sliderName); renderSliders(); }
       updated = true;
     }
     if (updated) draw();
@@ -5349,6 +5556,7 @@ function renderExpressions(): void {
     input.value = expression.text;
     input.maxLength = 512;
     input.dataset.functionAutocomplete = "";
+    input.dataset.mathKeypad = "";
     input.autocomplete = "off";
     input.spellcheck = false;
     input.setAttribute("aria-label", `Expression ${index + 1}`);
@@ -5381,6 +5589,7 @@ function renderExpressions(): void {
         error.textContent = expression.compileError;
         input.setAttribute("aria-invalid", "true");
       }
+      if(isTone(expression.text)||enabledTones.has(expression.id)||pendingTones.has(expression.id))void playExpressionTone(expression);
       scheduleDraw();
       return;
     });
@@ -5603,6 +5812,7 @@ function renderExpressions(): void {
     visibility.setAttribute("aria-label", `${expression.hidden ? "Show" : "Hide"} expression ${index + 1}`);
     visibility.addEventListener("click", () => {
       expression.hidden = !expression.hidden;
+      if(!expression.hidden&&isTone(expression.text))void playExpressionTone(expression);
       renderExpressions();
       draw();
     });
@@ -6098,6 +6308,7 @@ function renderTables(): void {
         field.placeholder = kind === "formula" ? "Optional formula" : tableColumnName(table, axis);
         const title = typeof axis === "number" ? `${axisLabel(axis)} ${kind}` : `${axis} column ${kind}`;
         field.setAttribute("aria-label", `Table ${tableIndex + 1} ${title}`);
+        if(kind==="formula")field.dataset.mathKeypad="";
         field.addEventListener("input", () => {
           if (typeof axis === "number") table.extraColumns![axis]![kind] = field.value || undefined;
           else if (kind === "name") table[axis === "x" ? "xColumn" : "yColumn"] = field.value || undefined;
@@ -6139,6 +6350,7 @@ function renderTables(): void {
         input.maxLength = 128;
         input.dataset.tableAxis = String(axis);
         input.dataset.tableRow = String(rowIndex);
+        input.dataset.mathKeypad = "";
         input.value = tableCell(table, rowIndex, axis);
         input.setAttribute("aria-label", `Table ${tableIndex + 1} ${axisLabel(axis)} value ${rowIndex + 1}`);
         input.addEventListener("input", (event) => {
@@ -6470,16 +6682,26 @@ function drawPhoto(photo: Photo, width: number, height: number): void {
   const image = ensurePhotoImage(photo);
   try {
     const transform = evaluatePhotoTransform(photo, sliderValues, expandFunctions);
-    const matrix = photoMatrix(transform, centerX, centerY, scale, verticalScale(), width, height);
     image.transformError = undefined;
     if (!photo.hidden && image.bitmap && transform.width !== 0 && transform.height !== 0) {
       context.save();
       try {
         context.globalAlpha = photo.opacity;
-        context.transform(...matrix);
         context.imageSmoothingEnabled = true;
         context.imageSmoothingQuality = "high";
-        context.drawImage(image.bitmap, -0.5, -0.5, 1, 1);
+        if(graphOptions.xScale==="log"||graphOptions.yScale==="log"){
+          const step=Math.max(2,Math.sqrt(width*height/200_000));
+          for(let py=0;py<height;py+=step)for(let px=0;px<width;px+=step){
+            const [lx,ly]=photoLocalPoint(transform,worldXAt(px+step/2,width),worldYAt(py+step/2,height));
+            const u=lx/transform.width+0.5,v=0.5-ly/transform.height;
+            if(u>=0&&u<1&&v>=0&&v<1)context.drawImage(image.bitmap,
+              Math.min(image.bitmap.width-1,Math.floor(u*image.bitmap.width)),
+              Math.min(image.bitmap.height-1,Math.floor(v*image.bitmap.height)),1,1,px,py,step,step);
+          }
+        }else{
+          context.transform(...photoMatrix(transform, centerX, centerY, scale, verticalScale(), width, height));
+          context.drawImage(image.bitmap, -0.5, -0.5, 1, 1);
+        }
       } finally {
         context.restore();
       }
@@ -7052,6 +7274,8 @@ function scheduleProjectSave(recordHistory = true): void {
 }
 
 function applyProjectState(project: ProjectState, recordHistory = true): void {
+  muteTones();
+  tonesMutedByUser=false;
   photoUploadRevision += 1;
   for (const photo of photoImages.keys()) releasePhotoImage(photo);
   photos = (project.photos ?? []).map((photo) => ({ ...photo }));
@@ -7085,6 +7309,8 @@ function applyProjectState(project: ProjectState, recordHistory = true): void {
   centerX = project.centerX;
   centerY = project.centerY;
   scale = project.scale;
+  graphOptions.xScale=project.graphOptions?.xScale??"linear";
+  graphOptions.yScale=project.graphOptions?.yScale??"linear";
   Object.assign(graphOptions, project.graphOptions ?? {
     showGrid: true,
     showXAxis: true,
@@ -7508,8 +7734,14 @@ function prepareAudioTrace():void{
     }
   };
   const bounds=canvasWrap.getBoundingClientRect();
-  audioBounds=[centerX-bounds.width/(2*scale),centerX+bounds.width/(2*scale),
+  const projectedBounds:[number,number,number,number]=[centerX-bounds.width/(2*scale),centerX+bounds.width/(2*scale),
     centerY-bounds.height/(2*verticalScale()),centerY+bounds.height/(2*verticalScale())];
+  audioBounds=[worldXAt(0,bounds.width),worldXAt(bounds.width,bounds.width),
+    worldYAt(bounds.height,bounds.height),worldYAt(0,bounds.height)];
+  const actualPoint=(point:TracePoint|undefined):TracePoint|undefined=>point?{
+    ...point,x:unprojectCoordinate(point.x,graphOptions.xScale),y:unprojectCoordinate(point.y,graphOptions.yScale),
+    voices:point.voices?.map(y=>unprojectCoordinate(y,graphOptions.yScale)),
+  }:undefined;
   if(graph.kind==="parametric"){
     audioPoints=Array.from({length:201},(_,index)=>{
       return sample(()=>{const [x,y]=graph.evaluate(graph.start+(graph.end-graph.start)*index/200);return Number.isFinite(x)&&Number.isFinite(y)?{x,y}:undefined;},undefined);
@@ -7518,24 +7750,25 @@ function prepareAudioTrace():void{
     const evaluate=(x:number):number=>{
       return sample(()=>{const result=graph.evaluate(x);return typeof result==="number"?result:result.value.toNumber();},NaN);
     };
-    audioPoints=graph.kind==="explicit"?tracePoints(evaluate,audioBounds[0],audioBounds[1]):
-      tracePoints(evaluate,audioBounds[2],audioBounds[3]).map((point)=>point?{x:point.y,y:point.x}:undefined);
+    audioPoints=graph.kind==="explicit"?tracePoints(x=>projectCoordinate(evaluate(unprojectCoordinate(x,graphOptions.xScale)),graphOptions.yScale),projectedBounds[0],projectedBounds[1]).map(actualPoint):
+      tracePoints(y=>projectCoordinate(evaluate(unprojectCoordinate(y,graphOptions.yScale)),graphOptions.xScale),projectedBounds[2],projectedBounds[3]).map((point)=>actualPoint(point?{x:point.y,y:point.x}:undefined));
   }else if(graph.kind==="point"){
     const [x,y]=graph.evaluate();audioPoints=[{x,y}];
   }else if(graph.kind==="list"){
     audioPoints=graph.evaluate().map((y,index)=>y===undefined?undefined:{x:index+1,y});
   }else if(graph.kind==="implicit"||graph.kind==="inequality"||graph.kind==="polygon"){
     const vertices=graph.kind==="polygon"?graph.evaluate():undefined;
-    const evaluate=(x:number,y:number):number=>sample(()=>{
+    const evaluate=(px:number,py:number):number=>sample(()=>{
+      const x=unprojectCoordinate(px,graphOptions.xScale),y=unprojectCoordinate(py,graphOptions.yScale);
       if(graph.kind==="polygon")return polygonSignedDistance(vertices!,x,y);
       const result=graph.evaluate(x,y);return typeof result==="number"?result:result.toNumber();
     },NaN);
     if(graph.kind!=="implicit"&&audioMode.value==="region"){
-      audioPoints=traceRegion(evaluate,graph.kind==="polygon"?"<=":graph.relation,audioBounds);
+      audioPoints=traceRegion(evaluate,graph.kind==="polygon"?"<=":graph.relation,projectedBounds).map(actualPoint);
       audioLimits.textContent="Shaded regions use up to five simultaneous sawtooth tones per column, sampled on a 201 × 128 grid. Silent columns have no sampled shading; narrow regions can be missed.";
     }else{
-      const contour=traceContour(evaluate,audioBounds);
-      audioPaths=contour.paths.map((path)=>tracePolyline(path));
+      const contour=traceContour(evaluate,projectedBounds);
+      audioPaths=contour.paths.map((path)=>tracePolyline(path).map(actualPoint));
       audioLimits.textContent=`Numerical boundary trace: 96 × 96 cells, refined crossings, 201 points per branch. Narrow features, isolated points, and tangent roots may be missed.${contour.gaps?` ${contour.gaps} nonfinite samples or unresolved crossings.`:""}${contour.limited?" Only the first 128 branches are available.":""}`;
     }
   }else throw new Error("This graph type cannot be audio traced.");
@@ -7602,83 +7835,130 @@ audioDialog.addEventListener("keydown",(event)=>{
 });
 document.querySelector("#close-audio-trace")!.addEventListener("click",()=>audioDialog.close());
 audioDialog.addEventListener("close",()=>{audioGeneration++;audioPlayer.stop();});
-window.addEventListener("pagehide",()=>{void audioPlayer.close();});
+const muteAllButton=document.querySelector<HTMLButtonElement>("#mute-all-tones")!;
+muteAllButton.addEventListener("click",()=>{
+  if(enabledTones.size||pendingTones.size){tonesMutedByUser=true;muteTones();draw();}
+  else {
+    tonesMutedByUser=false;
+    for(const expression of expressions.filter(expression=>!expression.hidden&&isTone(expression.text)))void playExpressionTone(expression);
+  }
+});
+window.addEventListener("pagehide",()=>{void audioPlayer.close();muteTones();void tonePlayer.close();});
+document.addEventListener("visibilitychange",()=>{if(document.hidden)muteTones();else draw();});
 
 const keypadDialog=document.querySelector<HTMLDialogElement>("#math-keypad-dialog")!;
 const keypadSelection=document.querySelector<HTMLSelectElement>("#math-keypad-expression")!;
 const keypadInput=document.querySelector<HTMLInputElement>("#math-keypad-input")!;
-const keypadPreview=document.querySelector<HTMLDivElement>("#math-keypad-preview")!;
 const keypadError=document.querySelector<HTMLParagraphElement>("#math-keypad-error")!;
-const visualMath=installVisualMath(document.querySelector<HTMLElement>("#visual-math-editor")!,keypadInput,(message)=>{
-  document.querySelector<HTMLElement>("#visual-math-error")!.textContent=message;
+const autoKeypadSetting=document.querySelector<HTMLInputElement>("#auto-keypad-setting")!;
+const AUTO_KEYPAD_STORAGE_KEY="better-desmos-auto-keypad";
+try {
+  const saved=localStorage.getItem(AUTO_KEYPAD_STORAGE_KEY);
+  if(saved!==null&&saved!=="true"&&saved!=="false")throw new Error("Saved math keypad preference is invalid.");
+  autoKeypadSetting.checked=saved==="true";
+} catch(reason) {
+  setProjectStatus(reason instanceof Error?`Could not load math keypad preference: ${reason.message}`:"Could not load math keypad preference.");
+}
+autoKeypadSetting.addEventListener("change",()=>{
+  try {localStorage.setItem(AUTO_KEYPAD_STORAGE_KEY,String(autoKeypadSetting.checked));}
+  catch(reason){setProjectStatus(reason instanceof Error?`Could not save math keypad preference: ${reason.message}`:"Could not save math keypad preference.");}
 });
 let keypadExpression:Expression|undefined;
+let keypadField:HTMLInputElement|undefined;
+let keypadTableCell:{workspaceKey:string;row:string;axis:string}|undefined;
 let focusedExpressionId:number|undefined;
 workspaceList.addEventListener("focusin",(event)=>{
   if(!(event.target instanceof HTMLInputElement))return;
   const row=event.target.closest<HTMLElement>("[data-expression-id]");
   if(row)focusedExpressionId=Number(row.dataset.expressionId);
 });
-function updateKeypadPreview():void{
-  try{keypadPreview.innerHTML=expressionMathML(keypadInput.value);keypadError.textContent="";}
-  catch(reason){keypadPreview.textContent=keypadInput.value;keypadError.textContent=reason instanceof Error?reason.message:"Could not format expression.";}
-}
 function applyKeypadInput():void{
+  keypadError.textContent="";
+  if(keypadField){
+    if(!keypadField.isConnected&&keypadTableCell){
+      const wrapper=[...workspaceList.querySelectorAll<HTMLElement>("[data-workspace-key]")]
+        .find(item=>item.dataset.workspaceKey===keypadTableCell!.workspaceKey);
+      keypadField=[...wrapper?.querySelectorAll<HTMLInputElement>("input[data-table-row][data-table-axis]")??[]]
+        .find(input=>input.dataset.tableRow===keypadTableCell!.row&&input.dataset.tableAxis===keypadTableCell!.axis);
+    }
+    if(!keypadField){keypadError.textContent="The original math field is no longer available.";return;}
+    if(!keypadField.isConnected){keypadError.textContent="The original math field is no longer available.";return;}
+    if(keypadInput.value.length>keypadField.maxLength){keypadError.textContent=`This field is limited to ${keypadField.maxLength} characters.`;return;}
+    keypadField.value=keypadInput.value;
+    keypadField.dispatchEvent(new Event("input",{bubbles:true}));
+    return;
+  }
   if(!keypadExpression)return;
   keypadExpression.text=keypadInput.value;keypadExpression.evaluationError=undefined;
-  updateKeypadPreview();renderSliders();scheduleDraw();scheduleProjectSave();
+  renderSliders();
+  if(isTone(keypadExpression.text)||enabledTones.has(keypadExpression.id)||pendingTones.has(keypadExpression.id))void playExpressionTone(keypadExpression);
+  scheduleDraw();scheduleProjectSave();
 }
 keypadInput.addEventListener("input",applyKeypadInput);
-document.querySelector("#open-keypad")!.addEventListener("click",()=>{
-  if(!expressions.length)addExpression();
+function openMathKeypad(field?:HTMLInputElement):void{
+  if(keypadDialog.open)return;
+  keypadField=undefined;
+  keypadTableCell=undefined;
+  const row=field?.closest<HTMLElement>("[data-expression-id]");
+  if(field&&!row){
+    keypadField=field;
+    const workspaceKey=field.closest<HTMLElement>("[data-workspace-key]")?.dataset.workspaceKey;
+    if(workspaceKey&&field.dataset.tableRow!==undefined&&field.dataset.tableAxis!==undefined)
+      keypadTableCell={workspaceKey,row:field.dataset.tableRow,axis:field.dataset.tableAxis};
+  }
+  if(row)focusedExpressionId=Number(row.dataset.expressionId);
+  if(!keypadField&&!expressions.length)addExpression();
   keypadSelection.replaceChildren();
   for(const [index,expression]of expressions.entries()){
     const option=document.createElement("option");option.value=String(expression.id);option.textContent=`Expression ${index+1}`;keypadSelection.append(option);
   }
-  keypadExpression=expressions.find((expression)=>expression.id===focusedExpressionId)??expressions[0];
-  keypadSelection.value=String(keypadExpression!.id);keypadInput.value=keypadExpression!.text;
-  updateKeypadPreview();visualMath.sync();refreshDropdowns();keypadDialog.showModal();visualMath.focus();keypadDialog.scrollTop=0;
+  keypadExpression=keypadField?undefined:expressions.find((expression)=>expression.id===focusedExpressionId)??expressions[0];
+  keypadSelection.closest("label")!.hidden=Boolean(keypadField);
+  keypadSelection.value=keypadExpression?String(keypadExpression.id):"";
+  keypadInput.value=keypadField?.value??keypadExpression!.text;
+  keypadInput.maxLength=keypadField?.maxLength??512;
+  keypadError.textContent="";refreshDropdowns();keypadDialog.showModal();keypadInput.focus();keypadDialog.scrollTop=0;
+}
+workspaceList.addEventListener("click",event=>{
+  if(autoKeypadSetting.checked&&event.target instanceof HTMLInputElement&&event.target.matches("[data-math-keypad]")&&!event.target.disabled&&!event.target.readOnly)
+    openMathKeypad(event.target);
 });
 keypadSelection.addEventListener("change",()=>{
+  keypadField=undefined;
   keypadExpression=expressions.find((expression)=>expression.id===Number(keypadSelection.value));
-  keypadInput.value=keypadExpression?.text??"";updateKeypadPreview();visualMath.sync();visualMath.focus();
+  keypadInput.value=keypadExpression?.text??"";keypadError.textContent="";keypadInput.focus();
 });
 const keypadKeys=document.querySelector("#math-keypad-keys")!;
 for(const [label,text]of [
-  ["7","7"],["8","8"],["9","9"],["+","+"],["sin","sin()"],["cos","cos()"],
-  ["4","4"],["5","5"],["6","6"],["−","-"],["tan","tan()"],["√","sqrt()"],
-  ["1","1"],["2","2"],["3","3"],["×","*"],["ln","ln()"],["log","log()"],
-  ["0","0"],[".","."],["π","pi"],["÷","/"],["x","x"],["y","y"],
-  ["(","("],[")",")"],["power","^()"],["absolute","abs()"],["[","["],["]","]"],
-  ["integral","int_{0}^{1} x dx"],["sum","sum_{n=1}^{10} n"],["product","prod_{n=1}^{10} n"],["θ","theta"],["i","i"],["=","="],
-  ["←","left"],["→","right"],["Backspace","backspace"],["Clear","clear"],[",",","],["restriction","{}"],
+  ["7","7"],["8","8"],["9","9"],["+","+"],["sin()","sin()"],["cos()","cos()"],
+  ["4","4"],["5","5"],["6","6"],["-","-"],["tan()","tan()"],["sqrt()","sqrt()"],
+  ["1","1"],["2","2"],["3","3"],["*","*"],["ln()","ln()"],["log()","log()"],
+  ["0","0"],[".","."],["pi","pi"],["/","/"],["x","x"],["y","y"],
+  ["(","("],[")",")"],["^","^()"],["abs()","abs()"],["[","["],["]","]"],
+  ["int","int_{0}^{1} x dx"],["sum","sum_{n=1}^{10} n"],["prod","prod_{n=1}^{10} n"],["theta","theta"],["i","i"],["=","="],
+  ["Left","left"],["Right","right"],["Backspace","backspace"],["Clear","clear"],[",",","],["{}","{}"],
 ]as const){
   const button=document.createElement("button");button.type="button";button.textContent=label;
   button.setAttribute("aria-label",`Insert ${label}`);
   button.addEventListener("pointerdown",(event)=>event.preventDefault());
   button.addEventListener("click",()=>{
-    try{if(visualMath.insert(text))return;}
-    catch(reason){keypadError.textContent=reason instanceof Error?reason.message:"Could not insert math.";return;}
     const start=keypadInput.selectionStart??keypadInput.value.length,end=keypadInput.selectionEnd??start;
     if(text==="left"||text==="right"){const caret=Math.max(0,Math.min(keypadInput.value.length,start+(text==="left"?-1:1)));keypadInput.setSelectionRange(caret,caret);}
     else if(text==="clear"){keypadInput.value="";applyKeypadInput();}
     else{
       const from=text==="backspace"&&start===end?Math.max(0,start-1):start;
       const insertion=text==="backspace"?"":text;
-      if(keypadInput.value.length-(end-from)+insertion.length>512){keypadError.textContent="Expressions are limited to 512 characters.";return;}
+      if(keypadInput.value.length-(end-from)+insertion.length>keypadInput.maxLength){keypadError.textContent=`This field is limited to ${keypadInput.maxLength} characters.`;return;}
       keypadInput.setRangeText(insertion,from,end,"end");
       const inner=insertion.indexOf("()");
       if(inner>=0)keypadInput.setSelectionRange(from+inner+1,from+inner+1);
       applyKeypadInput();
     }
-    visualMath.sync();
     keypadInput.focus();
   });keypadKeys.append(button);
 }
 document.querySelector("#close-math-keypad")!.addEventListener("click",()=>keypadDialog.close());
 keypadDialog.addEventListener("close",()=>{
-  const warning=document.querySelector<HTMLElement>("#visual-math-error")!.textContent;
-  if(warning?.startsWith("Visual edit not applied:"))setProjectStatus("Incomplete visual edit discarded; the last applied text expression was kept.");
   renderExpressions();scheduleDraw();
 });
 document.querySelector("#open-settings")!.addEventListener("click", () => {
@@ -7873,20 +8153,31 @@ function updateGraphOptionControls(): void {
   document.querySelector<HTMLSelectElement>("#grid-mode-setting")!.value = graphOptions.gridMode ?? "cartesian";
   document.querySelector<HTMLInputElement>("#minor-grid-setting")!.checked = graphOptions.minorGrid ?? false;
   document.querySelector<HTMLInputElement>("#complex-mode-setting")!.checked = graphOptions.complexMode ?? false;
+  document.querySelector<HTMLSelectElement>("#x-scale-setting")!.value = graphOptions.xScale ?? "linear";
+  document.querySelector<HTMLSelectElement>("#y-scale-setting")!.value = graphOptions.yScale ?? "linear";
   document.querySelector<HTMLInputElement>("#x-step-setting")!.value = graphOptions.xStep?.toString() ?? "";
   document.querySelector<HTMLInputElement>("#y-step-setting")!.value = graphOptions.yStep?.toString() ?? "";
   document.querySelector<HTMLInputElement>("#x-axis-label-setting")!.value = graphOptions.xAxisLabel ?? "";
   document.querySelector<HTMLInputElement>("#y-axis-label-setting")!.value = graphOptions.yAxisLabel ?? "";
   const bounds = canvasWrap.getBoundingClientRect();
   for (const [id,value] of [
-    ["x-min",centerX - bounds.width / (2 * scale)], ["x-max",centerX + bounds.width / (2 * scale)],
-    ["y-min",centerY - bounds.height / (2 * verticalScale())], ["y-max",centerY + bounds.height / (2 * verticalScale())],
+    ["x-min",worldXAt(0,bounds.width)], ["x-max",worldXAt(bounds.width,bounds.width)],
+    ["y-min",worldYAt(bounds.height,bounds.height)], ["y-max",worldYAt(0,bounds.height)],
   ] as const) document.querySelector<HTMLInputElement>(`#${id}-setting`)!.value = String(value);
   document.querySelector<HTMLSelectElement>("#angle-mode-setting")!.value = graphOptions.angleMode;
   document.querySelector<HTMLSelectElement>("#statistics-mode-setting")!.value = graphOptions.statisticsMode;
   refreshDropdowns();
 }
 updateGraphOptionControls();
+for(const axis of ["x","y"] as const){
+  document.querySelector<HTMLSelectElement>(`#${axis}-scale-setting`)!.addEventListener("change",event=>{
+    const mode=(event.currentTarget as HTMLSelectElement).value;
+    if(mode!=="linear"&&mode!=="log")throw new Error("Invalid axis scale.");
+    graphOptions[axis==="x"?"xScale":"yScale"]=mode;
+    if(axis==="x")centerX=0;else centerY=0;
+    updateGraphOptionControls();draw();
+  });
+}
 document.querySelector<HTMLInputElement>("#complex-mode-setting")!.addEventListener("change",(event)=>{
   graphOptions.complexMode=(event.currentTarget as HTMLInputElement).checked;
   variableDefinitionCache=undefined;renderSliders();draw();
@@ -7937,7 +8228,8 @@ document.querySelector("#apply-view-bounds")!.addEventListener("click", () => {
     const fields = ["x-min","x-max","y-min","y-max"].map((id) => document.querySelector<HTMLInputElement>(`#${id}-setting`)!);
     if (fields.some((input) => !input.value.trim())) throw new Error("Enter all four viewport bounds.");
     const fitted = fitViewportBounds(bounds.width,bounds.height,
-      Number(fields[0]!.value),Number(fields[1]!.value),Number(fields[2]!.value),Number(fields[3]!.value));
+      projectCoordinate(Number(fields[0]!.value),graphOptions.xScale),projectCoordinate(Number(fields[1]!.value),graphOptions.xScale),
+      projectCoordinate(Number(fields[2]!.value),graphOptions.yScale),projectCoordinate(Number(fields[3]!.value),graphOptions.yScale));
     centerX = fitted.centerX; centerY = fitted.centerY; scale = fitted.scale;
     graphOptions.aspectRatio = fitted.aspectRatio;
     updateGraphOptionControls(); draw();
@@ -8074,10 +8366,8 @@ function moveDraggablePoint(
 ): void {
   const graphX = clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS;
   const graphY = clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS;
-  const requestedX = centerX + (graphX - bounds.width * GRAPH_BUFFER_SCALE / 2) / scale -
-    pointerOffsetX;
-  const requestedY = centerY +
-    (bounds.height * GRAPH_BUFFER_SCALE / 2 - graphY) / verticalScale() - pointerOffsetY;
+  const requestedX = worldXAt(graphX,bounds.width*GRAPH_BUFFER_SCALE)-pointerOffsetX;
+  const requestedY = worldYAt(graphY,bounds.height*GRAPH_BUFFER_SCALE)-pointerOffsetY;
   if(point.directSource!==undefined){
     const expression=expressions.find((expression)=>expression.id===point.expressionId);
     if(!expression)throw new Error("The dragged expression no longer exists.");
@@ -8109,10 +8399,8 @@ canvas.addEventListener("pointerdown", (event) => {
   const screenX = event.clientX - bounds.left + bounds.width * GRAPH_BUFFER_VIEWPORTS;
   const screenY = event.clientY - bounds.top + bounds.height * GRAPH_BUFFER_VIEWPORTS;
   const point = event.altKey ? undefined : findDraggablePoint(screenX, screenY);
-  const pointerGraphX = centerX +
-    (screenX - bounds.width * GRAPH_BUFFER_SCALE / 2) / scale;
-  const pointerGraphY = centerY +
-    (bounds.height * GRAPH_BUFFER_SCALE / 2 - screenY) / verticalScale();
+  const pointerGraphX = worldXAt(screenX,bounds.width*GRAPH_BUFFER_SCALE);
+  const pointerGraphY = worldYAt(screenY,bounds.height*GRAPH_BUFFER_SCALE);
   let photoDrag: NonNullable<typeof drag>["photo"];
   if(event.altKey){
     for(const item of workspaceBlocks().flatMap((block)=>block.items).filter((item)=>item.type==="photo")
@@ -8165,8 +8453,8 @@ canvas.addEventListener("pointermove", (event) => {
     if(drag.photo){
       if(!drag.moved&&Math.hypot(event.clientX-drag.x,event.clientY-drag.y)<=2)return;
       const state=drag.photo;
-      const end:[number,number]=[centerX+(event.clientX-bounds.left-bounds.width/2)/scale,
-        centerY+(bounds.height/2-event.clientY+bounds.top)/verticalScale()];
+      const end:[number,number]=[worldXAt(event.clientX-bounds.left,bounds.width),
+        worldYAt(event.clientY-bounds.top,bounds.height)];
       try{
         const transform=photoDragTransform(state.transform,state.mode,state.start,end);
         if(Math.hypot(event.clientX-drag.x,event.clientY-drag.y)>2)drag.moved=true;
