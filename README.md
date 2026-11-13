@@ -4,7 +4,9 @@ A browser-based graphing calculator built with TypeScript and Vite. Its small st
 
 ## Versioning
 
-The current app version is **4.2**. Keep the package version in `package.json` in sync as `4.2.0`.
+The current app version is **4.3**. Keep the package version in `package.json` in sync as `4.3.0`.
+
+Version 4.3 adds differential equations and vector fields, phase-plane trajectories, complex domain coloring and fractals, 2x2 matrices and bounded symbolic tools, CSV import/export and editable SVG export, real heatmaps/contours, Fourier and Taylor approximations, geometry measurements, uncertainty plots, interval root searching, explicit SI unit commands, dependency inspection, and an append-only example gallery. Numerical limits and assumptions are documented below.
 
 Version 4.2 adds bounded recursive functions with numeric base cases, independent logarithmic axes, parsed continuous `tone()` expressions, four slider playback modes, and finite restriction endpoint markers. Tone playback has a conditional speaker/mute icon beside the wrench; Audio trace is in the wrench menu. The optional click-to-open math keypad uses plain text throughout, and Settings/keypad typography is consistent.
 

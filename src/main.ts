@@ -1098,7 +1098,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 4.2 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">4.2</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 4.3 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">4.3</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
