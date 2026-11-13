@@ -13,6 +13,16 @@ describe("function autocomplete", () => {
     expect(functionCompletions("m", 1)).toBeUndefined();
     expect(functionCompletions("mean(", 4)).toBeUndefined();
     expect(functionCompletions("xyz", 3)).toBeUndefined();
+    expect(functionCompletions("vec",3)?.names).toContain("vectorfield");
+    expect(functionCompletions("slope",5)?.names).toContain("slopefield");
+    expect(functionCompletions("od",2)?.names).toContain("ode");
+    expect(functionCompletions("dom",3)?.names).toContain("domaincolor");
+    expect(functionCompletions("mand",4)?.names).toContain("mandelbrot");
+    expect(functionCompletions("diff",4)?.names).toContain("differentiate");
+    expect(functionCompletions("traj",4)?.names).toContain("trajectory");
+    for(const name of ["heatmap","contours","fourier","fourierdata","spectrum","taylor","taylorerror","tangentline","normalline",
+      "arclength","curvature","area","areabetween","roots","errorbars","confidenceband","predictionband","unitcheck","convert"])
+      expect(functionCompletions(name.slice(0,3),3)?.names).toContain(name);
   });
 
   it("replaces the whole token without removing surrounding text", () => {

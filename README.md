@@ -18,6 +18,89 @@ Version 3.0 added embedded photos with relative X/Y scaling, domain/range restri
 
 The feature scope is the desktop Desmos 2D Graphing Calculator, excluding Easter eggs, Braille, accounts/cloud services, other Desmos products, mobile layouts, and UI animations other than playback. This is a feature-coverage effort, not a certification of identical Desmos behavior or verified accuracy/performance superiority; the numerical and editing limits below remain applicable.
 
+## Differential equations and vector fields
+
+Enter these commands in ordinary expression rows:
+
+- `vectorfield(-y,x)` draws a rotating vector field, with normalized arrows indicating direction rather than magnitude. Zero vectors are dots.
+- `slopefield(x-y)` draws direction segments for `dy/dx = x-y`.
+- `ode(x-y,0,1,-5,5)` draws the numerical solution through `(0,1)` on `-5 <= x <= 5`. Put this alongside `slopefield(x-y)` to see the solution follow the field.
+
+Components and slopes can use `x`, `y`, sliders, and existing user-defined functions. The four remaining `ode` arguments are scalar expressions: initial x, initial y, interval start, and interval end. The initial x must lie inside a strictly increasing interval, at most 10000 units wide. Editing sliders recomputes solutions. Existing expression appearance, visibility, project persistence, and PNG export apply. Solution curves also support the existing curve hover and Audio trace tools; vector fields themselves do not have a single curve to trace.
+
+These are real-valued, first-order numerical tools, not symbolic solvers or a general system-of-equations solver. Solutions use adaptive fourth-order Runge-Kutta step doubling, local error control of `1e-9 * (1 + |y|)` (also accounting for the preceding value), and cubic Hermite interpolation. Local error control is not a guarantee of global accuracy. Integration is capped at 8192 attempted steps, and fails explicitly for nonfinite values, domain errors, steps too small to advance, or exhausted work. Stiff equations, singularities, discontinuous slopes, and nonunique initial-value problems may fail or give unreliable results; shorten the interval and check convergence independently. No curve is drawn if integration fails anywhere in its requested interval.
+
+Fields use a bounded screen-space grid (at least 40 pixels between samples, approximately 1600 vectors maximum), so small features may be missed. Undefined samples are omitted with an expression-row error reporting their count and first error. Direction rendering accounts for axis aspect ratio and logarithmic axes; only positive coordinates are visible on logarithmic axes.
+
+## Complex images, fractals, and phase-plane trajectories
+
+- `domaincolor(z^2-1)` maps `z=x+i*y` over the visible plane. Hue represents phase in degrees; brightness increases with magnitude; zeros are black. It uses the existing finite-double complex evaluator and works whether or not **Complex numbers** is enabled. Undefined/nonfinite samples leave gaps with an expression-row warning. This phase visualization intentionally maps phase into a full color circle; it does not change the existing spatial HSV formula clamping rules.
+- `mandelbrot(100)` and `julia(-0.7,0.27,100)` draw escape-time images for `z -> z^2+c`. Iterations must be an integer from 1 to 500. Black means no escape within the selected iteration limit, **not** proven set membership. Pan/zoom and sliders work normally, but finite precision limits deep zoom. Images use a bounded screen-space grid (at least 3 pixels per cell and approximately 16000 cells per expression), so they are not pixel-exact fractal renderings.
+- `trajectory(-y,x,1,0,-6,6)` draws the phase-plane trajectory of `dx/dt=-y`, `dy/dt=x` through `(1,0)` at time zero. Display `vectorfield(-y,x)` alongside it. Both components can use `x`, `y`, sliders, and existing user functions. Time bounds must enclose zero, be strictly increasing, and span at most 10000. The same adaptive Runge-Kutta step-doubling/local error limits and convergence caveats as `ode` apply independently to both components. The solver is for autonomous systems, not explicitly time-dependent or stiff systems. Failed integration draws no partial success-shaped curve.
+
+These are ordinary expression commands: appearance opacity, visibility, project persistence, and PNG export apply. Phase trajectories also support the existing curve hover and Audio trace tools. Complex/fractal images have no single curve to trace. Put plane-image expressions below other expressions in the workspace so their opaque cells do not cover those graphs.
+
+## Real heatmaps, contours, and Fourier analysis
+
+- `heatmap(x^2+y^2,0,10)` maps a real field to blue (low) through red (high), clamping values outside the supplied finite increasing range. It uses the same bounded sampling and explicit undefined-sample warnings as complex images.
+- `contours(x^2+y^2,1,9,5)` draws 2–20 equally spaced implicit level curves, including both endpoints of the range.
+- `fourier(sin(x),0,2*pi,8)` approximates a function on a finite increasing interval using 1024 uniform samples and 0–32 Fourier harmonics. The reconstructed function repeats periodically outside that interval.
+- `fourierdata(y_1,0.1,8)` reconstructs an equally spaced sample list or table column, starting at x=0, with the supplied positive sample spacing. Use 2–2048 finite samples; harmonics must be below Nyquist and at most 32.
+- `spectrum(y_1,0.1)` reports the mean/DC and first 32 sub-Nyquist frequencies, amplitudes, and phases. Frequencies are cycles per spacing unit; the phase convention is `amplitude*cos(omega*x-phase)` in radians.
+
+The Fourier basis always uses radians; the entered source function still follows the app's Angle mode. These are sampled approximations, not exact transforms: discontinuities can produce Gibbs ringing, high-frequency inputs can alias, and even-count data intentionally omits the Nyquist coefficient. All finite analysis intervals are capped at 10000 units. Appearance, visibility, persistence, PNG, and SVG export apply to the new graph commands.
+
+## Taylor approximations, geometry, and root search
+
+- `taylor(sin(x),0,5)` draws a local Taylor polynomial around a finite center, with order 0–8. It reuses the bounded symbolic derivative rules, evaluates coefficients numerically, and rejects unsupported derivatives or intermediate expressions beyond 512 characters.
+- `taylorerror(sin(x),0,5)` plots the absolute difference from the original function, **not** a certified error bound or a convergence guarantee.
+- `tangentline(x^2,1)` and `normalline(x^2,1)` draw numerical tangent/normal lines. The normal is vertical when the computed slope magnitude is below `1e-12`.
+- `arclength(x^2,0,1)` reports approximate arc length of `y=f(x)`. `curvature(x^2,0)` reports approximate unsigned curvature `|f''|/(1+f'^2)^(3/2)`.
+- `area(x,x^2,0,1)` reports approximate unsigned area between functions; `areabetween(x,x^2,0,1)` shades that bounded region.
+- `roots(x^3-x,-2,2)` reports verified numerical roots and residuals on a finite interval. It scans 512 subintervals, refines sign changes and sampled local minima of `|f|`, requires residual at most `1e-8`, merges nearby candidates, and caps results at 128. Undefined samples are reported; this is **not exhaustive** and can miss narrow, clustered, or high-frequency roots. Poles are not accepted merely because their signs change.
+
+Derivatives use a five-point finite-difference stencil with step `1e-4*max(1,|x|)`; samples outside the requested integration interval may be required at its endpoints. Integral/area estimates use adaptive Simpson quadrature with 32 initial panels, an estimated tolerance of `1e-8*(1+|initial estimate|)`, at most 20000 evaluations and 18 subdivisions per panel. Domain/nonfinite/work-limit failures are explicit. Finite differences can amplify cancellation and quadrature can miss unsampled features; check convergence independently. These tools do not constitute symbolic integration, general geometry construction, or a certified equation solver.
+
+## Error bars and linear-regression bands
+
+`errorbars(x_1,y_1,[0.2,0.3,0.4])` plots symmetric vertical uncertainties; an optional fourth list supplies horizontal uncertainties. Lists must have equal lengths, 1–256 observations, finite values, and nonnegative uncertainties. These are user-supplied sizes, not inferred confidence intervals.
+
+`confidenceband(x_1,y_1,0.95)` fits ordinary linear regression and shades its **pointwise mean-response confidence band**. `predictionband(x_1,y_1,0.95)` shades the pointwise interval for **one new observation**, which is generally wider. Both include fitted mean and boundary curves, require 3–2048 paired finite observations with varying x and a level strictly between 0 and 1, and use a Student t quantile with `n-2` degrees of freedom. Independent, normally distributed, constant-variance errors and a correct linear model are assumed. These are not simultaneous bands and do not attach uncertainty to arbitrary nonlinear regressions; extrapolation can be unreliable.
+
+## Explicit SI units
+
+`unitcheck(3*m+2*cm)` checks dimensions and prints a numerical result in SI base units. `convert(72,km/h,m/s)` returns `20 m/s`. Normal expressions remain unchanged: a slider named `m` is still a scalar outside unit commands. Inside explicit unit expressions registered unit names take precedence, and names are case-insensitive.
+
+Supported units: `m`, `cm`, `mm`, `km`, `kg`, `g`, `s`, `ms`, `min`, `h`, `A`, `K`, `mol`, `cd`, `Hz`, `N`, `J`, `W`, `Pa`, `C`, `V`, `ohm`, `rad`, and `deg`. Use products/divisions, compatible addition/subtraction, dimensionless exponents from -16 to 16, `sqrt`, `abs`, and dimensionless `sin/cos/tan/exp/ln/log`. Trigonometry inside unit checks always uses radians (`sin(90*deg)=1`), independently of Angle mode. Unknown units, incompatible dimensions, and nonfinite values are errors. Offset Celsius/Fahrenheit, automatic unit propagation in ordinary expressions, user-defined functions inside unit expressions, and a general unit registry are not supported.
+
+## Dependency inspector and example gallery
+
+The wrench menu includes **Dependencies**, a non-mutating static snapshot of direct/indirect references for each expression/definition and table-column formula. It follows slider/scalar, user-function, named-object, and table-column relationships, lists unresolved names, and shows recursive/circular paths. Function parameters and graph coordinates are local, not sliders. Cycles may be intentional bounded recursive functions rather than invalid scalar definitions. The inspector is not runtime tracing; incomplete input, duplicate definitions, labels, appearance formulas, and actions require the existing expression diagnostics. Inspection has depth/work limits with explicit errors.
+
+**Examples** in the wrench menu offers editable heatmap, Fourier, Taylor, geometry, pendulum, predator–prey, uncertainty, complex-coloring, fractal, and unit/root demonstrations. **Append example** only adds expression rows: it never replaces existing expressions/tables or the viewport, introduces named definitions, or starts audio/playback. Appended rows use the existing Undo/Redo and persistence behavior. Angle-sensitive examples follow the current Angle mode; the pendulum description recommends radians.
+
+## 2x2 matrices and exact-form tools
+
+Matrix entries are row-major: `matrix(a,b,c,d)` displays `[[a,b],[c,d]]`. `det(1,2,3,4)`, `inverse(1,2,3,4)`, and `matmul(1,2,3,4,0,1,1,0)` return a numerical determinant, inverse, and product respectively. Entries can use scalar formulas and sliders. Singular/nonfinite inverses report errors. Computation uses finite doubles; nearly singular matrices may be inaccurate.
+
+`transform(0,-1,1,0,polygon((0,0),(2,0),(0,1)))` rotates a polygon 90 degrees counterclockwise. `transform(a,b,c,d,shape)` also accepts points, collections of supported shapes, and parametric curves (including `ode` and `trajectory` results). It does not transform implicit graphs, inequalities, vector fields, or plane images. Transformed points/vertices are not independently draggable; edit the original formulas or sliders.
+
+The following commands display plain-text exact forms beneath their expression rows. Their output can be selected and copied into a new expression; these commands themselves are not numeric functions that can be nested in arithmetic or assigned as variables.
+
+- `simplify(1/3+1/6)` returns `(1/2)`. Simplification handles exact rational arithmetic, double negation, and basic additive/multiplicative identities. It is not a full algebraic canonicalizer and deliberately avoids domain-changing cancellations such as `x/x -> 1`.
+- `differentiate(x^3+sin(x),x)` returns an exact symbolic derivative. Arithmetic, rational constant powers, `sin`, `cos`, `tan`, `exp`, `ln`, and `sqrt` are supported, including chain/product/quotient rules. Angle mode is honored. Variable exponents, nondifferentiable `abs`, other functions, restrictions, and piecewise notation report unsupported-case errors. Derivative formulas are valid on the original expression's differentiable real domain; no domain proof is supplied.
+- `factor(x^2-1,x)` finds rational linear factors for one-variable rational-coefficient polynomials of degree at most 8. Repeated and zero roots work. If the remaining factor has no rational root, the command explicitly reports that irrational/complex factors are unsupported rather than claiming a complete factorization. Rational-root search uses primitive integer coefficients of magnitude at most 1000000 and at most 20000 positive candidate pairs.
+
+Symbolic rational arithmetic has a 2048-digit intermediate work limit, constant numeric powers are simplified only for integer exponents from -100 to 100, and displayed results must fit the 512-character expression limit. Unsupported symbolic notation is reported rather than numerically approximated. Symbolic integration and equation solving are not included.
+
+## CSV and SVG exchange
+
+Choose **Import CSV** from the wrench menu to create a new table without replacing existing tables. The checkbox controls whether the first row is a header; with headers enabled, names must be distinct valid calculator column identifiers and must not collide with existing definitions. Without headers, generated table column names are used. Files support quoted fields, doubled quotes, LF/CRLF, optional UTF-8 BOM, and empty cells. Data must be finite numeric literals (scientific notation is accepted), not formulas or executable spreadsheet content. Decimal digits are preserved on import; expanded numbers must fit the existing 128-character cell limit. Limits: 2 MB, 2–20 columns, 1–5000 data rows, and 20000 data cells.
+
+Each table has **Export CSV**. It exports column names and evaluated finite numeric values, including formula columns, at the table engine's numerical precision; it does not export live formulas or preserve arbitrary precision beyond the table evaluator. Invalid cells stop export with a visible status message.
+
+Choose **SVG** from the wrench menu for an editable graph document at the current viewport size. Curves, points, polygons, vector fields, grids, labels, and ordinary embedded photos become SVG paths/shapes/text/images rather than a whole-graph screenshot. Complex/fractal images and inequality fills use sampled SVG cells; implicit boundaries use a bounded 160-by-160 contour grid. Curve sampling is capped at 4096 samples, so narrow features can be missed. Exports report omitted undefined/offscreen samples. SVG is a numerical drawing, not exact symbolic geometry or a project file. Photos on logarithmic axes, polygons crossing a logarithmic axis domain, and spatially colored polygon fills explicitly require PNG instead. PNG remains the closest match to the on-screen renderer.
+
 ## Run locally
 
 Requires Node.js 20 or newer. To run Better Desmos as a standalone file without a local server, build it and open `dist/better-desmos.html` in a browser:

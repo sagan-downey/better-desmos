@@ -116,7 +116,7 @@ button { color: inherit; }
 .expression-row input[aria-invalid="true"] { border-color: var(--error-border); }
 .remove-button { border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted-text); font-size: 20px; cursor: pointer; }
 .expression-error { grid-column: 2 / 5; min-height: 14px; margin: 4px 0 0; color: var(--error); font-size: 11px; }
-.expression-result { grid-column: 2 / 5; min-height: 16px; margin-top: 2px; color: var(--accent-soft); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.expression-result { grid-column: 2 / 5; min-width: 0; min-height: 16px; margin-top: 2px; overflow-wrap: anywhere; color: var(--accent-soft); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .expression-action { grid-column: 2 / 5; justify-self: start; margin-top: 6px; }
 .math-keypad-keys { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 6px; margin-top: 12px; }
 .math-keypad-keys button { min-height: 38px; padding: 6px; border: 1px solid var(--border-medium); border-radius: 5px; background: var(--raised-bg); cursor: pointer; }
@@ -378,4 +378,52 @@ canvas#graph-detail, canvas#graph-grid, canvas#graph-points { position: absolute
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; }
+}
+.analysis-dialog-help,
+.analysis-dialog-list p {
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.analysis-dialog-help,
+.analysis-dialog-list,
+#dependencies-error,
+#examples-error {
+  margin: 12px 16px;
+}
+
+.analysis-dialog-list {
+  display: grid;
+  gap: 12px;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.analysis-dialog-list section {
+  border: 1px solid var(--border);
+  padding: 12px;
+}
+
+.analysis-dialog-list h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.analysis-dialog-list button {
+  padding: 6px 10px;
+  border: 1px solid var(--border-medium);
+  border-radius: 5px;
+  background: var(--raised-bg);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.analysis-dialog-list button:focus-visible,
+.analysis-dialog-list button:hover {
+  border-color: var(--accent);
+}
+
+.analysis-dialog-list section p {
+  margin: 6px 0;
 }

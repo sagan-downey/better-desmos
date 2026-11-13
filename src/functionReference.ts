@@ -11,6 +11,55 @@ export interface FunctionReferenceCategory {
 }
 
 export const FUNCTION_REFERENCE: FunctionReferenceCategory[] = [
+  {title:"Real fields & approximations",entries:[
+    {name:"heatmap",syntax:"heatmap(x^2+y^2,0,10)",description:"Real-valued sampled color field. Low values blue, high red, clamped to the supplied range."},
+    {name:"contours",syntax:"contours(x^2+y^2,1,9,5)",description:"2–20 equally spaced real level curves between low/high values, including endpoints."},
+    {name:"fourier",syntax:"fourier(expression,start,end,harmonics)",description:"Periodic reconstruction from 1024 uniform samples; 0–32 harmonics, periodic extension outside the interval. Trig basis is radians regardless of Angle mode."},
+    {name:"fourierdata",syntax:"fourierdata(samples,spacing,harmonics)",description:"Periodic discrete Fourier reconstruction of 2–2048 equally spaced finite samples. Harmonics below Nyquist, at most 32."},
+    {name:"spectrum",syntax:"spectrum(samples,spacing)",description:"DC and first 32 sub-Nyquist amplitudes/phases; frequency in cycles per input-spacing unit, phase in radians."},
+    {name:"taylor",syntax:"taylor(expression,center,order)",description:"Local Taylor approximation in x, orders 0–8. Derivatives from supported symbolic rules; coefficients evaluated numerically."},
+    {name:"taylorerror",syntax:"taylorerror(expression,center,order)",description:"Absolute difference between the original function and its Taylor approximation, not a certified error bound."},
+  ]},
+  {title:"Geometry & root search",entries:[
+    {name:"tangentline",syntax:"tangentline(expression,x0)",description:"Numerical tangent line at x0, using a five-point derivative."},
+    {name:"normalline",syntax:"normalline(expression,x0)",description:"Numerical normal line at x0; vertical for a horizontal tangent."},
+    {name:"arclength",syntax:"arclength(expression,start,end)",description:"Approximate length of y=f(x), with adaptive integration and finite differences."},
+    {name:"curvature",syntax:"curvature(expression,x0)",description:"Approximate unsigned curvature of y=f(x), |f''|/(1+f'^2)^(3/2)."},
+    {name:"area",syntax:"area(f,g,start,end)",description:"Approximate unsigned area between two explicit functions."},
+    {name:"areabetween",syntax:"areabetween(f,g,start,end)",description:"Shade the region between two explicit functions on a bounded x interval."},
+    {name:"roots",syntax:"roots(expression,start,end)",description:"Bounded numerical root search with residuals and undefined-sample warnings; can miss narrow, clustered, or high-frequency roots."},
+  ]},
+  {title:"Uncertainty & SI units",entries:[
+    {name:"errorbars",syntax:"errorbars(X,Y,Yerrors[,Xerrors])",description:"Symmetric user-supplied uncertainties for 1–256 points. Lists must have equal length and errors must be nonnegative."},
+    {name:"confidenceband",syntax:"confidenceband(X,Y,0.95)",description:"Pointwise confidence band for the linear-regression mean. At least three observations; independent normal constant-variance errors assumed. Not a simultaneous band."},
+    {name:"predictionband",syntax:"predictionband(X,Y,0.95)",description:"Pointwise prediction band for one new observation in ordinary linear regression, under the same assumptions."},
+    {name:"unitcheck",syntax:"unitcheck(3*m+2*cm)",description:"Explicit SI dimensional checking; prints base units. Arithmetic, powers and selected dimensionless functions. Ordinary expressions are unchanged."},
+    {name:"convert",syntax:"convert(72,km/h,m/s)",description:"Convert a finite scalar between compatible explicit unit expressions. Unit names ignore case; K only, no offset Celsius/Fahrenheit."},
+  ]},
+  {title:"Complex images & fractals",entries:[
+    {name:"domaincolor",syntax:"domaincolor(z^2-1)",description:"Complex-plane image with z=x+i*y. Hue is phase; brightness is magnitude, black at zero. Independent of Complex numbers setting."},
+    {name:"mandelbrot",syntax:"mandelbrot(iterations)",description:"Mandelbrot escape-time image; integer iterations 1-500. Black means not escaped within the limit, not proven set membership."},
+    {name:"julia",syntax:"julia(realC, imaginaryC, iterations)",description:"Julia escape-time image for z -> z^2+c; integer iterations 1-500."},
+  ]},
+  {title:"Matrices & exact forms",entries:[
+    {name:"matrix",syntax:"matrix(a,b,c,d)",description:"Display a row-major 2x2 matrix. Entries use numerical scalar evaluation."},
+    {name:"matmul",syntax:"matmul(a,b,c,d,e,f,g,h)",description:"Multiply two row-major 2x2 matrices."},
+    {name:"det",syntax:"det(a,b,c,d)",description:"Numerical 2x2 determinant."},
+    {name:"inverse",syntax:"inverse(a,b,c,d)",description:"Numerical inverse of a nonsingular 2x2 matrix."},
+    {name:"transform",syntax:"transform(a,b,c,d,shape)",description:"Apply a 2x2 matrix to points, polygons, or parametric/ODE/trajectory curves."},
+    {name:"simplify",syntax:"simplify(expression)",description:"Basic exact rational arithmetic and identity simplification; unsupported notation reports an error."},
+    {name:"differentiate",syntax:"differentiate(expression,x)",description:"Exact derivative of supported arithmetic and elementary functions, using current angle mode. Rational constant exponents only."},
+    {name:"factor",syntax:"factor(polynomial,x)",description:"Factor rational-coefficient polynomials of degree at most 8 into rational linear factors, using bounded rational-root search."},
+  ]},
+  {
+    title: "Differential equations & fields",
+    entries: [
+      {name:"vectorfield",syntax:"vectorfield(dx, dy)",description:"Normalized direction arrows for a 2D vector field; components may use x, y, sliders, and user functions. Zero vectors are dots."},
+      {name:"slopefield",syntax:"slopefield(slope)",description:"Direction segments for dy/dx = slope, e.g. slopefield(x-y)."},
+      {name:"ode",syntax:"ode(slope, x0, y0, start, end)",description:"Numerical solution of dy/dx = slope through (x0,y0), integrated in both directions. Requires start <= x0 <= end; reports singularities or convergence failure."},
+      {name:"trajectory",syntax:"trajectory(dx,dy,x0,y0,startTime,endTime)",description:"Autonomous 2D system trajectory from (x0,y0) at time 0, with startTime <= 0 <= endTime. Adaptive numerical integration."},
+    ],
+  },
   {
     title: "Sound",
     entries: [

@@ -1,5 +1,6 @@
 import {
   compileExpression,
+  resultCommand,
   graphRelation,
   UndefinedPointError,
   compileFastGraphExpression,
@@ -62,6 +63,11 @@ import { numericSource } from "./numericSource";
 import { advanceSlider, PLAYBACK_MODES, type PlaybackMode } from "./sliderPlayback";
 import { TonePlayer, evaluateTone, isTone } from "./tones";
 import { detectRestrictionEndpoints } from "./restrictionEndpoints";
+import { ADVANCED_GRAPH_NAMES, RESULT_COMMAND_NAMES } from "./advancedGraphs";
+import { ANALYSIS_GRAPH_NAMES, ANALYSIS_RESULT_NAMES } from "./analysisTools";
+import { EXAMPLES, inspectDependencies, type DependencyNode } from "./workspaceAnalysis";
+import { parseCSV, csvNumericCell, encodeCSV } from "./csv";
+import { graphSVG, svgDocument, xml, type SVGView } from "./svgExport";
 import { installWorkspaceResize } from "./workspaceResize";
 import { MAX_TABLE_ROWS, nextTableCell, spreadsheetCells, tableAxisAt, validateSpreadsheetPaste } from "./spreadsheet";
 import { imageExportSize } from "./image-export";
@@ -126,6 +132,7 @@ interface Expression {
   } | null;
   scalarText?: string;
   scalarEvaluator?: () => Evaluation | number;
+  commandResult?: {key:string;value:string};
   regressionCache?: { key: string; result: CustomRegressionResult };
   regressionError?: string;
   regressionSummary?: string;
@@ -1104,6 +1111,10 @@ app.innerHTML = `
               <button type="button" id="save-project" aria-haspopup="dialog">Save</button>
               <button type="button" id="export-project">Export</button>
               <button type="button" id="export-image" aria-haspopup="dialog">PNG</button>
+              <button type="button" id="export-svg">SVG</button>
+              <button type="button" id="import-csv" aria-haspopup="dialog">Import CSV</button>
+              <button type="button" id="open-dependencies" aria-haspopup="dialog">Dependencies</button>
+              <button type="button" id="open-examples" aria-haspopup="dialog">Examples</button>
               <button type="button" id="import-project">Import</button>
               <button type="button" id="share-project">Share</button>
               <button type="button" id="open-audio-trace" aria-haspopup="dialog">Audio trace</button>
@@ -1179,6 +1190,24 @@ app.innerHTML = `
     <input id="math-keypad-input" type="text" maxlength="512" aria-label="Expression text editor" autocomplete="off" spellcheck="false" />
     <div id="math-keypad-keys" class="math-keypad-keys"></div>
     <p id="math-keypad-error" class="expression-error" role="status"></p>
+  </dialog>
+  <dialog class="settings-dialog" id="dependencies-dialog" aria-labelledby="dependencies-title">
+    <div class="settings-dialog-heading"><h2 id="dependencies-title">Expression dependencies</h2><button type="button" id="close-dependencies" aria-label="Close dependencies">×</button></div>
+    <p class="analysis-dialog-help">Static snapshot of expressions and table-column formulas. Cycles can be intentional recursive functions; they are not automatically errors. Unknown names may be incomplete input. Coordinates x/y/t are not sliders.</p>
+    <div id="dependency-list" class="analysis-dialog-list"></div>
+    <p id="dependencies-error" class="expression-error" role="status"></p>
+  </dialog>
+  <dialog class="settings-dialog" id="examples-dialog" aria-labelledby="examples-title">
+    <div class="settings-dialog-heading"><h2 id="examples-title">Example gallery</h2><button type="button" id="close-examples" aria-label="Close example gallery">×</button></div>
+    <p class="analysis-dialog-help">Append editable examples without replacing your project, changing its viewport, or starting sound/playback. Use Reset view if an example is off-screen.</p>
+    <div id="example-list" class="analysis-dialog-list"></div>
+    <p id="examples-error" class="expression-error" role="status"></p>
+  </dialog>
+  <dialog class="settings-dialog" id="csv-import-dialog" aria-labelledby="csv-import-title">
+    <div class="settings-dialog-heading"><h2 id="csv-import-title">Import CSV as a new table</h2><button type="button" id="close-csv-import" aria-label="Close CSV import">×</button></div>
+    <label class="setting-check"><span>First row contains column names</span><input id="csv-has-header" type="checkbox" checked /></label>
+    <div class="setting-control"><p>Use 2–20 columns of finite numbers or empty cells. Headers must be distinct letter/subscript names, such as x_2, y_2, or a_1. Existing tables are not replaced.</p><input id="csv-file" type="file" accept=".csv,text/csv" aria-label="Choose CSV file" /></div>
+    <p id="csv-import-error" class="expression-error" role="status"></p>
   </dialog>
   <dialog class="settings-dialog" id="image-export-dialog" aria-labelledby="image-export-title">
     <form id="image-export-form">
@@ -2931,7 +2960,7 @@ function drawInequality(
   return drawImplicit(evaluate, width, height, id, color, colorAt, lineWidth, opacity, regionAt);
 }
 
-function drawExpressionLabel(expression: Expression, width: number, height: number): void {
+function drawExpressionLabel(expression: Expression, width: number, height: number,svgLabels?:string[]): void {
   const error = workspaceList.querySelector<HTMLElement>(`[data-label-error-id="${expression.id}"]`);
   const fields = workspaceList.querySelectorAll<HTMLInputElement>(`[data-expression-id="${expression.id}"] [data-label-field]`);
   expression.labelError = undefined;
@@ -2966,6 +2995,12 @@ function drawExpressionLabel(expression: Expression, width: number, height: numb
     const y = expression.labelY?.trim() ? evaluate(expression.labelY) : anchor[1];
     if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("Label coordinates must be finite.");
     const label = dynamicLabel(expression.label, evaluate);
+    if(svgLabels){
+      const sx=screenXAt(x,width)+10,sy=screenYAt(y,height)-10;
+      if(Number.isFinite(sx)&&Number.isFinite(sy))
+        svgLabels.push(`<text x="${sx}" y="${sy}" font-family="sans-serif" font-size="14" fill="${xml(expression.color)}" stroke="${xml(currentThemeColor("app-bg"))}" stroke-width="4" paint-order="stroke" opacity="${expression.opacity??1}">${xml(label)}</text>`);
+      return;
+    }
     context.save();
     try {
       context.globalAlpha = expression.opacity ?? 1;
@@ -3065,6 +3100,48 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
       const colorAt=compileSpatialColor(expression);
       const lineWidth=expression.lineWidth??2;
       const opacity=expression.opacity??1;
+      if(graph.kind==="plane"){
+        const step=Math.max(3,Math.ceil(Math.sqrt(width*height/16000)));
+        let failures=0,firstError="";
+        context.globalAlpha=opacity;
+        for(let sy=0;sy<height;sy+=step)for(let sx=0;sx<width;sx+=step){
+          try{
+            const [h,s,v]=graph.evaluate(worldXAt(sx+step/2,width),worldYAt(sy+step/2,height));
+            context.fillStyle=hsvToHex(h,s,v);context.fillRect(sx,sy,step,step);
+          }catch(reason){failures++;firstError||=reason instanceof Error?reason.message:"Invalid plane sample.";}
+        }
+        if(failures)expression.evaluationError=`Plane undefined at ${failures} sampled cells: ${firstError}`;
+        continue;
+      }
+      if(graph.kind==="vectorfield"){
+        const spacing=Math.max(40,Math.ceil(Math.sqrt(width*height/1600)));
+        let failed=0,firstError="";
+        context.globalAlpha=opacity;context.lineWidth=lineWidth;context.setLineDash([]);
+        for(let sy=spacing/2;sy<height;sy+=spacing)for(let sx=spacing/2;sx<width;sx+=spacing){
+          const x=worldXAt(sx,width),y=worldYAt(sy,height);
+          try{
+            const [u,v]=graph.evaluate(x,y);
+            const dx=scale*u/(graphOptions.xScale==="log"?x*Math.LN10:1);
+            const dy=-verticalScale()*v/(graphOptions.yScale==="log"?y*Math.LN10:1);
+            if(!Number.isFinite(dx)||!Number.isFinite(dy))throw new Error("Projected field direction is nonfinite.");
+            const magnitude=Math.hypot(dx,dy),radius=spacing*0.3;
+            context.strokeStyle=colorAt?.(x,y)??expression.color;
+            context.fillStyle=context.strokeStyle;
+            context.beginPath();
+            if(magnitude===0){context.arc(sx,sy,Math.max(1.5,lineWidth),0,2*Math.PI);context.fill();continue;}
+            const nx=dx/magnitude,ny=dy/magnitude;
+            const tipX=sx+nx*radius,tipY=sy+ny*radius;
+            context.moveTo(sx-nx*radius,sy-ny*radius);context.lineTo(tipX,tipY);
+            if(graph.arrows){
+              context.moveTo(tipX-6*nx+4*ny,tipY-6*ny-4*nx);context.lineTo(tipX,tipY);
+              context.lineTo(tipX-6*nx-4*ny,tipY-6*ny+4*nx);
+            }
+            context.stroke();
+          }catch(reason){failed++;firstError||=reason instanceof Error?reason.message:"Invalid field sample.";}
+        }
+        if(failed)expression.evaluationError=`Field undefined at ${failed} sampled points: ${firstError}`;
+        continue;
+      }
       if(graph.kind==="explicit"||graph.kind==="sideways"||graph.kind==="parametric"){
         const source=expandFunctions(expression.text);
         if(source.includes("{")){
@@ -3514,7 +3591,7 @@ function scheduleDraw(): void {
 }
 
 function isGraphConstructor(source:string):boolean{
-  return /^\s*(?:polygon|histogram|dotplot|boxplot|list|parametric|polar|derivative|integral)\s*\(/i.test(source);
+  return new RegExp(`^\\s*(?:polygon|histogram|dotplot|boxplot|list|parametric|polar|derivative|integral|vectorfield|slopefield|ode|${[...ADVANCED_GRAPH_NAMES,...ANALYSIS_GRAPH_NAMES].join("|")})\\s*\\(`,"i").test(source);
 }
 
 function updateScalarResult(expression: Expression): boolean {
@@ -3536,6 +3613,40 @@ function updateScalarResult(expression: Expression): boolean {
     }
   };
   const source = expression.text.trim();
+  if(new RegExp(`^(?:${[...RESULT_COMMAND_NAMES,...ANALYSIS_RESULT_NAMES].join("|")})\\s*\\(`,"i").test(source)){
+    expression.compileError=undefined;
+    try{
+      const key=JSON.stringify([source,userFunctionSignature(),sliderValues,collectionSignature(source)]);
+      let result=expression.commandResult?.key===key?expression.commandResult.value:undefined;
+      if(result===undefined){
+        result=resultCommand(/^(?:unitcheck|convert)\s*\(/i.test(source)?source:expandFunctions(source),sliderValues,collectionValues);
+        if(result===undefined)throw new Error("Unsupported result command.");
+        expression.commandResult={key,value:result};
+      }
+      expression.evaluationError=undefined;
+      if(resultElement){resultElement.textContent=`${/^(?:simplify|differentiate|factor)\s*\(/i.test(source)?"Exact form":/^(?:unitcheck|convert)\s*\(/i.test(source)?"Units (numerical)":ANALYSIS_RESULT_NAMES.some(name=>new RegExp(`^${name}\\s*\\(`,"i").test(source))?"Numerical analysis (approximate)":"Numerical matrix result"}: ${result}`;resultElement.hidden=false;}
+    }catch(reason){
+      expression.evaluationError=reason instanceof Error?reason.message:"Could not evaluate result command.";
+      if(resultElement)resultElement.hidden=true;
+    }
+    updateError();return true;
+  }
+  if(isGraphConstructor(source)&&new RegExp(`^(?:vectorfield|slopefield|ode|${[...ADVANCED_GRAPH_NAMES,...ANALYSIS_GRAPH_NAMES].join("|")})\\s*\\(`,"i").test(source)){
+    const graph=getCompiled(expression);
+    if(resultElement){
+      resultElement.hidden=!graph;
+      resultElement.textContent=/^(?:ode|trajectory)\s*\(/i.test(source)?"Numerical solution (approximate)":
+        /^slopefield\s*\(/i.test(source)?"Sampled slope directions":
+        /^vectorfield\s*\(/i.test(source)?"Normalized vector directions":
+        /^transform\s*\(/i.test(source)?"Linear transformation":
+        /^heatmap\s*\(/i.test(source)?"Real heatmap: low = blue, high = red (clamped)":
+        /^contours\s*\(/i.test(source)?"Sampled real level curves":
+        /^(?:confidenceband|predictionband)\s*\(/i.test(source)?"Pointwise linear-regression band; independent normal, constant-variance errors assumed":
+        /^errorbars\s*\(/i.test(source)?"User-supplied symmetric error bars":
+        ANALYSIS_GRAPH_NAMES.some(name=>new RegExp(`^${name}\\s*\\(`,"i").test(source))?"Numerical analysis plot (approximate)":"Sampled complex plane / bounded escape-time image";
+    }
+    updateError();return false;
+  }
   if(isTone(source)){
     expression.compileError=undefined;
     try{
@@ -3666,7 +3777,7 @@ function updateScalarResult(expression: Expression): boolean {
   }
   const tokens = freeIdentifiers(source.replace(/([a-z](?:_[a-z0-9]+)?)\.[xy]\b/gi, "$1"));
   if (!source || graphRelation(source) ||
-      /^(?:list|derivative|integral|parametric|polar)\s*\(/i.test(source) ||
+      /^(?:list|derivative|integral|parametric|polar|vectorfield|slopefield|ode)\s*\(/i.test(source) ||
       tokens.some((name) => ["x", "y", "t"].includes(name.toLowerCase()))) {
     expression.scalarText = scalarKey;
     expression.scalarEvaluator = undefined;
@@ -3744,7 +3855,8 @@ function collectionSignature(source: string): string {
   });
   const structuredNames = [...DISTRIBUTION_NAMES, ...INFERENCE_NAMES, ...RANDOM_NAMES,
     ...distributionDefinitions.map((definition) => definition.target),...inferenceDefinitions.map((definition)=>definition.target)];
-  return (source.match(/[a-z]+(?:_[a-z0-9]+)?/gi) ?? []).some((token) => structuredNames.includes(token.toLowerCase())) ||
+  return isGraphConstructor(source) ||
+    (source.match(/[a-z]+(?:_[a-z0-9]+)?/gi) ?? []).some((token) => structuredNames.includes(token.toLowerCase())) ||
     hasCollections(source, collectionValues) ||
     getUserFunctionDefinitions().some(({ definition }) => hasCollections(definition.body, collectionValues))
     ? JSON.stringify([collectionValues, pointValues, complexValues, sliderValues, tableColumnErrors, graphOptions.statisticsMode, graphOptions.angleMode, graphOptions.complexMode, getRandomSeed(), distributionDefinitions,inferenceDefinitions]) :
@@ -3771,6 +3883,7 @@ function getCompiled(expression: Expression): CompiledGraph | undefined {
     if(inferenceDefinition(expression.text))return undefined;
     if (isActionExpression(expression.text)) return undefined;
     if (isTone(expression.text)) return undefined;
+    if(new RegExp(`^\\s*(?:${[...RESULT_COMMAND_NAMES,...ANALYSIS_RESULT_NAMES].join("|")})\\s*\\(`,"i").test(expression.text))return undefined;
     if (functionDefinition) {
       expression.compileError = functionDefinition.error;
       if (!expression.compileError) {
@@ -3955,7 +4068,7 @@ function getUserFunctionDefinitions(): FunctionState[] {
       ...DISTRIBUTION_NAMES, ...PROBABILITY_KERNELS, "pdf", "cdf", "inversecdf",
       ...INFERENCE_NAMES, "test", "conf", "estimate", "stderr", "dof", "score", "pleft", "pright", "lower", "upper",
       ...RANDOM_NAMES,
-      ...COMPLEX_FUNCTIONS,"i","tone",
+      ...COMPLEX_FUNCTIONS,"i","tone","vectorfield","slopefield","ode",...ADVANCED_GRAPH_NAMES,...RESULT_COMMAND_NAMES,...ANALYSIS_GRAPH_NAMES,...ANALYSIS_RESULT_NAMES,
       ...expressions.flatMap((expression) => {
         const definition = distributionDefinition(expression.text);
         return definition ? [definition.target] : [];
@@ -4055,7 +4168,9 @@ function expandFunctions(source: string, scope = source, rewriteStructured = tru
     );
     expandedSources.set(source, expanded);
   }
-  expanded = expandNamedPoints(expanded, pointValues);
+  const namedPoints=/^\s*domaincolor\s*\(/i.test(expanded)?
+    Object.fromEntries(Object.entries(pointValues).filter(([name])=>name!=="z")):pointValues;
+  expanded = expandNamedPoints(expanded, namedPoints);
   const inferenceDefinitions=expressions.flatMap((expression)=>{
     const definition=inferenceDefinition(expression.text);return definition?[definition]:[];
   });
@@ -4160,7 +4275,7 @@ function synchronizeVariableDefinitions(updateTableDisplay = true): {
     ...DISTRIBUTION_NAMES, ...PROBABILITY_KERNELS, "pdf", "cdf", "inversecdf",
     ...INFERENCE_NAMES, "test", "conf", "estimate", "stderr", "dof", "score", "pleft", "pright", "lower", "upper",
     ...RANDOM_NAMES,
-    ...COMPLEX_FUNCTIONS,"tone",...(graphOptions.complexMode?["i"]:[]),
+    ...COMPLEX_FUNCTIONS,"tone","vectorfield","slopefield","ode",...ADVANCED_GRAPH_NAMES,...RESULT_COMMAND_NAMES,...ANALYSIS_GRAPH_NAMES,...ANALYSIS_RESULT_NAMES,...(graphOptions.complexMode?["i"]:[]),
     ...expressions.flatMap((expression)=>{const definition=inferenceDefinition(expression.text);return definition?[definition.target]:[];}),
     ...expressions.flatMap((expression) => {
       const definition = distributionDefinition(expression.text);
@@ -6492,6 +6607,29 @@ function renderTables(): void {
       )?.focus();
     });
     actions.append(addRow, addColumn);
+    const exportCSV=document.createElement("button");
+    exportCSV.type="button";exportCSV.textContent="Export CSV";
+    exportCSV.setAttribute("aria-label",`Export Table ${tableIndex+1} as CSV`);
+    exportCSV.addEventListener("click",()=>{
+      try{
+        synchronizeVariableDefinitions();
+        const columns=tableColumns(table);
+        const active=table.rows.flatMap((row,index)=>row.x.trim()||row.y.trim()||row.extra?.some(c=>c.trim())?[index]:[]);
+        const rows=active.map(index=>columns.map(column=>{
+          const formula=tableColumnFormula(table,column.axis);
+          const source=formula||tableCell(table,index,column.axis);
+          if(!source.trim())return "";
+          const rowColumn=column.rows.indexOf(index);
+          if(tableColumnErrors[column.target])throw new Error(tableColumnErrors[column.target]);
+          const value=collectionValues[column.target]?.[rowColumn];
+          if(rowColumn<0||value===undefined)throw new Error(`Missing value at row ${index+1}.`);
+          return String(compileExpression(value,sliderValues)(0).value.toNumber());
+        }));
+        downloadBlob(new Blob([encodeCSV([columns.map(c=>c.target),...rows])],{type:"text/csv;charset=utf-8"}),`better-desmos-table-${table.id}.csv`);
+        setProjectStatus("CSV exported with evaluated numeric values (not formulas).");
+      }catch(reason){setProjectStatus(reason instanceof Error?`CSV export failed: ${reason.message}`:"CSV export failed.");}
+    });
+    actions.append(exportCSV);
 
     const regression = document.createElement("label");
     regression.className = "table-regression";
@@ -7403,6 +7541,194 @@ document.querySelector<HTMLFormElement>("#save-dialog-form")!.addEventListener("
   }
   saveDialog.close();
 });
+function downloadBlob(blob:Blob,name:string):void{
+  const url=URL.createObjectURL(blob),link=document.createElement("a");
+  link.href=url;link.download=name;link.click();
+  window.setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+const dependenciesDialog=document.querySelector<HTMLDialogElement>("#dependencies-dialog")!;
+const examplesDialog=document.querySelector<HTMLDialogElement>("#examples-dialog")!;
+document.querySelector("#close-dependencies")!.addEventListener("click",()=>dependenciesDialog.close());
+document.querySelector("#close-examples")!.addEventListener("click",()=>examplesDialog.close());
+document.querySelector("#open-dependencies")!.addEventListener("click",()=>{
+  const list=document.querySelector<HTMLElement>("#dependency-list")!,error=document.querySelector<HTMLElement>("#dependencies-error")!;
+  list.replaceChildren();error.textContent="";
+  try{
+    synchronizeVariableDefinitions();
+    const functions=getUserFunctionDefinitions(),nodes:DependencyNode[]=[];
+    const references=(source:string,local:string[]=[])=>{
+      const called=[...source.matchAll(/\b([a-z](?:_[a-z0-9]+)?)\s*\(/gi)].map(m=>m[1]!.toLowerCase())
+        .filter(name=>functions.some(f=>f.definition.name===name));
+      return [...new Set([...freeIdentifiers(source),...called])].filter(name=>!["x","y","t","theta","i",...local].includes(name));
+    };
+    for(const [index,expression] of expressions.entries()){
+      if(!expression.text.trim())continue;
+      const fn=functions.find(f=>f.expression===expression),variable=getVariableDefinition(expression);
+      const distribution=distributionDefinition(expression.text),inference=inferenceDefinition(expression.text);
+      const definition=fn?.definition.name??variable?.target??distribution?.target??inference?.target;
+      const source=fn?.definition.body??variable?.source??expression.text.slice(definition?expression.text.indexOf("=")+1:0);
+      nodes.push({id:`expression:${expression.id}`,label:`Expression ${index+1}${definition?` · ${definition}`:""}`,
+        defines:definition,references:references(source,fn?.definition.parameters)});
+    }
+    for(const [index,table] of tables.entries())for(const column of tableColumns(table))
+      nodes.push({id:`table:${table.id}:${column.target}`,label:`Table ${index+1} · ${column.target}`,defines:column.target,
+        references:[...new Set([...new Set(column.sources)].flatMap(source=>references(source)))]});
+    for(const report of inspectDependencies(nodes,Object.keys(sliderValues))){
+      const card=document.createElement("section"),title=document.createElement("h3");
+      title.textContent=report.node.label;card.append(title);
+      for(const text of [`Direct: ${report.direct.join(", ")||"none"}`,`Indirect: ${report.indirect.join(", ")||"none"}`,
+        ...report.cycles.map(c=>`Recursive/circular path: ${c.join(" → ")}`),
+        ...(report.unresolved.length?[`Unresolved: ${report.unresolved.join(", ")}`]:[])]){
+        const p=document.createElement("p");p.textContent=text;card.append(p);
+      }
+      list.append(card);
+    }
+    if(!nodes.length)list.textContent="No expressions or table columns yet.";
+  }catch(reason){error.textContent=reason instanceof Error?reason.message:"Could not inspect dependencies.";}
+  dependenciesDialog.showModal();
+});
+document.querySelector("#open-examples")!.addEventListener("click",()=>{
+  document.querySelector("#examples-error")!.textContent="";
+  examplesDialog.showModal();
+});
+for(const example of EXAMPLES){
+  const card=document.createElement("section"),title=document.createElement("h3"),description=document.createElement("p"),button=document.createElement("button");
+  title.textContent=example.title;description.textContent=example.description;
+  button.type="button";button.textContent="Append example";button.setAttribute("aria-label",`Append ${example.title} example`);
+  button.addEventListener("click",()=>{
+    try{
+      if(expressions.length+example.expressions.length>200||workspaceOrder.length+example.expressions.length>1000)
+        throw new Error("Appending this example would exceed the project limit (200 expressions / 1000 workspace items). Remove some rows first.");
+      for(const text of example.expressions){
+        const expression:Expression={id:nextId++,text,color:colors[(nextId-2)%colors.length]!};
+        expressions.push(expression);workspaceOrder.push({type:"expression",id:expression.id});
+      }
+      renderExpressions();draw();scheduleProjectSave();examplesDialog.close();
+      setProjectStatus(`Appended ${example.title}; existing expressions, tables, and viewport preserved.`);
+    }catch(reason){document.querySelector("#examples-error")!.textContent=reason instanceof Error?reason.message:"Could not append example.";}
+  });
+  card.append(title,description,button);document.querySelector("#example-list")!.append(card);
+}
+const csvDialog=document.querySelector<HTMLDialogElement>("#csv-import-dialog")!;
+const csvFile=document.querySelector<HTMLInputElement>("#csv-file")!;
+document.querySelector("#import-csv")!.addEventListener("click",()=>csvDialog.showModal());
+document.querySelector("#close-csv-import")!.addEventListener("click",()=>csvDialog.close());
+csvFile.addEventListener("change",async()=>{
+  const file=csvFile.files?.[0];if(!file)return;
+  const error=document.querySelector<HTMLElement>("#csv-import-error")!;
+  error.textContent="";
+  try{
+    if(file.size>2_000_000)throw new Error("CSV files must be at most 2 MB.");
+    const parsed=parseCSV(await file.text());
+    const hasHeader=document.querySelector<HTMLInputElement>("#csv-has-header")!.checked;
+    const headers=hasHeader?parsed.shift()!.map(s=>s.trim().toLowerCase()):undefined;
+    if(!parsed.length||parsed.length>MAX_TABLE_ROWS||parsed.length*parsed[0]!.length>20000)
+      throw new Error("CSV requires 1–5000 data rows, at most 20000 cells.");
+    if(headers){
+      for(const header of headers)validateTableColumnName(header);
+      if(new Set(headers).size!==headers.length)throw new Error("CSV column names must be distinct.");
+      const taken=new Set([...Object.keys(sliderValues),...Object.keys(collectionValues),
+        ...getUserFunctionDefinitions().map(s=>s.definition.name),...expressions.flatMap(e=>getVariableDefinition(e)?.target??[])]);
+      const collision=headers.find(h=>taken.has(h));
+      if(collision)throw new Error(`Column "${collision}" already exists. Rename the CSV header or import without headers.`);
+    }
+    const values=parsed.map(row=>row.map(csvNumericCell));
+    const table:DataTable={id:nextTableId++,name:file.name.replace(/\.csv$/i,""),collapsed:false,
+      color:colors[(tables.length+2)%colors.length]!,xColumn:headers?.[0],yColumn:headers?.[1],
+      extraColumns:values[0]!.slice(2).map((_,i)=>({id:i+1,name:headers?.[i+2]})),
+      rows:values.map(row=>({id:nextRowId++,x:row[0]!,y:row[1]!,extra:row.slice(2)}))};
+    tables.push(table);workspaceOrder.push({type:"table",id:table.id});
+    invalidateTableData(table);renderTables();draw();scheduleProjectSave();
+    csvDialog.close();setProjectStatus(`Imported ${values.length} CSV rows as a new table.`);
+  }catch(reason){error.textContent=reason instanceof Error?reason.message:"CSV import failed.";}
+  finally{csvFile.value="";}
+});
+
+document.querySelector("#export-svg")!.addEventListener("click",()=>{
+  try{
+    synchronizeVariableDefinitions();
+    const {width,height}=canvasWrap.getBoundingClientRect();
+    const view:SVGView={width,height,sx:x=>screenXAt(x,width),sy:y=>screenYAt(y,height),
+      wx:p=>worldXAt(p,width),wy:p=>worldYAt(p,height),color:hsvToHex};
+    const body:string[]=[];let gaps=0;
+    for(const item of workspaceBlocks().flatMap(block=>block.items).reverse()){
+      if(item.type==="photo"){
+        const photo=photos.find(p=>p.id===item.id&&!p.hidden);
+        if(photo){
+          if(graphOptions.xScale==="log"||graphOptions.yScale==="log")throw new Error("SVG photos on logarithmic axes are unsupported; use PNG.");
+          const transform=evaluatePhotoTransform(photo,sliderValues,expandFunctions);
+          const matrix=photoMatrix(transform,centerX,centerY,scale,verticalScale(),width,height);
+          body.push(`<image href="${xml(photo.source)}" x="-0.5" y="-0.5" width="1" height="1" preserveAspectRatio="none" transform="matrix(${matrix.join(" ")})" opacity="${photo.opacity}"/>`);
+        }
+      }
+      if(item.type==="expression"){
+        const expression=expressions.find(e=>e.id===item.id)!;
+        if(expression.hidden||!expression.text.trim()||updateScalarResult(expression))continue;
+        const graph=getCompiled(expression);
+        if(expression.compileError)throw new Error(expression.compileError);
+        if(!graph)continue;
+        const result=graphSVG(graph,view,{...expression,colorAt:compileSpatialColor(expression)});
+        body.push(result.markup);gaps+=result.gaps;
+        drawExpressionLabel(expression,width,height,body);
+        if(expression.labelError)throw new Error(expression.labelError);
+        if(graph.kind==="explicit"||graph.kind==="sideways"||graph.kind==="parametric"){
+          const source=expandFunctions(expression.text);
+          if(source.includes("{")){
+            const parameterDomain=graph.kind==="sideways"?{min:view.wy(height),max:view.wy(0)}:{min:view.wx(0),max:view.wx(width)};
+            for(const endpoint of detectRestrictionEndpoints(source,graph,{variables:sliderValues,sliderBounds:sliderOptions,parameterDomain})){
+              const x=view.sx(endpoint.x),y=view.sy(endpoint.y);
+              if(!Number.isFinite(x)||!Number.isFinite(y))continue;
+              body.push(`<circle cx="${x}" cy="${y}" r="${Math.max(4,(expression.lineWidth??2)+2)}" fill="${xml(endpoint.closed?expression.color:currentThemeColor("app-bg"))}" stroke="${xml(expression.color)}" opacity="${expression.opacity??1}" stroke-width="2"/>`);
+            }
+          }
+        }
+      }else if(item.type==="table"){
+        const table=tables.find(t=>t.id===item.id)!;
+        const values=tableValues(table);
+        if(values.error)throw new Error(values.error);
+        for(const [x,y] of tablePlotPoints(values))body.push(graphSVG({kind:"point",xVariables:[],yVariables:[],evaluate:()=>[x,y]},view,{color:table.color}).markup);
+        updateTableRegression(table);
+        if(table.regression)body.push(graphSVG({kind:"explicit",evaluate:x=>evaluateRegression(table.regression!,x)},view,{color:table.color,lineStyle:"dashed"}).markup);
+      }
+    }
+    const gridColor=xml(currentThemeColor("text")),textColor=xml(currentThemeColor("text-strong"));
+    const ox=Math.max(0,Math.min(width,view.sx(graphOptions.xScale==="log"?1:0)));
+    const oy=Math.max(0,Math.min(height,view.sy(graphOptions.yScale==="log"?1:0)));
+    const polar=graphOptions.showGrid&&graphOptions.gridMode==="polar"&&graphOptions.xScale!=="log"&&graphOptions.yScale!=="log";
+    if(polar){
+      const px=view.sx(0),py=view.sy(0),ys=verticalScale();
+      const radius=Math.max(...[0,width].flatMap(x=>[0,height].map(y=>Math.hypot((x-px)/scale,(y-py)/ys))));
+      const requested=graphOptions.xStep??tickStep(Math.min(scale,ys));
+      const step=Math.max(requested,radius/1000);
+      for(const [spacing,alpha,rays] of [[graphOptions.minorGrid?step/5:step,0.1,graphOptions.minorGrid?24:12],[step,0.22,12]]){
+        for(let r=spacing!;r<=radius;r+=spacing!)body.push(`<ellipse cx="${px}" cy="${py}" rx="${r*scale}" ry="${r*ys}" fill="none" stroke="${gridColor}" stroke-opacity="${alpha}"/>`);
+        for(let i=0;i<rays!;i++){const angle=i/rays!*2*Math.PI;body.push(`<path d="M${px} ${py}L${px+radius*Math.cos(angle)*scale} ${py-radius*Math.sin(angle)*ys}" fill="none" stroke="${gridColor}" stroke-opacity="${alpha}"/>`);}
+      }
+    }
+    for(const horizontal of [true,false]){
+      const log=(horizontal?graphOptions.xScale:graphOptions.yScale)==="log";
+      const low=horizontal?view.wx(0):view.wy(height),high=horizontal?view.wx(width):view.wy(0);
+      const requested=(horizontal?graphOptions.xStep:graphOptions.yStep);
+      const step=log?1:requested!==undefined&&(high-low)/requested<=1000?requested:tickStep(horizontal?scale:verticalScale());
+      const minor=graphOptions.minorGrid?step/5:step;
+      const ticks=log?logarithmicTicks(low,high):Array.from({length:Math.min(5000,Math.ceil((high-low)/minor)+1)},(_,i)=>({value:(Math.ceil(low/minor)+i)*minor,major:!graphOptions.minorGrid||(Math.ceil(low/minor)+i)%5===0}));
+      for(const tick of ticks){
+        const p=horizontal?view.sx(tick.value):view.sy(tick.value);
+        if(!Number.isFinite(p)||p<0||p>(horizontal?width:height))continue;
+        if(graphOptions.showGrid&&!polar)body.push(`<path d="${horizontal?`M${p} 0V${height}`:`M0 ${p}H${width}`}" stroke="${gridColor}" stroke-opacity="${tick.major?0.22:0.09}" fill="none"/>`);
+        if(tick.major&&graphOptions.showLabels&&(horizontal?graphOptions.showXAxis:graphOptions.showYAxis))
+          body.push(`<text x="${horizontal?p+4:Math.min(width-60,ox+6)}" y="${horizontal?Math.min(height-8,oy+16):p-5}" fill="${textColor}" font-family="sans-serif" font-size="12">${xml(formatTick(tick.value))}</text>`);
+      }
+    }
+    if(graphOptions.showXAxis)body.push(`<path d="M0 ${oy}H${width}" stroke="${gridColor}" stroke-opacity="0.72"/>`);
+    if(graphOptions.showYAxis)body.push(`<path d="M${ox} 0V${height}" stroke="${gridColor}" stroke-opacity="0.72"/>`);
+    if(graphOptions.showXAxis&&graphOptions.xAxisLabel)body.push(`<text x="${width-70}" y="${Math.max(14,oy-8)}" fill="${textColor}">${xml(graphOptions.xAxisLabel)}</text>`);
+    if(graphOptions.showYAxis&&graphOptions.yAxisLabel)body.push(`<text x="${Math.min(width-80,ox+8)}" y="18" fill="${textColor}">${xml(graphOptions.yAxisLabel)}</text>`);
+    downloadBlob(new Blob([svgDocument(view,currentThemeColor("app-bg"),body.join(""))],{type:"image/svg+xml"}),"better-desmos-graph.svg");
+    setProjectStatus(`SVG exported with editable sampled paths${gaps?`; ${gaps} undefined/offscreen samples omitted`:""}.`);
+  }catch(reason){setProjectStatus(reason instanceof Error?`SVG export failed: ${reason.message}`:"SVG export failed.");}
+});
+
 const imageExportDialog = document.querySelector<HTMLDialogElement>("#image-export-dialog")!;
 const imageExportButton = document.querySelector<HTMLButtonElement>("#download-image")!;
 document.querySelector("#export-image")!.addEventListener("click", () => imageExportDialog.showModal());

@@ -8,6 +8,11 @@ import { inferenceCall, inferenceProperty, readInference, rewriteInferenceProper
 import { rewriteRandom } from "./randomSyntax";
 import { complex, add, sub, mul, div, pow, neg, complexFunction, integrateComplex, COMPLEX_FUNCTIONS, type Complex } from "./complex";
 import { polygonSignedDistance } from "./graphAnalysis";
+import { solveDifferentialEquation, interpolateSolution, solveTrajectory } from "./differentialEquations";
+import { ADVANCED_GRAPH_NAMES, RESULT_COMMAND_NAMES, commandArguments, domainColor, fractalColor, inverseMatrix, multiplyMatrices, type Matrix2 } from "./advancedGraphs";
+import { simplifyNode, symbolicSource, symbolicDerivative, factorPolynomial, normalizeSymbolic } from "./symbolic";
+import { ANALYSIS_GRAPH_NAMES, ANALYSIS_RESULT_NAMES, finite as analysisFinite, interval as analysisInterval, integrate, derivatives, fourierSeries, evaluateFourier, dataFourier, findRoots, linearBand } from "./analysisTools";
+import { UNITS, evaluateUnits, unitResult, convertUnits } from "./units";
 
 const DEFAULT_PRECISION_DIGITS = 50;
 export const FAST_MODE_PRECISION_DIGITS = 10;
@@ -42,7 +47,7 @@ export function setAngleMode(mode: AngleMode): void {
   angleMode = mode;
 }
 
-type Node =
+export type Node =
   | { type: "number"; value: Rational }
   | { type: "variable"; name: string }
   | { type: "constant"; value: "pi" | "e" }
@@ -339,6 +344,8 @@ type PreciseImplicitEvaluation = (x: number, y: number) => Decimal;
 export type ExplicitEvaluation = (x: number) => Evaluation | number;
 
 export type GraphExpression =
+  | { kind: "plane"; evaluate: (x:number,y:number)=>[number,number,number] }
+  | { kind: "vectorfield"; evaluate: (x: number, y: number) => [number, number]; arrows: boolean }
   | { kind: "polygon"; evaluate: () => [number, number][]; vertexSources?:[string,string][] }
   | { kind: "explicit"; evaluate: ExplicitEvaluation; tangent?: () => { slope: number; offset: number }; region?: (parameter: number) => string }
   | { kind: "sideways"; evaluate: ExplicitEvaluation; tangent?: () => { slope: number; offset: number }; region?: (parameter: number) => string }
@@ -405,6 +412,15 @@ export const BUILTIN_NAMES = [
 const functions = new Set<string>([...BUILTIN_NAMES, ...PROBABILITY_KERNELS, ...DISTRIBUTION_NAMES,...COMPLEX_FUNCTIONS]);
 export function freeIdentifiers(source: string): string[] {
   const normalized = source.replace(/θ/g, "theta").replace(/[Σ∑]/g, "sum").replace(/[Π∏]/g, "prod").replace(/∫/g, "int").toLowerCase();
+  const commandName=new RegExp(`^\\s*(${[...ADVANCED_GRAPH_NAMES,...RESULT_COMMAND_NAMES,...ANALYSIS_GRAPH_NAMES,...ANALYSIS_RESULT_NAMES,"vectorfield","slopefield","ode"].join("|")})\\s*\\(`).exec(normalized)?.[1];
+  if(commandName&&normalized.trim().endsWith(")")){
+    const body=normalized.slice(normalized.indexOf("(")+1,normalized.lastIndexOf(")"));
+    const args=splitCallArguments(body);
+    if(commandName==="convert")return [...new Set(args.flatMap((arg,index)=>freeIdentifiers(arg).filter(n=>index===0||!Object.hasOwn(UNITS,n))))];
+    const bound=commandName==="domaincolor"?["z","i"]:commandName==="unitcheck"?Object.keys(UNITS):
+      ["factor","differentiate"].includes(commandName)?[args[1]?.trim()??"x"]:[];
+    return [...new Set(args.flatMap(freeIdentifiers).filter(n=>!bound.includes(n)))];
+  }
   const relation = graphRelation(normalized);
   if (relation && !normalized.includes("[")) {
     const length = /[≤≥≠]/.test(normalized[relation.index]!) ? 1 : relation.operator.length;
@@ -464,7 +480,9 @@ export function freeIdentifiers(source: string): string[] {
     for (const match of normalized.matchAll(/d\s*\/\s*d([a-z](?:_[a-z0-9]+)?)/g)) bound.add(match[1]!);
     if (/(?:int_|∫)/.test(normalized)) for (const match of normalized.matchAll(/\bd([a-z](?:_[a-z0-9]+)?)\b/g)) { bound.add(match[0]); bound.add(match[1]!); }
     if (/^\s*r\s*=/.test(normalized)) { bound.add("r"); bound.add("theta"); }
-    return [...new Set(identifiers.flatMap((name) => name.startsWith("log_") ? [name.slice(4)] : [name]).filter((name) => !functions.has(name) && !bound.has(name) && !["sum", "prod", "int", "derivativeat", "pi", "e", "and", "or"].includes(name)))];
+    if(/^\s*domaincolor\s*\(/i.test(normalized)){bound.add("z");bound.add("i");}
+    if(/^\s*(?:differentiate|factor)\s*\(/i.test(normalized))bound.add(normalized.match(/,\s*([a-z](?:_[a-z0-9]+)?)\s*\)$/)?.[1]??"x");
+    return [...new Set(identifiers.flatMap((name) => name.startsWith("log_") ? [name.slice(4)] : [name]).filter((name) => !functions.has(name) && !bound.has(name) && !["sum", "prod", "int", "derivativeat", "pi", "e", "and", "or", "vectorfield", "slopefield", "ode",...ADVANCED_GRAPH_NAMES,...RESULT_COMMAND_NAMES,...ANALYSIS_GRAPH_NAMES,...ANALYSIS_RESULT_NAMES].includes(name)))];
   }
 }
 
@@ -2672,6 +2690,12 @@ function compileRestrictedGraph(
       },
     };
   }
+  if (graph.kind === "vectorfield") {
+    return {...graph,evaluate:(x,y)=>{check(x,y);return graph.evaluate(x,y);}};
+  }
+  if (graph.kind === "plane") {
+    return {...graph,evaluate:(x,y)=>{check(x,y);return graph.evaluate(x,y);}};
+  }
   if (graph.kind === "implicit" || graph.kind === "inequality") {
     return {
       ...graph,
@@ -2969,6 +2993,263 @@ function compileStatisticsGraph(
   };
 }
 
+function compileAdvancedGraph(source:string,variables:Record<string,number>):GraphExpression|undefined{
+  const scalar=(text:string)=>{
+    if(graphRelation(text)||freeIdentifiers(text).some(n=>["x","y","t","z"].includes(n)))
+      throw new Error("This argument must be a scalar expression without graph coordinates.");
+    const result=compileExpression(text,variables)(0).value.toNumber();
+    if(!Number.isFinite(result))throw new Error("Scalar argument must be finite.");
+    return result;
+  };
+  for(const name of ADVANCED_GRAPH_NAMES){
+    const args=commandArguments(source,name);
+    if(!args)continue;
+    if(name==="domaincolor"){
+      if(args.length!==1)throw new Error("Use domaincolor(expression), with z = x + i*y.");
+      const values:Record<string,Complex>={z:{re:0,im:0}};
+      const evaluate=compileComplexExpression(args[0]!,variables,values);
+      return {kind:"plane",evaluate:(x,y)=>{values.z={re:x,im:y};return domainColor(evaluate(x,y));}};
+    }
+
+    if(name==="mandelbrot"||name==="julia"){
+      if(args.length!==(name==="julia"?3:1))throw new Error(name==="julia"?"Use julia(realC, imaginaryC, iterations).":"Use mandelbrot(iterations).");
+      const iterations=scalar(args.at(-1)!);
+      if(!Number.isInteger(iterations)||iterations<1||iterations>500)throw new Error("Fractal iterations must be an integer from 1 to 500.");
+      const c=name==="julia"?{re:scalar(args[0]!),im:scalar(args[1]!)}:undefined;
+      return {kind:"plane",evaluate:(x,y)=>fractalColor(x,y,iterations,c)};
+    }
+    if(name==="trajectory"){
+      if(args.length!==6)throw new Error("Use trajectory(dx, dy, x0, y0, startTime, endTime).");
+      const u=compileExpression(args[0]!,variables,true),v=compileExpression(args[1]!,variables,true);
+      const x0=scalar(args[2]!),y0=scalar(args[3]!),start=scalar(args[4]!),end=scalar(args[5]!);
+      const samples=solveTrajectory((x,y)=>[u(x,y).value.toNumber(),v(x,y).value.toNumber()],x0,y0,start,end);
+      return {kind:"parametric",start,end,evaluate:t=>[interpolateSolution(samples.x,t),interpolateSolution(samples.y,t)]};
+    }
+    if(name==="transform"){
+      if(args.length!==5)throw new Error("Use transform(a, b, c, d, pointOrPolygonOrCurve).");
+      const a=scalar(args[0]!),b=scalar(args[1]!),c=scalar(args[2]!),d=scalar(args[3]!);
+      const point=([x,y]:[number,number]):[number,number]=>{
+        const result:[number,number]=[a*x+b*y,c*x+d*y];
+        if(!result.every(Number.isFinite))throw new Error("Transformed point became nonfinite.");
+        return result;
+      };
+      const transform=(graph:GraphExpression):GraphExpression=>{
+        if(graph.kind==="point")return {...graph,xVariables:[],yVariables:[],evaluate:()=>point(graph.evaluate())};
+        if(graph.kind==="polygon")return {kind:"polygon",evaluate:()=>graph.evaluate().map(point)};
+        if(graph.kind==="parametric")return {...graph,evaluate:(t:number)=>point(graph.evaluate(t))};
+        if(graph.kind==="collection")return {kind:"collection",graphs:graph.graphs.map(transform)};
+        throw new Error("Transform supports points, polygons, and parametric curves (including ODE and trajectory curves).");
+      };
+      return transform(compileGraphExpression(args[4]!,variables));
+    }
+  }
+  return undefined;
+}
+
+function analysisScalar(source:string,variables:Record<string,number>):number{
+  if(graphRelation(source)||freeIdentifiers(source).some(n=>["x","y","t","z"].includes(n)))
+    throw new Error("Analysis parameters must be scalar expressions, not graph coordinates or equations.");
+  return analysisFinite(compileExpression(source,variables)(0).value.toNumber());
+}
+function analysisList(source:string,variables:Record<string,number>,lists:Record<string,string[]>):number[]{
+  const expansion=expandCollections(source,text=>analysisScalar(text,variables),lists);
+  if(!expansion.list)throw new Error("This argument requires a numeric list or table column.");
+  return expansion.items.map(text=>analysisScalar(text,variables));
+}
+function analysisFunction(source:string,variables:Record<string,number>):(x:number)=>number{
+  if(graphRelation(source))throw new Error("Use an expression in x, not an equation.");
+  const evaluate=compileExpression(source,variables);
+  return x=>analysisFinite(evaluate(x).value.toNumber());
+}
+function taylorEvaluator(source:string,center:number,order:number,variables:Record<string,number>):(x:number)=>number{
+  if(!Number.isInteger(order)||order<0||order>8)throw new Error("Taylor order must be an integer from 0 to 8.");
+  if(graphRelation(source))throw new Error("Taylor requires an expression in x, not an equation.");
+  let tree=normalizeSymbolic(parse(source,false,true,Object.keys(variables)));
+  let factorial=1;
+  const coefficients:number[]=[];
+  for(let i=0;i<=order;i++){
+    const text=symbolicSource(tree);
+    if(text.length>512)throw new Error("Taylor derivative exceeds the 512-character work limit; reduce the order.");
+    coefficients.push(analysisFinite(compileExpression(text,variables)(center).value.toNumber()/factorial));
+    if(i<order){tree=symbolicDerivative(tree,"x",getAngleMode()==="degrees");factorial*=i+1;}
+  }
+  return x=>{
+    let value=0;for(let i=coefficients.length-1;i>=0;i--)value=value*(x-center)+coefficients[i]!;
+    return analysisFinite(value);
+  };
+}
+function compileAnalysisGraph(source:string,variables:Record<string,number>,lists:Record<string,string[]>={}):GraphExpression|undefined{
+  const scalar=(s:string)=>analysisScalar(s,variables),list=(s:string)=>analysisList(s,variables,lists);
+  for(const name of ANALYSIS_GRAPH_NAMES){
+    const args=commandArguments(source,name);if(!args)continue;
+    const need=(count:number)=>{if(args.length!==count)throw new Error(`Incorrect arguments for ${name}; see Settings → Functions.`);};
+    if(name==="heatmap"||name==="contours"){
+      need(name==="heatmap"?3:4);
+      if(graphRelation(args[0]!))throw new Error("Use a real expression in x and y, not an equation.");
+      const evaluate=compileExpression(args[0]!,variables,true),lo=scalar(args[1]!),hi=scalar(args[2]!);
+      if(!(lo<hi))throw new Error("Color/contour range must be finite and increasing.");
+      const span=analysisFinite(hi-lo);
+      if(name==="heatmap")return {kind:"plane",evaluate:(x,y)=>{
+        const value=analysisFinite(evaluate(x,y).value.toNumber());
+        return [240*(1-Math.max(0,Math.min(1,(value-lo)/span))),0.85,0.95];
+      }};
+      const count=scalar(args[3]!);
+      if(!Number.isInteger(count)||count<2||count>20)throw new Error("Contour count must be an integer from 2 to 20.");
+      return {kind:"collection",graphs:Array.from({length:count},(_,i)=>({
+        kind:"implicit",evaluate:(x:number,y:number)=>analysisFinite(evaluate(x,y).value.toNumber()-(lo+span*i/(count-1))),
+      }))};
+    }
+    if(name==="fourier"||name==="fourierdata"){
+      need(name==="fourier"?4:3);
+      const series=name==="fourier"?fourierSeries(analysisFunction(args[0]!,variables),scalar(args[1]!),scalar(args[2]!),scalar(args[3]!)):
+        dataFourier(list(args[0]!),scalar(args[1]!),scalar(args[2]!));
+      return {kind:"explicit",evaluate:x=>evaluateFourier(series,x)};
+    }
+    if(name==="taylor"||name==="taylorerror"){
+      need(3);
+      const polynomial=taylorEvaluator(args[0]!,scalar(args[1]!),scalar(args[2]!),variables);
+      const original=analysisFunction(args[0]!,variables);
+      return {kind:"explicit",evaluate:x=>name==="taylor"?polynomial(x):Math.abs(original(x)-polynomial(x))};
+    }
+    if(name==="tangentline"||name==="normalline"){
+      need(2);const f=analysisFunction(args[0]!,variables),x0=scalar(args[1]!),y0=f(x0),slope=derivatives(f,x0).first;
+      if(name==="normalline"&&Math.abs(slope)<1e-12)return {kind:"sideways",evaluate:()=>x0};
+      const m=name==="tangentline"?slope:-1/slope;
+      return {kind:"explicit",evaluate:x=>y0+m*(x-x0)};
+    }
+    if(name==="areabetween"){
+      need(4);const f=analysisFunction(args[0]!,variables),g=analysisFunction(args[1]!,variables),start=scalar(args[2]!),end=scalar(args[3]!);
+      analysisInterval(start,end);
+      return {kind:"inequality",relation:"<=",evaluate:(x,y)=>Math.max(start-x,x-end,Math.min(f(x),g(x))-y,y-Math.max(f(x),g(x)))};
+    }
+    if(name==="errorbars"){
+      if(args.length!==3&&args.length!==4)throw new Error("Use errorbars(X,Y,Yerrors[,Xerrors]) with equal-length lists.");
+      const xs=list(args[0]!),ys=list(args[1]!),ey=list(args[2]!),ex=args[3]?list(args[3]):xs.map(()=>0);
+      if(!xs.length||xs.length>256||ys.length!==xs.length||ey.length!==xs.length||ex.length!==xs.length)
+        throw new Error("Error bars require equal-length lists of 1–256 observations.");
+      if([...ey,...ex].some(e=>e<0))throw new Error("Error-bar sizes must be nonnegative.");
+      const graphs:GraphExpression[]=[];
+      const line=(x1:number,y1:number,x2:number,y2:number)=>{
+        if(![x1,y1,x2,y2].every(Number.isFinite))throw new Error("Error-bar endpoint became nonfinite.");
+        graphs.push({kind:"parametric",start:0,end:1,evaluate:t=>[x1+(x2-x1)*t,y1+(y2-y1)*t]});
+      };
+      const span=Math.max(1,Math.max(...xs)-Math.min(...xs)),cap=span*0.005;
+      xs.forEach((x,i)=>{
+        const y=ys[i]!,e=ey[i]!,h=ex[i]!;
+        graphs.push({kind:"point",xVariables:[],yVariables:[],evaluate:()=>[x,y]});
+        line(x,y-e,x,y+e);line(x-cap,y-e,x+cap,y-e);line(x-cap,y+e,x+cap,y+e);
+        if(h){line(x-h,y,x+h,y);line(x-h,y-cap,x-h,y+cap);line(x+h,y-cap,x+h,y+cap);}
+      });
+      return {kind:"collection",graphs};
+    }
+    if(name==="confidenceband"||name==="predictionband"){
+      need(3);
+      const band=linearBand(list(args[0]!),list(args[1]!),scalar(args[2]!),name==="predictionband");
+      return {kind:"collection",graphs:[
+        {kind:"inequality",relation:"<=",evaluate:(x,y)=>{const {mean,width}=band(x);return Math.abs(y-mean)-width;}},
+        {kind:"explicit",evaluate:x=>{const {mean,width}=band(x);return mean-width;}},
+        {kind:"explicit",evaluate:x=>{const {mean,width}=band(x);return mean+width;}},
+        {kind:"explicit",evaluate:x=>band(x).mean},
+      ]};
+    }
+  }
+  return undefined;
+}
+
+export function resultCommand(source:string,variables:Record<string,number>={},lists:Record<string,string[]>={}):string|undefined {
+  for(const name of ANALYSIS_RESULT_NAMES){
+    const args=commandArguments(source,name);if(!args)continue;
+    const scalar=(s:string)=>analysisScalar(s,variables),format=(n:number)=>Number(n.toPrecision(12)).toString();
+    const need=(n:number)=>{if(args.length!==n)throw new Error(`Incorrect arguments for ${name}; see Settings → Functions.`);};
+    if(name==="unitcheck"){need(1);return unitResult(evaluateUnits(parse(args[0]!,false,false,[...Object.keys(UNITS),...Object.keys(variables)]),variables));}
+    if(name==="convert"){
+      need(3);
+      const from=evaluateUnits(parse(args[1]!,false,false,Object.keys(UNITS))),to=evaluateUnits(parse(args[2]!,false,false,Object.keys(UNITS)));
+      return `${format(convertUnits(scalar(args[0]!),from,to))} ${args[2]}`;
+    }
+    if(name==="spectrum"){
+      need(2);const values=analysisList(args[0]!,variables,lists);
+      const series=dataFourier(values,scalar(args[1]!),Math.min(32,Math.floor((values.length-1)/2)));
+      return `DC ${format(series.a[0]!/2)}; ${series.a.slice(1).map((a,i)=>`${format((i+1)/series.period)} cycles/unit: amplitude ${format(Math.hypot(a,series.b[i+1]!))}, phase ${format(Math.atan2(series.b[i+1]!,a))} rad`).join("; ")}`;
+    }
+    need(name==="curvature"?2:name==="area"?4:3);
+    const f=analysisFunction(args[0]!,variables);
+    if(name==="curvature"){const d=derivatives(f,scalar(args[1]!));return format(analysisFinite(Math.abs(d.second)/(1+d.first*d.first)**1.5));}
+    if(name==="arclength"){return format(integrate(x=>Math.hypot(1,derivatives(f,x).first),scalar(args[1]!),scalar(args[2]!)));}
+    if(name==="area"){const g=analysisFunction(args[1]!,variables);return format(integrate(x=>Math.abs(f(x)-g(x)),scalar(args[2]!),scalar(args[3]!)));}
+    if(name==="roots"){
+      need(3);const result=findRoots(f,scalar(args[1]!),scalar(args[2]!));
+      return `${result.roots.length?result.roots.map(r=>`x=${format(r.x)} (|f|=${format(r.residual)})`).join("; "):"No verified roots found"} · bounded numerical search, not exhaustive${result.gaps?` · ${result.gaps} undefined samples: ${result.firstError}`:""}`;
+    }
+  }
+  for(const name of RESULT_COMMAND_NAMES){
+    const args=commandArguments(source,name);
+    if(!args)continue;
+    if(["simplify","differentiate","factor"].includes(name)){
+      if(args.length<1||args.length>(name==="simplify"?1:2))throw new Error(`Use ${name}(expression${name==="simplify"?"":", variable"}).`);
+      if(graphRelation(args[0]!))throw new Error("Symbolic commands require an expression, not an equation or inequality.");
+      const variable=args[1]??"x";
+      if(!/^[a-z](?:_[a-z0-9]+)?$/.test(variable)||["e","i"].includes(variable))throw new Error("Use one letter or subscripted variable.");
+      const tree=normalizeSymbolic(parse(args[0]!,true,true,freeIdentifiers(args[0]!)));
+      const result=name==="factor"?factorPolynomial(tree,variable):
+        symbolicSource(name==="simplify"?simplifyNode(tree):symbolicDerivative(tree,variable,getAngleMode()==="degrees"));
+      if(result.length>512)throw new Error("Symbolic result exceeds the 512-character expression limit.");
+      return result;
+    }
+    const count=name==="matmul"?8:4;
+    if(args.length!==count)throw new Error(`Use ${name}(${count===8?"a,b,c,d,e,f,g,h":"a,b,c,d"}) for row-major 2x2 matrices.`);
+    const values=args.map(arg=>{
+      if(freeIdentifiers(arg).some(n=>["x","y","t"].includes(n)))throw new Error("Matrix entries must be scalar expressions.");
+      const value=compileExpression(arg,variables)(0).value.toNumber();
+      if(!Number.isFinite(value))throw new Error("Matrix entries must be finite.");
+      return value;
+    });
+    const a:Matrix2=[values[0]!,values[1]!,values[2]!,values[3]!];
+    if(name==="det"){
+      const det=a[0]*a[3]-a[1]*a[2];
+      if(!Number.isFinite(det))throw new Error("Matrix determinant is nonfinite.");
+      return String(det);
+    }
+    const result=name==="inverse"?inverseMatrix(a):name==="matmul"?multiplyMatrices(a,[values[4]!,values[5]!,values[6]!,values[7]!]):a;
+    if(!result.every(Number.isFinite))throw new Error("Matrix result is nonfinite.");
+    return `[[${result[0]}, ${result[1]}], [${result[2]}, ${result[3]}]]`;
+  }
+  if(new RegExp(`^\\s*(?:${[...RESULT_COMMAND_NAMES,...ANALYSIS_RESULT_NAMES].join("|")})\\s*\\(`,"i").test(source))
+    throw new Error("Incomplete result command; check the closing parenthesis and arguments.");
+  return undefined;
+}
+
+function compileDifferentialGraph(source:string, variables:Record<string,number>):GraphExpression|undefined {
+  const match=/^(vectorfield|slopefield|ode)\s*\(([\s\S]*)\)$/i.exec(source.trim());
+  if (!match) return undefined;
+  const name=match[1]!.toLowerCase(),args=splitCallArguments(match[2]!);
+  const count=name==="vectorfield"?2:name==="slopefield"?1:5;
+  if (args.length!==count || args.some(arg=>!arg.trim()))
+    throw new Error(name==="ode"?"Use ode(slope, x0, y0, start, end).":`Use ${name}(${name==="vectorfield"?"dx, dy":"slope"}).`);
+  const compile=(text:string)=>{
+    if (graphRelation(text)) throw new Error("Field components and ODE arguments must be expressions, not equations.");
+    return compileExpression(text,variables,true);
+  };
+  const first=compile(args[0]!);
+  if (name!=="ode") {
+    const second=name==="vectorfield"?compile(args[1]!):undefined;
+    return {kind:"vectorfield",arrows:name==="vectorfield",evaluate:(x,y)=>{
+      const a=first(x,y).value.toNumber(),b=second?.(x,y).value.toNumber();
+      const result:[number,number]=second?[a,b!]:[1,a];
+      if (!result.every(Number.isFinite)) throw new Error("Field components must be finite.");
+      return result;
+    }};
+  }
+  const values=args.slice(1).map(text=>{
+    if (freeIdentifiers(text).some(name=>["x","y","t"].includes(name)))
+      throw new Error("ODE initial point and interval must be scalar values, not graph coordinates.");
+    return compile(text)(0,0).value.toNumber();
+  });
+  const x0=values[0]!,y0=values[1]!,start=values[2]!,end=values[3]!;
+  const samples=solveDifferentialEquation((x,y)=>first(x,y).value.toNumber(),x0,y0,start,end);
+  return {kind:"parametric",start,end,evaluate:x=>[x,interpolateSolution(samples,x)]};
+}
+
 export function compileGraphExpression(
   source: string,
   variables: Record<string, number> = {},
@@ -2977,6 +3258,12 @@ export function compileGraphExpression(
   GraphExpression {
   if (expressionLength(source) > MAX_EXPRESSION_LENGTH || source.length > MAX_RECURSIVE_PAYLOAD_LENGTH * 8) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
   const trimmed = source.trim();
+  const analysis=compileAnalysisGraph(trimmed,variables);
+  if(analysis)return analysis;
+  const advanced=compileAdvancedGraph(trimmed,variables);
+  if(advanced)return advanced;
+  const differential=compileDifferentialGraph(trimmed,variables);
+  if (differential) return differential;
   const collection = compileCollectionGraph(trimmed, variables, {}, false, statisticsMode);
   if (collection) return collection;
   source = rewriteDistributions(source, (text) => compileExpression(text, variables)(0).value.toNumber());
@@ -3045,6 +3332,8 @@ export function compileCollectionGraph(
   statisticsMode: StatisticsMode = "population",
 ): GraphExpression | undefined {
   if (expressionLength(source) > MAX_EXPRESSION_LENGTH || source.length > MAX_RECURSIVE_PAYLOAD_LENGTH * 8) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
+  const analysis=compileAnalysisGraph(source,variables,lists);
+  if(analysis)return analysis;
   source = rewriteRandom(source, (text) => compileExpression(text, variables)(0).value.toNumber(), lists, statisticsMode);
   const inference = inferenceCall(source);
   if (inference && !inference.property) {
@@ -3167,6 +3456,12 @@ export function compileFastGraphExpression(
 ): GraphExpression {
   if (expressionLength(source) > MAX_EXPRESSION_LENGTH || source.length > MAX_RECURSIVE_PAYLOAD_LENGTH * 8) throw new Error(`Expressions must be ${MAX_EXPRESSION_LENGTH} characters or fewer`);
   const trimmed = source.trim();
+  const analysis=compileAnalysisGraph(trimmed,variables);
+  if(analysis)return analysis;
+  const advanced=compileAdvancedGraph(trimmed,variables);
+  if(advanced)return advanced;
+  const differential=compileDifferentialGraph(trimmed,variables);
+  if (differential) return differential;
   const collection = compileCollectionGraph(trimmed, variables, {}, true, statisticsMode);
   if (collection) return collection;
   source = rewriteDistributions(source, (text) => compileExpression(text, variables)(0).value.toNumber());
