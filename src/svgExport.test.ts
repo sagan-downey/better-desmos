@@ -28,6 +28,25 @@ describe("editable SVG export",()=>{
     expect(doc).toContain('xmlns="http://www.w3.org/2000/svg"');
     expect(doc).toContain('clip-path="url(#viewport)"');
   });
+  it("exports strict boundaries dotted and retains the inclusive line style",()=>{
+    for(const [source,style,expected] of [
+      ["y<x","solid","2 6"],["y>x","dashed","2 6"],
+      ["y<=x","solid",""],["y>=x","dashed","6 4"],
+    ] as const){
+      const markup=graphSVG(compileGraphExpression(source),view,{color:"#ff0000",lineStyle:style}).markup;
+      expect(markup).toContain(`stroke-dasharray="${expected}"`);
+      expect(markup).toContain('fill-opacity="0.2"');
+    }
+  });
+  it("preserves dotted boundaries with spatial colors in SVG",()=>{
+    const markup=graphSVG(compileGraphExpression("y<x"),view,{color:"#ff0000",colorAt:()=>"#00ff00"}).markup;
+    const paths=[...markup.matchAll(/<path d="M([^ ]+) ([^L]+)L([^ ]+) ([^"]+)"[^>]*\/>/g)];
+    expect(paths.length).toBeGreaterThan(2);
+    for(const path of paths){
+      expect(Math.hypot(Number(path[3])-Number(path[1]),Number(path[4])-Number(path[2]))).toBeLessThanOrEqual(2.000001);
+      expect(path[0]).toContain('stroke="#00ff00"');
+    }
+  });
   for(const source of ["heatmap(x+y,0,10)","contours(x^2+y^2,1,4,3)","fourier(sin(x),0,2*pi,2)",
     "taylor(x^2,0,2)","areabetween(x,x^2,0,1)","errorbars([1,2],[2,3],[0.2,0.3])",
     "confidenceband([1,2,3],[1,2,4],0.95)","predictionband([1,2,3],[1,2,4],0.95)"])

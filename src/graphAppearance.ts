@@ -6,6 +6,44 @@ export function lineDash(style: LineStyle = "solid", width = 2): number[] {
     style === "dotted" ? [width, 3 * width] : [];
 }
 
+export function inequalityLineStyle(relation: "<" | "<=" | ">" | ">=", style: LineStyle = "solid"): LineStyle {
+  return relation === "<" || relation === ">" ? "dotted" : style;
+}
+
+export function connectContourSegments(segments: number[]): number[] {
+  type Node = { x:number; y:number; edges:number[] };
+  const nodes = new Map<string, Node>();
+  const edges: Array<[Node, Node]> = [];
+  const node = (x:number,y:number):Node => {
+    const key = `${Math.round(x * 1000)},${Math.round(y * 1000)}`;
+    let result = nodes.get(key);
+    if (!result) { result = { x, y, edges: [] }; nodes.set(key, result); }
+    return result;
+  };
+  for (let i=0;i+3<segments.length;i+=4) {
+    const a=node(segments[i]!,segments[i+1]!),b=node(segments[i+2]!,segments[i+3]!);
+    if (a===b) continue;
+    const index=edges.length;
+    edges.push([a,b]);a.edges.push(index);b.edges.push(index);
+  }
+  const used=new Uint8Array(edges.length),result:number[]=[];
+  const starts=[...nodes.values()].sort((a,b)=>a.edges.length-b.edges.length);
+  for(const start of starts) {
+    while(start.edges.some(index=>!used[index])) {
+      let current=start;
+      for (;;) {
+        const index=current.edges.find(index=>!used[index]);
+        if(index===undefined)break;
+        used[index]=1;
+        const [a,b]=edges[index]!,next=current===a?b:a;
+        result.push(current.x,current.y,next.x,next.y);
+        current=next;
+      }
+    }
+  }
+  return result;
+}
+
 export function dashedSegments(segments: number[], pattern: number[]): number[] {
   if (!pattern.length) return segments;
   const output: number[] = [];

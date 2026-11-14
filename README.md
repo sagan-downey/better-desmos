@@ -4,7 +4,9 @@ A browser-based graphing calculator built with TypeScript and Vite. Its small st
 
 ## Versioning
 
-The current app version is **4.3**. Keep the package version in `package.json` in sync as `4.3.0`.
+The current app version is **4.4**. Keep the package version in `package.json` in sync as `4.4.0`.
+
+Version 4.4 adds expression-based geometry with draggable named points, segments, circles and angle measurements; transformed complex grids; and interactive Riemann rectangles. Strict inequalities now have dotted boundaries, and the optional math keypad includes comparison operators.
 
 Version 4.3 adds differential equations and vector fields, phase-plane trajectories, complex domain coloring and fractals, 2x2 matrices and bounded symbolic tools, CSV import/export and editable SVG export, real heatmaps/contours, Fourier and Taylor approximations, geometry measurements, uncertainty plots, interval root searching, explicit SI unit commands, dependency inspection, and an append-only example gallery. Numerical limits and assumptions are documented below.
 
@@ -79,7 +81,15 @@ Supported units: `m`, `cm`, `mm`, `km`, `kg`, `g`, `s`, `ms`, `min`, `h`, `A`, `
 
 The wrench menu includes **Dependencies**, a non-mutating static snapshot of direct/indirect references for each expression/definition and table-column formula. It follows slider/scalar, user-function, named-object, and table-column relationships, lists unresolved names, and shows recursive/circular paths. Function parameters and graph coordinates are local, not sliders. Cycles may be intentional bounded recursive functions rather than invalid scalar definitions. The inspector is not runtime tracing; incomplete input, duplicate definitions, labels, appearance formulas, and actions require the existing expression diagnostics. Inspection has depth/work limits with explicit errors.
 
-**Examples** in the wrench menu offers editable heatmap, Fourier, Taylor, geometry, pendulum, predator–prey, uncertainty, complex-coloring, fractal, and unit/root demonstrations. **Append example** only adds expression rows: it never replaces existing expressions/tables or the viewport, introduces named definitions, or starts audio/playback. Appended rows use the existing Undo/Redo and persistence behavior. Angle-sensitive examples follow the current Angle mode; the pendulum description recommends radians.
+**Examples** in the wrench menu offers editable heatmap, Fourier, Taylor, geometry, Riemann rectangles, complex-grid, pendulum, predator–prey, uncertainty, complex-coloring, fractal, and unit/root demonstrations. **Append example** only adds expression rows: it never replaces existing expressions/tables or the viewport, introduces named definitions, or starts audio/playback. Appended rows use the existing Undo/Redo and persistence behavior. Angle-sensitive examples follow the current Angle mode; the pendulum description recommends radians.
+
+## Point constructions, complex grids, and Riemann sums
+
+Create named points in expression rows, such as `a=(0,0)`, `b=(3,0)`, and `c=(0,2)`. Drag a named point with literal coordinates to move it; its definition and connected expressions update. `segment(a,b)` draws a segment, `circle(a,b)` draws a circle centered at `a` through `b`, `distance(a,b)` gives the existing point distance, and `pointangle(a,b,c)` reports the unsigned angle at `b` in the current angle mode. Literal points can also be supplied directly, for example `segment((0,0),(2,1))`. A circle's points must be distinct; an angle is undefined if either arm has zero length. These are expression-based constructions, not a click-to-create geometry toolbar. Use named point rows for draggable handles; literal points inside a construction are edited as text.
+
+`complexgrid(z^2,2,1)` graphs the **image** under `z^2` of horizontal and vertical lines in the input square `-2 <= Re(z), Im(z) <= 2`, spaced one unit apart. Add `complexgrid(z,2,1)` as another expression to compare the input grid and its image in different colors. Extent must be positive and at most 10000; spacing must be positive and yield at most ten grid intervals per side. `z` is local to the command, and sliders and supported user functions can be used. The output is shown in the normal graph viewport, which may need zooming. Curves are numerically sampled; poles, discontinuities, and very rapid changes can produce gaps or missed features. Complex trigonometric functions follow the current Angle mode.
+
+`riemann(x^2,0,3,n,midpoint)` draws signed rectangles and reports their numerical sum. Change slider `n` to change the number of rectangles; use `left`, `right`, or `midpoint` as the final argument. The count must be an integer from 1 to 100, and finite increasing bounds may span at most 10000. Negative function values produce rectangles below the axis and negative contributions. This is a finite sum, not a certified integral or error estimate; undefined sample values fail explicitly. Plot `x^2` separately to see the curve. Rectangles and transformed grid lines use normal expression visibility, colors, persistence, and graph exports; spatially colored polygon fills still require PNG rather than SVG.
 
 ## 2x2 matrices and exact-form tools
 
@@ -132,6 +142,8 @@ npm run build
 ## Expressions
 
 Each row can plot `y` as a function of `x`, an implicit equation whose contour is graphed where both sides are equal, or a shaded inequality. Equations that can be solved linearly for `y` are graphed as explicit functions even if `y` is on the right or appears with an offset, such as `(x - 1)(x + 1) = y` or `y + 2 = (x - 1)(x + 1)`. Equations nonlinear in `y`, such as `x^2 + y^2 = 4`, use the implicit contour renderer. The optional `y =` prefix is accepted for explicit functions. The expression text is kept as entered; compiled parser trees and graph-sample caches are internal and are never shown as a rewritten or simplified expression. Supported syntax:
+
+Use `<`, `<=`, `>`, or `>=` (also `≤` and `≥`) for inequalities. Strict `<` and `>` boundaries are dotted because the boundary is excluded; inclusive boundaries use the expression's chosen line style. The optional math keypad includes all four ASCII comparison operators. PNG and SVG exports follow the same boundary styles.
 
 - Numbers, parentheses, `x`, `pi`, and `e`
 - `+`, `-`, `*`, `/`, and `^`; implicit multiplication is supported (for example, `2x`, `35.6x`, or `2(x + 1)`)

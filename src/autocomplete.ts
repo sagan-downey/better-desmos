@@ -9,6 +9,11 @@ import { COMPLEX_FUNCTIONS } from "./complex";
 const descriptions = new Map(FUNCTION_REFERENCE.flatMap((category) => category.entries.flatMap((entry) =>
   [entry.name, ...(entry.aliases ?? [])].map((name) => [name, entry] as const))));
 const graphSignatures = new Map([
+  ["segment","segment(pointA, pointB)"],
+  ["circle","circle(center, edgePoint)"],
+  ["pointangle","pointangle(pointA, vertex, pointB)"],
+  ["complexgrid","complexgrid(expressionInZ, extent, spacing)"],
+  ["riemann","riemann(expression, start, end, count, method)"],
   ["heatmap","heatmap(expression, low, high)"],
   ["contours","contours(expression, low, high, count)"],
   ["fourier","fourier(expression, start, end, harmonics)"],

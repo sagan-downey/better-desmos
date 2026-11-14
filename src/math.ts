@@ -359,7 +359,7 @@ export type GraphExpression =
     }
   | { kind: "parametric"; evaluate: (parameter: number) => [number, number]; start: number; end: number; region?: (parameter: number) => string }
   | { kind: "list"; evaluate: () => Array<number | undefined> }
-  | { kind: "collection"; graphs: GraphExpression[] };
+  | { kind: "collection"; graphs: GraphExpression[]; summary?: string };
 
 export interface PolynomialRegression {
   center: Decimal;
@@ -417,7 +417,8 @@ export function freeIdentifiers(source: string): string[] {
     const body=normalized.slice(normalized.indexOf("(")+1,normalized.lastIndexOf(")"));
     const args=splitCallArguments(body);
     if(commandName==="convert")return [...new Set(args.flatMap((arg,index)=>freeIdentifiers(arg).filter(n=>index===0||!Object.hasOwn(UNITS,n))))];
-    const bound=commandName==="domaincolor"?["z","i"]:commandName==="unitcheck"?Object.keys(UNITS):
+    if(commandName==="riemann")return [...new Set(args.slice(0,4).flatMap(freeIdentifiers))];
+    const bound=["domaincolor","complexgrid"].includes(commandName)?["z","i"]:commandName==="unitcheck"?Object.keys(UNITS):
       ["factor","differentiate"].includes(commandName)?[args[1]?.trim()??"x"]:[];
     return [...new Set(args.flatMap(freeIdentifiers).filter(n=>!bound.includes(n)))];
   }
@@ -3004,6 +3005,52 @@ function compileAdvancedGraph(source:string,variables:Record<string,number>):Gra
   for(const name of ADVANCED_GRAPH_NAMES){
     const args=commandArguments(source,name);
     if(!args)continue;
+    if(name==="segment"||name==="circle"){
+      if(args.length!==2)throw new Error(`Use ${name}(point,point).`);
+      const point=(arg:string):[number,number]=>{
+        const coordinates=pointSources(arg);
+        if(!coordinates)throw new Error(`${name} requires two points, such as (0,0).`);
+        return [scalar(coordinates[0]),scalar(coordinates[1])];
+      };
+      const a=point(args[0]!),b=point(args[1]!);
+      if(name==="segment")return {kind:"parametric",start:0,end:1,evaluate:t=>[a[0]+t*(b[0]-a[0]),a[1]+t*(b[1]-a[1])]};
+      const radius=Math.hypot(b[0]-a[0],b[1]-a[1]);
+      if(!Number.isFinite(radius)||radius===0)throw new Error("Circle center and edge point must be distinct and finite.");
+      return {kind:"parametric",start:0,end:2*Math.PI,evaluate:t=>[a[0]+radius*Math.cos(t),a[1]+radius*Math.sin(t)]};
+    }
+    if(name==="complexgrid"){
+      if(args.length!==3)throw new Error("Use complexgrid(expressionInZ, extent, spacing).");
+      const extent=scalar(args[1]!),step=scalar(args[2]!);
+      if(extent<=0||extent>10000||step<=0||Math.floor(extent/step)>10)
+        throw new Error("Complex grid needs positive extent at most 10000 and at most 10 intervals per side.");
+      const scope:Record<string,Complex>={z:complex(0)};
+      const evaluate=compileComplexExpression(args[0]!,variables,scope),count=Math.floor(extent/step);
+      const graphs:GraphExpression[]=[];
+      for(let i=-count;i<=count;i++)for(const horizontal of [false,true]){
+        const fixed=i*step;
+        graphs.push({kind:"parametric",start:-extent,end:extent,evaluate:t=>{
+          scope.z=horizontal?complex(t,fixed):complex(fixed,t);
+          const value=evaluate(0,0);return[value.re,value.im];
+        }});
+      }
+      return {kind:"collection",graphs};
+    }
+    if(name==="riemann"){
+      if(args.length!==5)throw new Error("Use riemann(expression,start,end,count,method), where method is left, right, or midpoint.");
+      const f=analysisFunction(args[0]!,variables),start=scalar(args[1]!),end=scalar(args[2]!),count=scalar(args[3]!);
+      analysisInterval(start,end);
+      if(!Number.isInteger(count)||count<1||count>100)throw new Error("Riemann count must be an integer from 1 to 100.");
+      const method=args[4]!.trim().toLowerCase();
+      if(!["left","right","midpoint"].includes(method))throw new Error("Riemann method must be left, right, or midpoint.");
+      const dx=(end-start)/count,graphs:GraphExpression[]=[],offset=method==="left"?0:method==="right"?1:0.5;
+      let sum=0;
+      for(let i=0;i<count;i++){
+        const left=start+i*dx,right=start+(i+1)*dx,height=f(left+offset*dx);
+        sum=analysisFinite(sum+height*dx);
+        graphs.push({kind:"polygon",evaluate:()=>[[left,0],[right,0],[right,height],[left,height]]});
+      }
+      return {kind:"collection",graphs,summary:`${method} Riemann sum (approximate): ${Number(sum.toPrecision(12))}`};
+    }
     if(name==="domaincolor"){
       if(args.length!==1)throw new Error("Use domaincolor(expression), with z = x + i*y.");
       const values:Record<string,Complex>={z:{re:0,im:0}};
@@ -3185,6 +3232,19 @@ export function resultCommand(source:string,variables:Record<string,number>={},l
   for(const name of RESULT_COMMAND_NAMES){
     const args=commandArguments(source,name);
     if(!args)continue;
+    if(name==="pointangle"){
+      if(args.length!==3)throw new Error("Use pointangle(pointA, vertex, pointB).");
+      const points=args.map(arg=>{
+        const coordinates=pointSources(arg);
+        if(!coordinates)throw new Error("pointangle needs three points.");
+        return coordinates.map(text=>analysisScalar(text,variables));
+      });
+      const [a,b,c]=points,ux=a![0]!-b![0]!,uy=a![1]!-b![1]!,vx=c![0]!-b![0]!,vy=c![1]!-b![1]!;
+      const length=Math.hypot(ux,uy)*Math.hypot(vx,vy);
+      if(!Number.isFinite(length)||length===0)throw new Error("Angle requires distinct points and finite coordinates.");
+      const value=Math.atan2(Math.abs(ux*vy-uy*vx),ux*vx+uy*vy)*(getAngleMode()==="degrees"?180/Math.PI:1);
+      return `${Number(analysisFinite(value).toPrecision(12))} ${getAngleMode()==="degrees"?"degrees":"radians"}`;
+    }
     if(["simplify","differentiate","factor"].includes(name)){
       if(args.length<1||args.length>(name==="simplify"?1:2))throw new Error(`Use ${name}(expression${name==="simplify"?"":", variable"}).`);
       if(graphRelation(args[0]!))throw new Error("Symbolic commands require an expression, not an equation or inequality.");

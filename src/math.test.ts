@@ -465,6 +465,23 @@ describe("compileExpression", () => {
     expect(factorial.kind === "explicit" && factorial.evaluate(0)).toBe(120);
   });
 
+  it("compiles strict and inclusive ASCII and Unicode inequalities in both engines",()=>{
+    for(const compile of [compileGraphExpression,compileFastGraphExpression]){
+      for(const [operator,relation] of [["<","<"],["<=","<="],["≤","<="],[">",">"],[">=",">="],["≥",">="]] as const){
+        const graph=compile(`y${operator}x^2`);
+        if(graph.kind!=="inequality")throw new Error("Expected inequality");
+        expect(graph.relation).toBe(relation);
+        const at=(x:number,y:number)=>{const v=graph.evaluate(x,y);return typeof v==="number"?v:v.toNumber();};
+        expect(at(1,1)).toBe(0);
+        expect(at(1,2)).toBeGreaterThan(0);
+        expect(at(1,0)).toBeLessThan(0);
+        const restricted=compile(`y${operator}x{0<=x<=2}`);
+        if(restricted.kind!=="inequality")throw new Error("Expected restricted inequality");
+        expect(restricted.relation).toBe(relation);
+      }
+    }
+  });
+
   it("provides explicitly numerical derivative and integral graph helpers", () => {
     const derivative = compileGraphExpression("derivative(x^2)");
     expect(derivative.kind).toBe("explicit");

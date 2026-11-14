@@ -21,7 +21,8 @@ describe("function autocomplete", () => {
     expect(functionCompletions("diff",4)?.names).toContain("differentiate");
     expect(functionCompletions("traj",4)?.names).toContain("trajectory");
     for(const name of ["heatmap","contours","fourier","fourierdata","spectrum","taylor","taylorerror","tangentline","normalline",
-      "arclength","curvature","area","areabetween","roots","errorbars","confidenceband","predictionband","unitcheck","convert"])
+      "arclength","curvature","area","areabetween","roots","errorbars","confidenceband","predictionband","unitcheck","convert",
+      "segment","circle","pointangle","complexgrid","riemann"])
       expect(functionCompletions(name.slice(0,3),3)?.names).toContain(name);
   });
 

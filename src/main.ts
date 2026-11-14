@@ -52,7 +52,7 @@ import { INFERENCE_NAMES, inferenceCall, inferenceDefinition, expandInferenceDef
 import { RANDOM_NAMES, getRandomSeed, setRandomSeed } from "./random";
 import { rewriteRandom } from "./randomSyntax";
 import { actionDefinition, actionUpdateSource, evaluateActions, expandActions, type ActionUpdate } from "./actions";
-import { dashedSegments, drawStyledPoint, lineDash, type LineStyle, type PointStyle } from "./graphAppearance";
+import { connectContourSegments, dashedSegments, drawStyledPoint, inequalityLineStyle, lineDash, type LineStyle, type PointStyle } from "./graphAppearance";
 import { axisStep, fitViewportBounds, projectCoordinate, unprojectCoordinate, logarithmicTicks, type AxisScale } from "./viewport";
 import { compileComplexExpression,complexExpressionIsReal } from "./math";
 import { COMPLEX_FUNCTIONS, formatComplex, type Complex } from "./complex";
@@ -1098,7 +1098,7 @@ app.innerHTML = `
   <main class="workspace">
     <aside class="sidebar">
       <header class="sidebar-brand">
-        <a class="brand" href="#" aria-label="Better Desmos 4.3 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">4.3</span></a>
+        <a class="brand" href="#" aria-label="Better Desmos 4.4 home"><span class="brand-mark">∿</span> better<span>desmos</span><span class="version-label">4.4</span></a>
       </header>
       <div class="panel-heading">
         <div class="project-controls" aria-label="Project actions">
@@ -1827,6 +1827,7 @@ function drawImplicit(
   lineWidth = 2,
   opacity = 1,
   regionAt?: (x: number, y?: number) => string,
+  dotted = false,
 ): CurveGeometry {
   const geometry: CurveGeometry = { id, color, segments: [], colorAt };
   const addSegment = (x1: number, y1: number, x2: number, y2: number) => {
@@ -1986,7 +1987,23 @@ function drawImplicit(
       }
     }
   }
-  if (colorAt) {
+  if (dotted) {
+    const visible = dashedSegments(connectContourSegments(geometry.segments),lineDash("dotted",lineWidth));
+    context.save();
+    context.setLineDash([]);
+    if (colorAt) {
+      strokeColoredSegments({...geometry,segments:visible},colorAt,width,height,lineWidth,opacity);
+    } else {
+      context.beginPath();
+      for(let index=0;index<visible.length;index+=4){
+        context.moveTo(visible[index]!,visible[index+1]!);
+        context.lineTo(visible[index+2]!,visible[index+3]!);
+      }
+      context.globalAlpha=opacity;context.strokeStyle=color;context.lineWidth=lineWidth;
+      context.stroke();
+    }
+    context.restore();
+  } else if (colorAt) {
     strokeColoredSegments(geometry, colorAt, width, height, lineWidth, opacity);
   } else {
     context.save();
@@ -2867,6 +2884,7 @@ function drawParametricCurve(
   lineWidth = 2,
   opacity = 1,
   regionAt?: (parameter: number) => string,
+  onSampleError?: (reason: unknown) => void,
 ): ExplicitCurveData {
   const samples: GraphSample[] = [];
   const geometry: ExplicitCurveData = { id, color, samples, segments: [], colorAt };
@@ -2904,7 +2922,8 @@ function drawParametricCurve(
       const sample = { x, y, screenX, screenY, connected, region };
       samples.push(sample);
       previous = sample;
-    } catch {
+    } catch (reason) {
+      onSampleError?.(reason);
       previous = undefined;
     }
   }
@@ -2957,7 +2976,8 @@ function drawInequality(
     }
   }
   context.restore();
-  return drawImplicit(evaluate, width, height, id, color, colorAt, lineWidth, opacity, regionAt);
+  return drawImplicit(evaluate, width, height, id, color, colorAt, lineWidth, opacity, regionAt,
+    inequalityLineStyle(relation) === "dotted");
 }
 
 function drawExpressionLabel(expression: Expression, width: number, height: number,svgLabels?:string[]): void {
@@ -3248,11 +3268,14 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
           );
           const xVariables=graph.xVariables.filter((name) => !fixedVariables.has(name));
           const yVariables=graph.yVariables.filter((name) => !fixedVariables.has(name));
+          const definition=getVariableDefinition(expression);
+          const directPoint=pointSources(expression.text)?expression.text:
+            definition&&pointSources(definition.source)?definition.source:undefined;
           nextDraggableGraphPoints.push({
             expressionId: expression.id,
             draggable: expression.draggable!==false&&
               !xVariables.some((name) => yVariables.includes(name)) &&
-              (xVariables.length>0||yVariables.length>0||Boolean(pointSources(expression.text)&&!graph.xVariables.length&&!graph.yVariables.length)),
+              (xVariables.length>0||yVariables.length>0||Boolean(directPoint&&!graph.xVariables.length&&!graph.yVariables.length)),
             xVariables,
             yVariables,
             x,
@@ -3261,7 +3284,7 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
             screenY,
             color: pointColor,
             opacity,
-            directSource:pointSources(expression.text)&&!graph.xVariables.length&&!graph.yVariables.length?expression.text:undefined,
+            directSource:directPoint&&!graph.xVariables.length&&!graph.yVariables.length?directPoint:undefined,
           });
           addPointCandidate(
             candidates,x,y,xVariables.length || yVariables.length ? "draggable point" : "point",[graphId],pointColor,width,height,
@@ -3314,7 +3337,8 @@ function renderGraph(target: HTMLCanvasElement, width: number, height: number, d
         const curve=drawParametricCurve(
           graphId,expression.color,graph.evaluate,graph.start,graph.end,width,height,
           colorAt,
-          lineWidth,opacity,graph.region,
+          lineWidth,opacity,graph.region,/^\s*complexgrid\s*\(/i.test(expression.text)?
+            reason=>{expression.evaluationError??=`Complex grid has undefined samples: ${reason instanceof Error?reason.message:"Could not evaluate sample."}`;}:undefined,
         );
         explicitCurves.push(curve);
         continue;
@@ -3624,7 +3648,7 @@ function updateScalarResult(expression: Expression): boolean {
         expression.commandResult={key,value:result};
       }
       expression.evaluationError=undefined;
-      if(resultElement){resultElement.textContent=`${/^(?:simplify|differentiate|factor)\s*\(/i.test(source)?"Exact form":/^(?:unitcheck|convert)\s*\(/i.test(source)?"Units (numerical)":ANALYSIS_RESULT_NAMES.some(name=>new RegExp(`^${name}\\s*\\(`,"i").test(source))?"Numerical analysis (approximate)":"Numerical matrix result"}: ${result}`;resultElement.hidden=false;}
+      if(resultElement){resultElement.textContent=`${/^(?:simplify|differentiate|factor)\s*\(/i.test(source)?"Exact form":/^(?:unitcheck|convert)\s*\(/i.test(source)?"Units (numerical)":/^(?:pointangle)\s*\(/i.test(source)?"Angle (approximate)":ANALYSIS_RESULT_NAMES.some(name=>new RegExp(`^${name}\\s*\\(`,"i").test(source))?"Numerical analysis (approximate)":"Numerical matrix result"}: ${result}`;resultElement.hidden=false;}
     }catch(reason){
       expression.evaluationError=reason instanceof Error?reason.message:"Could not evaluate result command.";
       if(resultElement)resultElement.hidden=true;
@@ -3635,10 +3659,13 @@ function updateScalarResult(expression: Expression): boolean {
     const graph=getCompiled(expression);
     if(resultElement){
       resultElement.hidden=!graph;
-      resultElement.textContent=/^(?:ode|trajectory)\s*\(/i.test(source)?"Numerical solution (approximate)":
+      resultElement.textContent=graph?.kind==="collection"&&graph.summary?graph.summary:
+        /^(?:ode|trajectory)\s*\(/i.test(source)?"Numerical solution (approximate)":
         /^slopefield\s*\(/i.test(source)?"Sampled slope directions":
         /^vectorfield\s*\(/i.test(source)?"Normalized vector directions":
         /^transform\s*\(/i.test(source)?"Linear transformation":
+        /^complexgrid\s*\(/i.test(source)?"Transformed input grid (numerically sampled)":
+        /^(?:segment|circle)\s*\(/i.test(source)?"Geometry construction":
         /^heatmap\s*\(/i.test(source)?"Real heatmap: low = blue, high = red (clamped)":
         /^contours\s*\(/i.test(source)?"Sampled real level curves":
         /^(?:confidenceband|predictionband)\s*\(/i.test(source)?"Pointwise linear-regression band; independent normal, constant-variance errors assumed":
@@ -4168,7 +4195,7 @@ function expandFunctions(source: string, scope = source, rewriteStructured = tru
     );
     expandedSources.set(source, expanded);
   }
-  const namedPoints=/^\s*domaincolor\s*\(/i.test(expanded)?
+  const namedPoints=/^\s*(?:domaincolor|complexgrid)\s*\(/i.test(expanded)?
     Object.fromEntries(Object.entries(pointValues).filter(([name])=>name!=="z")):pointValues;
   expanded = expandNamedPoints(expanded, namedPoints);
   const inferenceDefinitions=expressions.flatMap((expression)=>{
@@ -8262,6 +8289,7 @@ for(const [label,text]of [
   ["0","0"],[".","."],["pi","pi"],["/","/"],["x","x"],["y","y"],
   ["(","("],[")",")"],["^","^()"],["abs()","abs()"],["[","["],["]","]"],
   ["int","int_{0}^{1} x dx"],["sum","sum_{n=1}^{10} n"],["prod","prod_{n=1}^{10} n"],["theta","theta"],["i","i"],["=","="],
+  ["<","<"],["<=","<="],[">",">"],[">=",">="],
   ["Left","left"],["Right","right"],["Backspace","backspace"],["Clear","clear"],[",",","],["{}","{}"],
 ]as const){
   const button=document.createElement("button");button.type="button";button.textContent=label;
@@ -8697,7 +8725,9 @@ function moveDraggablePoint(
   if(point.directSource!==undefined){
     const expression=expressions.find((expression)=>expression.id===point.expressionId);
     if(!expression)throw new Error("The dragged expression no longer exists.");
-    const text=point.vertexIndex===undefined?`(${numericSource(Number(requestedX.toPrecision(12)))},${numericSource(Number(requestedY.toPrecision(12)))})`:
+    const definition=getVariableDefinition(expression);
+    const prefix=definition&&pointSources(definition.source)?`${definition.target}=`:"";
+    const text=point.vertexIndex===undefined?`${prefix}(${numericSource(Number(requestedX.toPrecision(12)))},${numericSource(Number(requestedY.toPrecision(12)))})`:
       replacePolygonVertex(point.directSource,point.vertexIndex,requestedX,requestedY);
     if(text.length>512){setProjectStatus("Dragged coordinates would exceed the 512-character expression limit.");return;}
     expression.text=text;

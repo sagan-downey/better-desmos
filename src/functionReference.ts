@@ -11,6 +11,13 @@ export interface FunctionReferenceCategory {
 }
 
 export const FUNCTION_REFERENCE: FunctionReferenceCategory[] = [
+  {title:"Interactive constructions",entries:[
+    {name:"segment",syntax:"segment(A,B)",description:"Segment joining two named or literal points. Drag named literal points to update dependent constructions."},
+    {name:"circle",syntax:"circle(A,B)",description:"Circle centered at A passing through B. Points must be distinct."},
+    {name:"pointangle",syntax:"pointangle(A,B,C)",description:"Unsigned angle ABC, with B as vertex; uses current angle mode."},
+    {name:"complexgrid",syntax:"complexgrid(z^2,2,1)",description:"Image of an input square grid under a complex function; extent and spacing define input domain, not the output viewport."},
+    {name:"riemann",syntax:"riemann(x^2,0,2,8,midpoint)",description:"Draw 1–100 signed Riemann rectangles and report the sum. Method is left, right, or midpoint."},
+  ]},
   {title:"Real fields & approximations",entries:[
     {name:"heatmap",syntax:"heatmap(x^2+y^2,0,10)",description:"Real-valued sampled color field. Low values blue, high red, clamped to the supplied range."},
     {name:"contours",syntax:"contours(x^2+y^2,1,9,5)",description:"2–20 equally spaced real level curves between low/high values, including endpoints."},

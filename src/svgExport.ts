@@ -1,4 +1,4 @@
-import { lineDash, type LineStyle, type PointStyle } from "./graphAppearance";
+import { dashedSegments, inequalityLineStyle, lineDash, type LineStyle, type PointStyle } from "./graphAppearance";
 import type { GraphExpression } from "./math";
 import { traceContour } from "./regionTrace";
 
@@ -66,10 +66,14 @@ export function graphSVG(graph:GraphExpression,view:SVGView,style:SVGAppearance)
     for(const points of contour.paths){
       if(!style.colorAt){
         parts.push(`<path d="${points.map((p,i)=>`${i?"L":"M"}${p.x} ${p.y}`).join(" ")}" fill="none" stroke="${xml(style.color)}" stroke-width="${stroke}" stroke-dasharray="${dash}"/>`);
-      }else for(let i=1;i<points.length;i++){
-          const a=points[i-1]!,b=points[i]!;
-          segment(a.x,a.y,b.x,b.y,color(wx(b.x),wy(b.y)));
+      }else {
+        const segments=points.slice(1).flatMap((b,i)=>[points[i]!.x,points[i]!.y,b.x,b.y]);
+        const visible=dashedSegments(segments,lineDash(style.lineStyle,stroke));
+        for(let i=0;i<visible.length;i+=4){
+          const [x1,y1,x2,y2]=visible.slice(i,i+4);
+          parts.push(`<path d="M${x1} ${y1}L${x2} ${y2}" fill="none" stroke="${color(wx(x2!),wy(y2!))}" stroke-width="${stroke}"/>`);
         }
+      }
     }
     if(contour.limited)throw new Error("SVG contour branch limit exceeded; use PNG or a smaller viewport.");
   }else if(graph.kind==="plane"||graph.kind==="inequality"){
@@ -88,7 +92,8 @@ export function graphSVG(graph:GraphExpression,view:SVGView,style:SVGAppearance)
       }catch{gaps++;}
     }
     if(graph.kind==="inequality"){
-      const contour=graphSVG({kind:"implicit",evaluate:graph.evaluate},view,{...style,opacity:1});
+      const contour=graphSVG({kind:"implicit",evaluate:graph.evaluate},view,
+        {...style,opacity:1,lineStyle:inequalityLineStyle(graph.relation,style.lineStyle)});
       parts.push(contour.markup);gaps+=contour.gaps;
     }
   }else{

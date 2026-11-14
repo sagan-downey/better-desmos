@@ -1,7 +1,7 @@
 import type { Complex } from "./complex";
 
-export const ADVANCED_GRAPH_NAMES=["domaincolor","mandelbrot","julia","transform","trajectory"];
-export const RESULT_COMMAND_NAMES=["simplify","differentiate","factor","matrix","matmul","inverse","det"];
+export const ADVANCED_GRAPH_NAMES=["domaincolor","mandelbrot","julia","transform","trajectory","segment","circle","complexgrid","riemann"];
+export const RESULT_COMMAND_NAMES=["simplify","differentiate","factor","matrix","matmul","inverse","det","pointangle"];
 
 export function commandArguments(source:string,name:string):string[]|undefined {
   const match=new RegExp(`^\\s*${name}\\s*\\(([\\s\\S]*)\\)\\s*$`,"i").exec(source);
